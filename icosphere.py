@@ -772,7 +772,7 @@ if __name__ == "__main__":
 
     # Add radio buttons for view selection
     rax = plt.axes([0.05, 0.4, 0.15, 0.15])
-    radio = RadioButtons(rax, ('Elevation', 'Temperature', 'Rainfall'))
+    radio = RadioButtons(rax, ('Elevation', 'Temperature', 'Rainfall', 'Pressure'))
 
     def update_view(label):
         vertices, elevations, temperatures, rainfall = world_history[current_step]
@@ -782,6 +782,8 @@ if __name__ == "__main__":
             visualize_world_spherical(vertices, faces, temperatures, ax_3d, 'temperature')
         elif label == 'Rainfall':
             visualize_world_spherical(vertices, faces, rainfall, ax_3d, 'rainfall')
+        elif label == 'Pressure':
+            visualize_world_spherical(vertices, faces, rainfall, ax_3d, 'pressure')
         fig.canvas.draw_idle()
 
     radio.on_clicked(update_view)
