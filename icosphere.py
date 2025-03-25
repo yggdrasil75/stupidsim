@@ -628,12 +628,17 @@ def calculate_rainfall(lat, lon, elevation, temperature, pressure, humidity, ver
         else:  # Leeward side - rain shadow
             orographic_effect = -50
 
-    # Temperature effect (more evaporation when warmer)
+    # Temperature effect (more evaporation when warmer - leading to more moisture in air and potentially rain)
     temp_effect = max(0, temperature - 10)  # More rain above 10°C
+
+    # Simplified Convection Effect - Non-Hydrostatic Consideration
+    convection_effect = 0
+    if temperature > 25 and lat < 60 and lat > -60 and elevation < 2000: # Convection more likely in warmer, lower latitude, lower altitude areas
+        convection_effect = (temperature - 25) * 1.5  # Increase rain with higher temps above 25C
 
     # Combine all effects
     rainfall_val = (base_rain + orographic_effect + temp_effect +
-               water_availability * 50 + humidity_effect)
+               water_availability * 50 + humidity_effect + convection_effect) # ADD convection_effect
     rainfall_val = max(0, min(300, rainfall_val))  # Cap between 0-300mm
 
     #print(f"Vertex {vertex_idx}: Pressure={pressure:.2f}, P_grad={pressure_gradient:.2f}, WindDir={wind_dir}, WaterAvail={water_availability:.2f}, BaseRain={base_rain}, Orographic={orographic_effect:.2f}, TempEff={temp_effect:.2f}, HumidEff={humidity_effect:.2f}, Rainfall={rainfall_val:.2f}") # PRINT STATEMENT
