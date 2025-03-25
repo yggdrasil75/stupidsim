@@ -174,3 +174,4 @@ cython_debug/
 .pypirc
 
 spherical_simulation_save.pkl
+spherical_simulation_save.pkl

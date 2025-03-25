@@ -13,6 +13,9 @@ ORBITAL_DISTANCE_AU = 1.0
 AXIAL_TILT_DEGREES = 23.5
 MIN_PLATE_SPEED_CM_YR = 1.0  # ~1 cm/year (slow moving plates)
 MAX_PLATE_SPEED_CM_YR = 10.0  # ~10 cm/year (fast moving plates)
+SEA_LEVEL_PRESSURE_HPA = 1013.25  # Standard atmospheric pressure at sea level
+GAS_CONSTANT = 287.05  # Specific gas constant for dry air (J/kg·K)
+GRAVITY = 9.81  # m/s²
 
 def generate_icosphere(subdivisions=3, radius=1.0):
     """Generate an icosphere mesh with given number of subdivisions."""
@@ -113,6 +116,10 @@ class Plate:
         self.speed_cm_yr = random.uniform(MIN_PLATE_SPEED_CM_YR, MAX_PLATE_SPEED_CM_YR)
         self.vertices = set()
         self.center_point = None
+        self.temperature = 15  # Average temperature in °C
+        self.pressure = SEA_LEVEL_PRESSURE_HPA  # Average pressure in hPa
+        self.elevation = 0
+        self.water_fraction = 0
 
     def move(self, days_elapsed):
         """Move the plate based on real-world time scaling."""
@@ -126,6 +133,15 @@ class Plate:
         
         # Project back to sphere surface
         self.center_point = self.center_point / np.linalg.norm(self.center_point) * PLANET_RADIUS_KM
+        
+        # Update plate temperature based on movement (with pressure)
+        lat, lon = cartesian_to_lat_lon(*self.center_point)
+        elevation = 0  # Using 0 as plate center elevation for simplicity
+        self.temperature = calculate_temperature(lat, lon, 0, 12, elevation, 0, self.pressure)
+        
+        # Update plate pressure based on temperature (ideal gas law)
+        # Higher temperatures generally lead to lower pressure systems
+        self.pressure = SEA_LEVEL_PRESSURE_HPA * (1 - 0.01 * (self.temperature - 15))
 
 def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5):
     """Generate initial world with spherical mesh and plates."""
@@ -213,13 +229,15 @@ def find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km):
     return final_neighbors
 
 def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment, elevations, days_elapsed=30, max_neighbor_distance_km=1000):
-    """Simulate plate tectonics on spherical mesh."""
+    """Simulate plate tectonics on spherical mesh with pressure and temperature effects."""
     # Move plates
     for plate in plates:
         plate.move(days_elapsed)
 
     # Calculate boundary effects
     boundary_effects = np.zeros_like(elevations)
+    pressure_changes = np.zeros(len(vertices))
+    temperature_changes = np.zeros(len(vertices))
 
     for i, vertex in enumerate(vertices):
         current_plate_id = plate_assignment[i]
@@ -227,6 +245,7 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
             continue
 
         neighbors = find_spherical_neighbors(vertices, faces, i, max_neighbor_distance_km)
+        current_plate = plates[current_plate_id-1]
 
         for neighbor_idx in neighbors:
             neighbor_plate_id = plate_assignment[neighbor_idx]
@@ -235,13 +254,37 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
                 # Simplified boundary interaction
                 current_plate = plates[current_plate_id-1]
                 neighbor_plate = plates[neighbor_plate_id-1]
-
+                
                 # Elevation adjustment based on plate movement
                 boundary_effects[i] += 0.001 * step_size
                 boundary_effects[neighbor_idx] -= 0.001 * step_size
+                
+                # Pressure changes at plate boundaries
+                pressure_diff = current_plate.pressure - neighbor_plate.pressure
+                pressure_changes[i] += pressure_diff * 0.01
+                pressure_changes[neighbor_idx] -= pressure_diff * 0.01
+                
+                # Temperature changes at plate boundaries
+                temp_diff = current_plate.temperature - neighbor_plate.temperature
+                temperature_changes[i] += temp_diff * 0.01
+                temperature_changes[neighbor_idx] -= temp_diff * 0.01
 
     # Apply boundary effects
     elevations += boundary_effects
+    
+    # Apply pressure and temperature changes
+    for plate in plates:
+        plate_vertices = list(plate.vertices)
+        if plate_vertices:
+            avg_pressure_change = np.mean(pressure_changes[plate_vertices])
+            avg_temp_change = np.mean(temperature_changes[plate_vertices])
+            
+            # Update plate properties (dampened changes)
+            plate.pressure += avg_pressure_change * 0.1
+            plate.temperature += avg_temp_change * 0.1
+            
+            # Plate speed affected by temperature (warmer plates move faster)
+            plate.speed_cm_yr *= (1 + 0.01 * (plate.temperature - 15))
 
     # Smooth elevations
     smoothed_elevations = np.zeros_like(elevations)
@@ -277,8 +320,43 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
 
     return vertices, plates, new_plate_assignment, elevations
 
-def calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation):
-    """Calculate solar radiation at a given point considering axial tilt and time."""
+def calculate_pressure(elevation, temperature):
+    """Calculate atmospheric pressure based on elevation and temperature."""
+    # Using barometric formula with temperature consideration
+    # P = P0 * exp(-elevation * g / (R * T))
+    # Where:
+    # P0 = sea level pressure (1013.25 hPa)
+    # elevation in meters
+    # g = gravity (9.81 m/s²)
+    # R = specific gas constant for dry air (287.05 J/kg·K)
+    # T = temperature in Kelvin
+    
+    # Convert elevation to meters and temperature to Kelvin
+    elevation_m = elevation * 1000  # km to m
+    temp_k = temperature + 273.15  # °C to K
+    
+    # Avoid division by zero for negative temperatures
+    if temp_k <= 0:
+        temp_k = 273.15  # Set to 0°C if temperature is below absolute zero
+        
+    pressure = SEA_LEVEL_PRESSURE_HPA * np.exp(-elevation_m * GRAVITY / (GAS_CONSTANT * temp_k))
+    return pressure
+
+def calculate_humidity(pressure, temperature, water_fraction):
+    """Calculate relative humidity based on pressure, temperature and nearby water."""
+    # Simplified humidity calculation
+    # saturation vapor pressure (hPa)
+    es = 6.112 * np.exp((17.67 * temperature) / (temperature + 243.5))
+    
+    # actual vapor pressure (hPa)
+    e = es * water_fraction * (pressure / SEA_LEVEL_PRESSURE_HPA)
+    
+    # relative humidity (%)
+    rh = 100 * (e / es)
+    return np.clip(rh, 0, 100)
+
+def calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation, pressure):
+    """Calculate solar radiation at a given point considering axial tilt, time, and pressure."""
     solar_constant = 1361  # W/m^2
     
     # Calculate declination (seasonal variation due to axial tilt)
@@ -292,12 +370,17 @@ def calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation):
     lat_rad = np.radians(lat)
     
     # Calculate solar zenith angle
-    cos_zenith = (np.sin(lat_rad) * np.sin(declination) + (np.cos(lat_rad) * np.cos(declination) * np.cos(hour_angle)))
-    cos_zenith = np.clip(cos_zenith, 0, 1)  # Only consider daytime
+    cos_zenith = (np.sin(lat_rad) * np.sin(declination) + 
+                 (np.cos(lat_rad) * np.cos(declination) * np.cos(hour_angle)))
     
-    # Atmospheric absorption (simplified)
+    # Only calculate radiation for daytime (cos_zenith > 0)
+    if cos_zenith <= 0:
+        return 0
+    
+    # Atmospheric absorption based on pressure
+    pressure_ratio = pressure / SEA_LEVEL_PRESSURE_HPA
     air_mass = 1.0 / (cos_zenith + 0.50572 * (96.07995 - np.degrees(np.arccos(cos_zenith))) ** -1.6364)
-    atmospheric_transmittance = 0.7 ** air_mass  # 70% transmittance per air mass
+    atmospheric_transmittance = (0.7 * pressure_ratio) ** air_mass
     
     # Elevation effect (thinner atmosphere at higher elevation)
     elevation_factor = 1 + (elevation / 10000)  # 10% increase per km
@@ -306,10 +389,72 @@ def calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation):
     radiation = solar_constant * cos_zenith * atmospheric_transmittance * elevation_factor
     return max(0, radiation)
 
-def calculate_temperature(lat, lon, day_of_year, hour_of_day, elevation, water_fraction=0):
-    """Calculate temperature considering solar radiation, elevation, and water bodies."""
-    # Calculate solar radiation
-    radiation = calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation)
+def calculate_sun_direction(day_of_year, hour_of_day):
+    """Calculate the direction vector to the sun based on time of year and time of day."""
+    # Calculate declination (seasonal variation due to axial tilt)
+    axial_tilt_rad = np.radians(AXIAL_TILT_DEGREES)
+    declination = axial_tilt_rad * np.sin(2 * np.pi * (day_of_year - 80) / 365.25)
+    
+    # Calculate hour angle (time of day)
+    hour_angle = np.radians(hour_of_day * 15)  # 15 degrees per hour
+    
+    # Calculate sun direction vector
+    x = np.cos(declination) * np.cos(hour_angle)
+    y = np.cos(declination) * np.sin(hour_angle)
+    z = np.sin(declination)
+    
+    return np.array([x, y, z])
+
+def calculate_solar_radiation_for_vertex(vertex, sun_direction, elevation, pressure):
+    """Calculate solar radiation for a specific vertex given the sun direction."""
+    solar_constant = 1361  # W/m^2
+    
+    # Normalize vertex position to get surface normal
+    surface_normal = vertex / np.linalg.norm(vertex)
+    
+    # Calculate cosine of angle between surface normal and sun direction
+    cos_zenith = np.dot(surface_normal, sun_direction)
+    
+    # Only calculate radiation for daytime (cos_zenith > 0)
+    if cos_zenith <= 0:
+        return 0
+    
+    # Atmospheric absorption based on pressure
+    pressure_ratio = pressure / SEA_LEVEL_PRESSURE_HPA
+    air_mass = 1.0 / (cos_zenith + 0.50572 * (96.07995 - np.degrees(np.arccos(cos_zenith))) ** -1.6364)
+    atmospheric_transmittance = (0.7 * pressure_ratio) ** air_mass
+    
+    # Elevation effect (thinner atmosphere at higher elevation)
+    elevation_factor = 1 + (elevation / 10000)  # 10% increase per km
+    
+    # Total solar radiation
+    radiation = solar_constant * cos_zenith * atmospheric_transmittance * elevation_factor
+    return max(0, radiation)
+
+def calculate_temperature_from_radiation(radiation, elevation, water_fraction, pressure):
+    """Calculate temperature based on solar radiation and other factors."""
+    # Base temperature from radiation
+    base_temp = (radiation / 200) - 10  # Scale radiation to reasonable temps
+    
+    # Elevation effect (6.5°C per km)
+    elevation_effect = -6.5 * (elevation / 1000)
+    
+    # Water moderating effect (water has higher heat capacity)
+    water_moderation = water_fraction * 5  # Water makes temps more moderate
+    
+    # Pressure effect (low pressure systems are generally cooler)
+    pressure_effect = (pressure - SEA_LEVEL_PRESSURE_HPA) * 0.02
+    
+    # Final temperature
+    temperature = base_temp + elevation_effect + water_moderation + pressure_effect
+    
+    # Never below absolute zero
+    return max(-273, temperature)
+
+def calculate_temperature(lat, lon, day_of_year, hour_of_day, elevation, water_fraction, pressure):
+    """Calculate temperature considering solar radiation, elevation, water bodies, and pressure."""
+    # Calculate solar radiation with pressure effects
+    radiation = calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation, pressure)
     
     # Base temperature from radiation
     base_temp = (radiation / 200) - 10  # Scale radiation to reasonable temps
@@ -320,6 +465,9 @@ def calculate_temperature(lat, lon, day_of_year, hour_of_day, elevation, water_f
     # Water moderating effect (water has higher heat capacity)
     water_moderation = water_fraction * 5  # Water makes temps more moderate
     
+    # Pressure effect (low pressure systems are generally cooler)
+    pressure_effect = (pressure - SEA_LEVEL_PRESSURE_HPA) * 0.02
+    
     # Diurnal variation
     diurnal_variation = 10 * np.sin(np.radians(hour_of_day * 15))  # 15° per hour
     
@@ -327,25 +475,118 @@ def calculate_temperature(lat, lon, day_of_year, hour_of_day, elevation, water_f
     seasonal_variation = 15 * np.sin(2 * np.pi * (day_of_year - 80) / 365.25)
     
     # Final temperature
-    temperature = base_temp + elevation_effect + water_moderation + diurnal_variation + seasonal_variation
+    temperature = (base_temp + elevation_effect + water_moderation + 
+                  pressure_effect + diurnal_variation + seasonal_variation)
     
     # Never below absolute zero
     return max(-273, temperature)
 
-def calculate_wind_patterns(lat, elevation, temperature_gradient):
-    """Calculate prevailing wind direction based on latitude and elevation."""
+def calculate_wind_patterns(lat, elevation, temperature_gradient, pressure_gradient):
+    """Calculate prevailing wind direction based on latitude, elevation, and pressure gradient."""
     # Modified by elevation (mountains disrupt wind patterns)
     if elevation > 2000:
         return random.choice([0,1,2,3])  # Unpredictable in high mountains
-    # Simplified wind patterns:
-    if abs(lat) < 30:  # Trade winds
-        if lat > 0: return 1  # NE trade winds
-        else: return 3  # SE trade winds
-    elif abs(lat) < 60:  # Westerlies
-        return 2  # From west
-    else:  # Polar easterlies
-        return 0  # From east
     
+    # Wind is influenced by both latitude patterns and pressure gradients
+    lat_effect = 0
+    if abs(lat) < 30:  # Trade winds
+        if lat > 0: lat_effect = 1  # NE trade winds
+        else: lat_effect = 3  # SE trade winds
+    elif abs(lat) < 60:  # Westerlies
+        lat_effect = 2  # From west
+    else:  # Polar easterlies
+        lat_effect = 0  # From east
+    
+    # Pressure gradient effect (wind flows from high to low pressure)
+    if pressure_gradient > 1:  # Strong high pressure nearby
+        return lat_effect
+    elif pressure_gradient < -1:  # Strong low pressure nearby
+        return (lat_effect + 2) % 4  # Reverse direction
+    else:
+        return lat_effect
+
+def calculate_erosion(elevation, rainfall, humidity, wind_speed):
+    """Calculate erosion based on rainfall, humidity, and wind."""
+    # Water erosion
+    water_erosion = rainfall * 0.001  # More rain = more erosion
+    
+    # Wind erosion (depends on humidity - drier areas have more wind erosion)
+    wind_erosion = wind_speed * (1 - humidity/100) * 0.005
+    
+    # Total erosion (only applies to land above sea level)
+    if elevation > 0:
+        return water_erosion + wind_erosion
+    return 0
+
+def calculate_rainfall(lat, lon, elevation, temperature, pressure, humidity, vertices, vertex_idx, faces, elevations, max_distance_km=1000): # ADDED faces and elevations
+    """Calculate rainfall based on pressure systems, humidity, and topography."""
+    # Calculate pressure gradient
+    neighbors = find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km) # ADDED faces
+    neighbor_pressures = [calculate_pressure(elevations[n], temperature) for n in neighbors] # ADDED elevations
+    avg_neighbor_pressure = np.mean(neighbor_pressures) if neighbor_pressures else pressure # Handle no neighbors
+    pressure_gradient = pressure - avg_neighbor_pressure
+
+    # Determine wind direction based on pressure gradient
+    wind_dir = calculate_wind_patterns(lat, elevation, 0, pressure_gradient)
+
+    # Calculate water availability (from nearby water bodies)
+    water_availability = 0
+    for n in neighbors:
+        n_elevation = elevations[n] # ADDED elevations
+        if n_elevation < 0:  # Water body
+            n_lat, n_lon = cartesian_to_lat_lon(*vertices[n])
+            dist = haversine_distance(lat, lon, n_lat, n_lon)
+            water_availability += max(0, 1 - dist/500)  # Water influence up to 500km
+
+    # Base precipitation based on pressure system
+    if pressure < SEA_LEVEL_PRESSURE_HPA - 10:  # Low pressure system - more rain
+        base_rain = 150
+    elif pressure > SEA_LEVEL_PRESSURE_HPA + 10:  # High pressure system - less rain
+        base_rain = 20
+    else:  # Normal pressure
+        base_rain = 80
+
+    # Humidity effect
+    humidity_effect = humidity * 1.5  # More humidity = more potential rain
+
+    # Orographic precipitation
+    orographic_effect = 0
+    if elevation > 0:  # Only over land
+        # Find highest point in wind direction
+        max_upwind_elev = 0
+        for n in neighbors:
+            n_lat, n_lon = cartesian_to_lat_lon(*vertices[n])
+            if is_upwind(lat, lon, n_lat, n_lon, wind_dir):
+                max_upwind_elev = max(max_upwind_elev, elevations[n]) # ADDED elevations
+
+        if elevation > max_upwind_elev:  # We're on windward side
+            orographic_effect = min(100, elevation / 20)  # 5mm per 100m
+        else:  # Leeward side - rain shadow
+            orographic_effect = -50
+
+    # Temperature effect (more evaporation when warmer)
+    temp_effect = max(0, temperature - 10)  # More rain above 10°C
+
+    # Combine all effects
+    rainfall_val = (base_rain + orographic_effect + temp_effect +
+               water_availability * 50 + humidity_effect)
+    rainfall_val = max(0, min(300, rainfall_val))  # Cap between 0-300mm
+
+    #print(f"Vertex {vertex_idx}: Pressure={pressure:.2f}, P_grad={pressure_gradient:.2f}, WindDir={wind_dir}, WaterAvail={water_availability:.2f}, BaseRain={base_rain}, Orographic={orographic_effect:.2f}, TempEff={temp_effect:.2f}, HumidEff={humidity_effect:.2f}, Rainfall={rainfall_val:.2f}") # PRINT STATEMENT
+    return rainfall_val
+
+def is_upwind(lat1, lon1, lat2, lon2, wind_dir):
+    """Check if point 2 is upwind of point 1 based on wind direction."""
+    # Simplified check based on wind direction categories
+    if wind_dir == 0:  # East wind
+        return lon2 < lon1
+    elif wind_dir == 1:  # North wind
+        return lat2 > lat1
+    elif wind_dir == 2:  # West wind
+        return lon2 > lon1
+    else:  # South wind
+        return lat2 < lat1
+
 cbar_obj = None  # Global variable to store the colorbar object
 
 def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation'):
@@ -387,6 +628,18 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation'):
         cmap = 'Blues'
         title = 'Rainfall (mm)'
 
+    elif data_type == 'pressure':
+        # Normalize pressure data (950 to 1050 hPa)
+        norm_data = (data - 950) / 100
+        norm_data = np.clip(norm_data, 0, 1)
+
+        # Create face colors
+        face_data = np.mean(norm_data[faces], axis=1)
+        colors = plt.cm.viridis(face_data)
+        cmap = 'viridis'
+        title = 'Pressure (hPa)'
+
+
     # Plot the mesh with face colors
     mesh = ax.plot_trisurf(vertices[:, 0], vertices[:, 1], vertices[:, 2],
                           triangles=faces, color='white',
@@ -407,6 +660,8 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation'):
         cbar_obj.set_label('Temperature (°C)')
     elif data_type == 'rainfall':
         cbar_obj.set_label('Rainfall (mm)')
+    elif data_type == 'pressure':
+        cbar_obj.set_label('Pressure (hPa)') # Set label for pressure
     cbar_obj.cmap = cmap
 
     ax.set_xlabel("X")
@@ -419,99 +674,9 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation'):
     ax.set_zticks([])
     ax.set_title(title)
 
-def save_simulation(filename, vertices, faces, plates, plate_assignment, elevations, sim_params):
-    """Save the simulation state."""
-    with open(filename, 'wb') as f:
-        pickle.dump({
-            'vertices': vertices,
-            'faces': faces,
-            'plates': plates,
-            'plate_assignment': plate_assignment,
-            'elevations': elevations,
-            'sim_params': sim_params
-        }, f)
-    print(f"Simulation saved to '{filename}'")
-
-def load_simulation(filename):
-    """Load a saved simulation."""
-    try:
-        with open(filename, 'rb') as f:
-            saved_state = pickle.load(f)
-            return (
-                saved_state['vertices'],
-                saved_state['faces'],
-                saved_state['plates'],
-                saved_state['plate_assignment'],
-                saved_state['elevations'],
-                saved_state['sim_params']
-            )
-    except FileNotFoundError:
-        print(f"Save file '{filename}' not found. Starting a new simulation.")
-        return None
-    
-def calculate_rainfall(lat, lon, elevation, temperature, vertices, vertex_idx, max_distance_km=1000):
-    """Calculate rainfall based on wind patterns, elevation, and nearby water."""
-    # Determine wind direction
-    wind_dir = calculate_wind_patterns(lat, elevation, 0)
-    
-    # Find upwind and downwind areas
-    neighbors = find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km)
-    
-    # Calculate water availability (from nearby water bodies)
-    water_availability = 0
-    for n in neighbors:
-        n_elevation = elevations[n]
-        if n_elevation < 0:  # Water body
-            dist = haversine_distance(lat, lon, *cartesian_to_lat_lon(*vertices[n]))
-            water_availability += max(0, 1 - dist/500)  # Water influence up to 500km
-    
-    # Base precipitation based on latitude
-    if abs(lat) < 10:  # ITCZ - lots of rain
-        base_rain = 150
-    elif abs(lat) < 30:  # Subtropics - dry
-        base_rain = 20
-    elif abs(lat) < 60:  # Temperate - moderate rain
-        base_rain = 80
-    else:  # Polar - dry
-        base_rain = 10
-    
-    # Orographic precipitation
-    orographic_effect = 0
-    if elevation > 0:  # Only over land
-        # Find highest point in wind direction
-        max_upwind_elev = 0
-        for n in neighbors:
-            n_lat, n_lon = cartesian_to_lat_lon(*vertices[n])
-            if is_upwind(lat, lon, n_lat, n_lon, wind_dir):
-                max_upwind_elev = max(max_upwind_elev, elevations[n])
-        
-        if elevation > max_upwind_elev:  # We're on windward side
-            orographic_effect = min(100, elevation / 20)  # 5mm per 100m
-        else:  # Leeward side - rain shadow
-            orographic_effect = -50
-    
-    # Temperature effect (more evaporation when warmer)
-    temp_effect = max(0, temperature - 10)  # More rain above 10°C
-    
-    # Combine all effects
-    rainfall = base_rain + orographic_effect + temp_effect + water_availability * 50
-    return max(0, min(300, rainfall))  # Cap between 0-300mm
-
-def is_upwind(lat1, lon1, lat2, lon2, wind_dir):
-    """Check if point 2 is upwind of point 1 based on wind direction."""
-    # Simplified check based on wind direction categories
-    if wind_dir == 0:  # East wind
-        return lon2 < lon1
-    elif wind_dir == 1:  # North wind
-        return lat2 > lat1
-    elif wind_dir == 2:  # West wind
-        return lon2 > lon1
-    else:  # South wind
-        return lat2 < lat1
-
 if __name__ == "__main__":
     # Simulation parameters
-    subdivisions = 5  # Controls mesh resolution (higher = more detailed)
+    subdivisions = 3  # Controls mesh resolution (higher = more detailed)
     radius = PLANET_RADIUS_KM
     num_plates = 15 # Increased number of plates for more fragmentation
     num_steps = 12
@@ -520,6 +685,7 @@ if __name__ == "__main__":
     days_per_step = 30  # Each step represents a month
     current_day = 0
     current_hour = 12  # Noon
+    pressures = 0
 
     sim_params = {
         'subdivisions': subdivisions,
@@ -530,29 +696,11 @@ if __name__ == "__main__":
         'max_neighbor_distance_km': max_neighbor_distance_km
     }
 
-    save_file = "spherical_simulation_save.pkl"
 
-    if len(sys.argv) > 1:
-        load_file = sys.argv[1]
-        loaded_data = load_simulation(load_file)
-        if loaded_data:
-            vertices, faces, plates, plate_assignment, elevations, loaded_params = loaded_data
-            subdivisions = loaded_params['subdivisions']
-            radius = loaded_params['radius']
-            num_plates = loaded_params['num_plates']
-            step_size = loaded_params['step_size']
-            max_neighbor_distance_km = loaded_params['max_neighbor_distance_km']
-            print(f"Simulation loaded from '{load_file}'.")
-        else:
-            vertices, faces, plates, plate_assignment, elevations = generate_initial_world_spherical(
-                subdivisions, radius, num_plates
-            )
-            print("Starting a new simulation.")
-    else:
-        vertices, faces, plates, plate_assignment, elevations = generate_initial_world_spherical(
-            subdivisions, radius, num_plates
-        )
-        print("Starting a new simulation.")
+    vertices, faces, plates, plate_assignment, elevations = generate_initial_world_spherical(
+        subdivisions, radius, num_plates
+    )
+    print("Starting a new simulation.")
 
     # Run simulation
     world_history = []
@@ -573,17 +721,42 @@ if __name__ == "__main__":
         water_fraction = np.where(elevations < 0, 1.0, 0.0)
         
         # Calculate climate variables
+        sun_direction = calculate_sun_direction(current_day, current_hour)
         temperatures = np.zeros(len(vertices))
         rainfall = np.zeros(len(vertices))
+        humidity_values = np.zeros(len(vertices))
         
         for i, vertex in enumerate(vertices):
             lat, lon = cartesian_to_lat_lon(*vertex)
-            temperatures[i] = calculate_temperature(lat, lon, current_day, current_hour, 
-                                                elevations[i], water_fraction[i])
-            rainfall[i] = calculate_rainfall(lat, lon, elevations[i], temperatures[i], 
-                                        vertices, i)
 
-        world_history.append((vertices.copy(), elevations.copy(), 
+            # Get plate properties
+            plate_id = plate_assignment[i]
+            if plate_id > 0:
+                plate = plates[plate_id-1]
+                plate_pressure = plate.pressure
+                plate_temp = plate.temperature
+            else:
+                plate_pressure = SEA_LEVEL_PRESSURE_HPA
+                plate_temp = 15
+
+            # Calculate local pressure
+            pressures = calculate_pressure(elevations[i], plate_temp)
+
+            # Calculate solar radiation with consistent sun direction
+            radiation = calculate_solar_radiation_for_vertex(vertex, sun_direction, 
+                                                        elevations[i], pressures)
+
+            # Calculate temperature with radiation
+            temperatures[i] = calculate_temperature_from_radiation(radiation, elevations[i], 
+                                                                water_fraction[i], pressures)
+
+            # Calculate humidity
+            humidity_values[i] = calculate_humidity(pressures, temperatures[i], water_fraction[i]) # Calculate humidity
+
+            # Calculate rainfall - PASS FACES and elevations
+            rainfall[i] = calculate_rainfall(lat, lon, elevations[i], temperatures[i], pressures, humidity_values[i], vertices, i, faces, elevations) # Pass faces and elevations
+
+        world_history.append((vertices.copy(), elevations.copy(),
                             temperatures.copy(), rainfall.copy()))
     
     print("Simulation complete. Preparing interactive visualization...")
@@ -633,7 +806,3 @@ if __name__ == "__main__":
     step_slider.on_changed(update_step)
 
     plt.show()
-
-    # Save the final state
-    save_simulation(save_file, vertices, faces, plates, plate_assignment, elevations, sim_params)
-    print(f"Simulation automatically saved to '{save_file}'.")
