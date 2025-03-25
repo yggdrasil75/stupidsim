@@ -3,7 +3,7 @@ import random
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.ndimage import gaussian_filter
-from matplotlib.widgets import Slider
+from matplotlib.widgets import RadioButtons, Slider
 import pickle
 import sys
 import math
@@ -289,25 +289,64 @@ def calculate_temperature(lat, day_of_year, elevation=0):
     temperature = sea_level_temp + (radiation / 1361 * 30) - (elevation / 1000) * temp_drop_per_km
     return temperature
 
-def visualize_world_spherical(vertices, faces, elevations, ax):
+def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation'):
     ax.clear()
-
-    # Normalize elevations for coloring (using percentile to handle outliers)
-    vmin = np.percentile(elevations, 5)
-    vmax = np.percentile(elevations, 95)
-    norm_elevations = (elevations - vmin) / (vmax - vmin)
-    norm_elevations = np.clip(norm_elevations, 0, 1)
     
-    # Create face colors based on vertex elevations
-    face_elevations = np.mean(norm_elevations[faces], axis=1)
-    colors = plt.cm.terrain(face_elevations)
-
+    # Remove old colorbar if it exists
+    if hasattr(ax, 'current_cbar'):
+        ax.current_cbar.remove()
+        
+    if data_type == 'elevation':
+        # Normalize elevations for coloring (using percentile to handle outliers)
+        vmin = np.percentile(data, 5)
+        vmax = np.percentile(data, 95)
+        norm_data = (data - vmin) / (vmax - vmin)
+        norm_data = np.clip(norm_data, 0, 1)
+        
+        # Create face colors based on vertex elevations
+        face_data = np.mean(norm_data[faces], axis=1)
+        colors = plt.cm.terrain(face_data)
+        cmap = 'terrain'
+        title = 'Elevation'
+        
+    elif data_type == 'temperature':
+        # Normalize temperature data (-20 to 40°C)
+        norm_data = (data + 20) / 60  # Scale -20°C to 40°C to 0-1
+        norm_data = np.clip(norm_data, 0, 1)
+        
+        # Create face colors
+        face_data = np.mean(norm_data[faces], axis=1)
+        colors = plt.cm.coolwarm(face_data)
+        cmap = 'coolwarm'
+        title = 'Temperature (°C)'
+        
+    elif data_type == 'rainfall':
+        # Normalize rainfall data (0 to 200mm)
+        norm_data = data / 200
+        norm_data = np.clip(norm_data, 0, 1)
+        
+        # Create face colors
+        face_data = np.mean(norm_data[faces], axis=1)
+        colors = plt.cm.Blues(face_data)
+        cmap = 'Blues'
+        title = 'Rainfall (mm)'
+    
     # Plot the mesh with face colors
     mesh = ax.plot_trisurf(vertices[:, 0], vertices[:, 1], vertices[:, 2],
                           triangles=faces, color='white',
                           edgecolor='none', alpha=1.0)
-    mesh.set_array(face_elevations)
-    mesh.set_cmap('terrain')
+    mesh.set_array(face_data)
+    mesh.set_cmap(cmap)
+    
+    # Add colorbar
+    cbar = plt.colorbar(mesh, ax=ax, shrink=0.5)
+    if data_type == 'elevation':
+        cbar.set_label('Elevation (m)')
+    elif data_type == 'temperature':
+        cbar.set_label('Temperature (°C)')
+    elif data_type == 'rainfall':
+        cbar.set_label('Rainfall (mm)')
+    ax.current_cbar = cbar
 
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
@@ -317,6 +356,7 @@ def visualize_world_spherical(vertices, faces, elevations, ax):
     ax.set_xticks([])
     ax.set_yticks([])
     ax.set_zticks([])
+    ax.set_title(title)
 
 def save_simulation(filename, vertices, faces, plates, plate_assignment, elevations, sim_params):
     """Save the simulation state."""
@@ -347,6 +387,30 @@ def load_simulation(filename):
     except FileNotFoundError:
         print(f"Save file '{filename}' not found. Starting a new simulation.")
         return None
+
+
+def calculate_rainfall(lat, elevation, temperature, vertices, vertex_idx, max_distance_km=1000):
+    """Calculate rainfall based on latitude, elevation, temperature and nearby water."""
+    # Base rainfall based on latitude (more near equator)
+    base_rainfall = max(0, 1 - abs(lat) / 45) * 100  # More rain near equator
+    
+    # Elevation effect (orographic precipitation)
+    elevation_effect = max(0, min(1, (elevation / 2000))) * 50  # More rain up to 2000m
+    
+    # Temperature effect (more evaporation when warmer)
+    temp_effect = max(0, temperature / 30 * 50)
+    
+    # Find nearby water sources
+    water_effect = 0
+    neighbors = find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km)
+    for n in neighbors:
+        n_elevation = elevations[n]
+        if n_elevation < 0:  # Water
+            dist = haversine_distance(lat, lon, *cartesian_to_lat_lon(*vertices[n]))
+            water_effect += max(0, 50 - dist / 20)  # Diminishing effect with distance
+    
+    total_rainfall = base_rainfall + elevation_effect + temp_effect + water_effect
+    return max(0, min(200, total_rainfall))  # Cap at 200mm
 
 if __name__ == "__main__":
     # Simulation parameters
@@ -398,20 +462,47 @@ if __name__ == "__main__":
             vertices, faces, plates, plate_assignment, elevations,
             step_size, max_neighbor_distance_km
         )
-        world_history.append((vertices.copy(), elevations.copy()))
+        
+        # Calculate temperature and rainfall for each vertex
+        temperatures = np.zeros(len(vertices))
+        rainfall = np.zeros(len(vertices))
+        day_of_year = 180  # Mid-year for temperature calculation
+        
+        for i, vertex in enumerate(vertices):
+            lat, lon = cartesian_to_lat_lon(*vertex)
+            temperatures[i] = calculate_temperature(lat, day_of_year, elevations[i])
+            rainfall[i] = calculate_rainfall(lat, elevations[i], temperatures[i], vertices, i)
+        
+        world_history.append((vertices.copy(), elevations.copy(), temperatures.copy(), rainfall.copy()))
 
     print("Simulation complete. Preparing interactive visualization...")
 
     # Set up visualization
-    fig = plt.figure(figsize=(10, 8))
+    fig = plt.figure(figsize=(12, 10))
     ax_3d = fig.add_subplot(111, projection='3d')
-    plt.subplots_adjust(bottom=0.25)
+    plt.subplots_adjust(bottom=0.25, left=0.3)
 
     current_step = 0
-    vertices, elevations = world_history[current_step]
-    visualize_world_spherical(vertices, faces, elevations, ax_3d)
-    ax_3d.set_title(f'World Evolution - Step {current_step + 1}')
+    vertices, elevations, temperatures, rainfall = world_history[current_step]
+    visualize_world_spherical(vertices, faces, elevations, ax_3d, 'elevation')
+    
+    # Add radio buttons for view selection
+    rax = plt.axes([0.05, 0.4, 0.15, 0.15])
+    radio = RadioButtons(rax, ('Elevation', 'Temperature', 'Rainfall'))
+    
+    def update_view(label):
+        vertices, elevations, temperatures, rainfall = world_history[current_step]
+        if label == 'Elevation':
+            visualize_world_spherical(vertices, faces, elevations, ax_3d, 'elevation')
+        elif label == 'Temperature':
+            visualize_world_spherical(vertices, faces, temperatures, ax_3d, 'temperature')
+        elif label == 'Rainfall':
+            visualize_world_spherical(vertices, faces, rainfall, ax_3d, 'rainfall')
+        fig.canvas.draw_idle()
+    
+    radio.on_clicked(update_view)
 
+    # Add step slider
     ax_slider = plt.axes([0.25, 0.1, 0.5, 0.03])
     step_slider = Slider(
         ax=ax_slider,
@@ -422,16 +513,16 @@ if __name__ == "__main__":
         valstep=1
     )
 
-    def update(val):
-        step = int(step_slider.val)
-        vertices, elevations = world_history[step]
-        visualize_world_spherical(vertices, faces, elevations, ax_3d)
-        ax_3d.set_title(f'World Evolution - Step {step + 1}')
-        fig.canvas.draw_idle()
-
-    step_slider.on_changed(update)
+    def update_step(val):
+        global current_step
+        current_step = int(step_slider.val)
+        label = radio.value_selected
+        update_view(label)
+    
+    step_slider.on_changed(update_step)
 
     plt.show()
 
+    # Save the final state
     save_simulation(save_file, vertices, faces, plates, plate_assignment, elevations, sim_params)
     print(f"Simulation automatically saved to '{save_file}'.")
