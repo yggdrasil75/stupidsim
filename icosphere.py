@@ -122,21 +122,33 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
     """Generate initial world with spherical mesh and plates."""
     vertices, faces = generate_icosphere(subdivisions, radius)
 
-    # Add random elevation to vertices
-    elevations = np.random.uniform(-10, 10, size=len(vertices))
-    vertices = vertices * (1 + elevations[:, np.newaxis] / radius)
+    # Add random elevation to vertices using spherical harmonics for more natural distribution
+    elevations = np.zeros(len(vertices))
+    for i, vertex in enumerate(vertices):
+        # Convert to spherical coordinates
+        lat, lon = cartesian_to_lat_lon(*vertex)
+        
+        # Create more interesting initial elevations using noise
+        noise = (np.sin(lon * 2) * np.cos(lat * 3) + 
+                 np.sin(lon * 5) * np.cos(lat * 2)) * 5
+        elevations[i] = noise + np.random.uniform(-2, 2)
+
+    # Scale vertices with elevations
+    vertices = vertices / np.linalg.norm(vertices, axis=1)[:, np.newaxis] * (radius + elevations[:, np.newaxis])
 
     # Create plates
     plates = []
-    plate_assignment = np.zeros(len(vertices), dtype=int)  # Which plate each vertex belongs to
+    plate_assignment = np.zeros(len(vertices), dtype=int)
 
-    # Generate random plate center locations on the sphere
+    # Generate random plate center locations on the sphere using Fibonacci sphere algorithm
     plate_centers = []
-    for _ in range(num_plates):
-        # Generate random direction
-        random_direction = np.random.randn(3)
-        random_direction = random_direction / np.linalg.norm(random_direction)
-        plate_centers.append(random_direction * radius)
+    for i in range(num_plates):
+        y = 1 - (i / float(num_plates - 1)) * 2  # y goes from 1 to -1
+        radius = math.sqrt(1 - y * y)  # radius at y
+        theta = math.pi * (3 - math.sqrt(5)) * i  # golden angle increment
+        x = math.cos(theta) * radius
+        z = math.sin(theta) * radius
+        plate_centers.append(np.array([x, y, z]) * PLANET_RADIUS_KM)
 
     for i in range(num_plates):
         # Random movement vector (tangent to sphere)
@@ -145,13 +157,12 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
         tangent = tangent / np.linalg.norm(tangent)
         movement_vector = tangent * random.uniform(0.01, 0.1)
 
-        plate = Plate(i + 1, -1, movement_vector) # center_vertex is not relevant anymore
+        plate = Plate(i + 1, -1, movement_vector)
         plate.center_point = center_point.copy()
         plates.append(plate)
 
     # Assign vertices to nearest plate center
     for i, vertex in enumerate(vertices):
-        # Find closest plate center
         min_dist = float('inf')
         closest_plate = None
 
@@ -281,14 +292,22 @@ def calculate_temperature(lat, day_of_year, elevation=0):
 def visualize_world_spherical(vertices, faces, elevations, ax):
     ax.clear()
 
-    # Normalize elevations for coloring
-    norm_elevations = (elevations - elevations.min()) / (elevations.max() - elevations.min())
-    colors = plt.cm.terrain(norm_elevations)
+    # Normalize elevations for coloring (using percentile to handle outliers)
+    vmin = np.percentile(elevations, 5)
+    vmax = np.percentile(elevations, 95)
+    norm_elevations = (elevations - vmin) / (vmax - vmin)
+    norm_elevations = np.clip(norm_elevations, 0, 1)
+    
+    # Create face colors based on vertex elevations
+    face_elevations = np.mean(norm_elevations[faces], axis=1)
+    colors = plt.cm.terrain(face_elevations)
 
-    # Plot the mesh
-    ax.plot_trisurf(vertices[:, 0], vertices[:, 1], vertices[:, 2],
-                    triangles=faces, cmap='terrain',
-                    edgecolor='none', alpha=1.0)
+    # Plot the mesh with face colors
+    mesh = ax.plot_trisurf(vertices[:, 0], vertices[:, 1], vertices[:, 2],
+                          triangles=faces, color='white',
+                          edgecolor='none', alpha=1.0)
+    mesh.set_array(face_elevations)
+    mesh.set_cmap('terrain')
 
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
@@ -334,7 +353,7 @@ if __name__ == "__main__":
     subdivisions = 3  # Controls mesh resolution (higher = more detailed)
     radius = PLANET_RADIUS_KM
     num_plates = 15 # Increased number of plates for more fragmentation
-    num_steps = 5
+    num_steps = 50
     step_size = 1
     max_neighbor_distance_km = 1000  # Distance for plate boundary interactions
 
