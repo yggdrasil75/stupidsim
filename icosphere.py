@@ -1,12 +1,9 @@
-from typing import Any
 import numpy as np
 import random
 import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
 from scipy.ndimage import gaussian_filter
 from matplotlib.widgets import RadioButtons, Slider
-import pickle, sys, math
-from scipy.spatial import Delaunay
+import math
 
 PLANET_RADIUS_KM = 6371.0
 ORBITAL_DISTANCE_AU = 1.0
@@ -16,6 +13,14 @@ MAX_PLATE_SPEED_CM_YR = 10.0  # ~10 cm/year (fast moving plates)
 SEA_LEVEL_PRESSURE_HPA = 1013.25  # Standard atmospheric pressure at sea level
 GAS_CONSTANT = 287.05  # Specific gas constant for dry air (J/kg·K)
 GRAVITY = 9.81  # m/s²
+cbar_obj = None  # Global variable to store the colorbar object
+# Atmospheric layers (altitude in km, temperature gradient in °C/km)
+ATMOSPHERIC_LAYERS = [
+    {"name": "Troposphere", "altitude_range": (0, 12), "temp_gradient": -6.5},
+    {"name": "Stratosphere", "altitude_range": (12, 50), "temp_gradient": 0.1},
+    {"name": "Mesosphere", "altitude_range": (50, 80), "temp_gradient": -2.8},
+    {"name": "Thermosphere", "altitude_range": (80, 700), "temp_gradient": 0.0}
+]
 
 def generate_icosphere(subdivisions=3, radius=1.0):
     """Generate an icosphere mesh with given number of subdivisions."""
@@ -143,12 +148,13 @@ class Plate:
         # Higher temperatures generally lead to lower pressure systems
         self.pressure = SEA_LEVEL_PRESSURE_HPA * (1 - 0.01 * (self.temperature - 15))
 
-def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5):
+def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5, surface_pressures=0):
     """Generate initial world with spherical mesh and plates."""
     vertices, faces = generate_icosphere(subdivisions, radius)
 
     # Add random elevation to vertices using spherical harmonics for more natural distribution
     elevations = np.zeros(len(vertices))
+    surface_pressures = np.zeros(len(vertices))
     for i, vertex in enumerate(vertices):
         # Convert to spherical coordinates
         lat, lon = cartesian_to_lat_lon(*vertex)
@@ -157,6 +163,7 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
         noise = (np.sin(lon * 2) * np.cos(lat * 3) + 
                  np.sin(lon * 5) * np.cos(lat * 2)) * 5
         elevations[i] = noise + np.random.uniform(-2, 2)
+        surface_pressures[i] = noise + np.random.uniform(0,1)
 
     # Scale vertices with elevations
     vertices = vertices / np.linalg.norm(vertices, axis=1)[:, np.newaxis] * (radius + elevations[:, np.newaxis])
@@ -201,7 +208,7 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
             plate_assignment[i] = closest_plate.plate_id
             closest_plate.vertices.add(i)
 
-    return vertices, faces, plates, plate_assignment, elevations
+    return vertices, faces, plates, plate_assignment, elevations, surface_pressures
 
 def find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km):
     """Find neighbors within a certain distance on the sphere."""
@@ -342,6 +349,42 @@ def calculate_pressure(elevation, temperature):
     pressure = SEA_LEVEL_PRESSURE_HPA * np.exp(-elevation_m * GRAVITY / (GAS_CONSTANT * temp_k))
     return pressure
 
+def calculate_pressure_with_layers(elevation_km, surface_temp):
+    """Calculate pressure considering atmospheric layers."""
+    current_pressure = SEA_LEVEL_PRESSURE_HPA
+    current_temp = surface_temp + 273.15  # Convert to Kelvin
+    remaining_altitude = max(0, -elevation_km)  # Convert elevation to altitude (positive up)
+    
+    for layer in ATMOSPHERIC_LAYERS:
+        layer_bottom, layer_top = layer["altitude_range"]
+        gradient = layer["temp_gradient"]
+        
+        # Calculate how much of this layer we need to process
+        layer_thickness = min(layer_top, remaining_altitude + layer_bottom) - layer_bottom
+        if layer_thickness <= 0:
+            continue
+            
+        # Calculate temperature at top of this segment
+        temp_change = gradient * layer_thickness
+        temp_top = current_temp + temp_change
+        
+        # Calculate pressure through this layer segment
+        if gradient == 0:
+            # Isothermal layer
+            current_pressure *= np.exp(-GRAVITY * layer_thickness * 1000 / 
+                                     (GAS_CONSTANT * current_temp))
+        else:
+            # Non-isothermal layer
+            current_pressure *= (temp_top / current_temp) ** (-GRAVITY / (gradient * 1000 * GAS_CONSTANT))
+        
+        current_temp = temp_top
+        remaining_altitude -= layer_thickness
+        
+        if remaining_altitude <= 0:
+            break
+    
+    return current_pressure
+
 def calculate_humidity(pressure, temperature, water_fraction):
     """Calculate relative humidity based on pressure, temperature and nearby water."""
     # Simplified humidity calculation
@@ -405,30 +448,29 @@ def calculate_sun_direction(day_of_year, hour_of_day):
     
     return np.array([x, y, z])
 
-def calculate_solar_radiation_for_vertex(vertex, sun_direction, elevation, pressure):
-    """Calculate solar radiation for a specific vertex given the sun direction."""
+def calculate_solar_radiation_for_vertex(vertex, sun_direction, elevation, surface_pressure):
+    """Calculate solar radiation considering atmospheric layers."""
     solar_constant = 1361  # W/m^2
     
-    # Normalize vertex position to get surface normal
-    surface_normal = vertex / np.linalg.norm(vertex)
+    # Calculate atmospheric thickness based on elevation
+    atmospheric_thickness = max(0, -elevation)  # Convert elevation to altitude
     
-    # Calculate cosine of angle between surface normal and sun direction
+    # Calculate effective pressure (weighted average through atmosphere)
+    # This is a simplified approach - more accurate would be to integrate through layers
+    effective_pressure = surface_pressure * np.exp(-atmospheric_thickness / 8.5)  # Scale height approx
+    
+    # Rest of the calculation remains similar but uses effective_pressure
+    surface_normal = vertex / np.linalg.norm(vertex)
     cos_zenith = np.dot(surface_normal, sun_direction)
     
-    # Only calculate radiation for daytime (cos_zenith > 0)
     if cos_zenith <= 0:
         return 0
     
-    # Atmospheric absorption based on pressure
-    pressure_ratio = pressure / SEA_LEVEL_PRESSURE_HPA
+    pressure_ratio = effective_pressure / SEA_LEVEL_PRESSURE_HPA
     air_mass = 1.0 / (cos_zenith + 0.50572 * (96.07995 - np.degrees(np.arccos(cos_zenith))) ** -1.6364)
     atmospheric_transmittance = (0.7 * pressure_ratio) ** air_mass
     
-    # Elevation effect (thinner atmosphere at higher elevation)
-    elevation_factor = 1 + (elevation / 10000)  # 10% increase per km
-    
-    # Total solar radiation
-    radiation = solar_constant * cos_zenith * atmospheric_transmittance * elevation_factor
+    radiation = solar_constant * cos_zenith * atmospheric_transmittance
     return max(0, radiation)
 
 def calculate_temperature_from_radiation(radiation, elevation, water_fraction, pressure):
@@ -480,6 +522,27 @@ def calculate_temperature(lat, lon, day_of_year, hour_of_day, elevation, water_f
     
     # Never below absolute zero
     return max(-273, temperature)
+
+def calculate_temperature_with_altitude(surface_temp, elevation_km):
+    """Calculate temperature at given altitude considering atmospheric layers."""
+    current_temp = surface_temp
+    altitude_km = max(0, -elevation_km)  # Convert elevation to altitude
+    
+    for layer in ATMOSPHERIC_LAYERS:
+        layer_bottom, layer_top = layer["altitude_range"]
+        gradient = layer["temp_gradient"]
+        
+        if altitude_km <= layer_bottom:
+            continue
+            
+        # Calculate temperature through this layer
+        thickness = min(layer_top, altitude_km) - layer_bottom
+        current_temp += gradient * thickness
+        
+        if altitude_km <= layer_top:
+            break
+    
+    return current_temp
 
 def calculate_wind_patterns(lat, elevation, temperature_gradient, pressure_gradient):
     """Calculate prevailing wind direction based on latitude, elevation, and pressure gradient."""
@@ -587,8 +650,6 @@ def is_upwind(lat1, lon1, lat2, lon2, wind_dir):
     else:  # South wind
         return lat2 < lat1
 
-cbar_obj = None  # Global variable to store the colorbar object
-
 def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation'):
     global cbar_obj
     ax.clear()
@@ -629,15 +690,18 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation'):
         title = 'Rainfall (mm)'
 
     elif data_type == 'pressure':
-        # Normalize pressure data (950 to 1050 hPa)
-        norm_data = (data - 950) / 100
+        # Normalize pressure data (950 to 1050 hPa) at surface level
+        # For underwater points, we'll show the pressure at sea level
+        surface_pressures = np.array([calculate_pressure_with_layers(min(0, e), 15) 
+                                  for e in elevations])
+        norm_data = (surface_pressures - 950) / 100
         norm_data = np.clip(norm_data, 0, 1)
 
         # Create face colors
         face_data = np.mean(norm_data[faces], axis=1)
         colors = plt.cm.viridis(face_data)
         cmap = 'viridis'
-        title = 'Pressure (hPa)'
+        title = 'Surface Pressure (hPa)'
 
 
     # Plot the mesh with face colors
@@ -680,12 +744,13 @@ if __name__ == "__main__":
     radius = PLANET_RADIUS_KM
     num_plates = 15 # Increased number of plates for more fragmentation
     num_steps = 12
-    step_size = 1
+    step_size = 0.03
     max_neighbor_distance_km = 1000  # Distance for plate boundary interactions
     days_per_step = 30  # Each step represents a month
     current_day = 0
     current_hour = 12  # Noon
     pressures = 0
+    surface_pressures = []
 
     sim_params = {
         'subdivisions': subdivisions,
@@ -697,8 +762,8 @@ if __name__ == "__main__":
     }
 
 
-    vertices, faces, plates, plate_assignment, elevations = generate_initial_world_spherical(
-        subdivisions, radius, num_plates
+    vertices, faces, plates, plate_assignment, elevations, surface_pressures = generate_initial_world_spherical(
+        subdivisions, radius, num_plates, surface_pressures
     )
     print("Starting a new simulation.")
 
@@ -726,38 +791,40 @@ if __name__ == "__main__":
         rainfall = np.zeros(len(vertices))
         humidity_values = np.zeros(len(vertices))
         
+        # In the main simulation loop:
         for i, vertex in enumerate(vertices):
             lat, lon = cartesian_to_lat_lon(*vertex)
-
+            
             # Get plate properties
             plate_id = plate_assignment[i]
             if plate_id > 0:
                 plate = plates[plate_id-1]
-                plate_pressure = plate.pressure
                 plate_temp = plate.temperature
             else:
-                plate_pressure = SEA_LEVEL_PRESSURE_HPA
                 plate_temp = 15
 
-            # Calculate local pressure
-            pressures = calculate_pressure(elevations[i], plate_temp)
-
-            # Calculate solar radiation with consistent sun direction
-            radiation = calculate_solar_radiation_for_vertex(vertex, sun_direction, 
-                                                        elevations[i], pressures)
-
-            # Calculate temperature with radiation
-            temperatures[i] = calculate_temperature_from_radiation(radiation, elevations[i], 
-                                                                water_fraction[i], pressures)
-
-            # Calculate humidity
-            humidity_values[i] = calculate_humidity(pressures, temperatures[i], water_fraction[i]) # Calculate humidity
-
-            # Calculate rainfall - PASS FACES and elevations
-            rainfall[i] = calculate_rainfall(lat, lon, elevations[i], temperatures[i], pressures, humidity_values[i], vertices, i, faces, elevations) # Pass faces and elevations
+            # Calculate surface pressure considering atmospheric layers
+            surface_pressures[i] = calculate_pressure_with_layers(elevations[i], plate_temp)
+            
+            # Calculate temperature at surface considering atmospheric layers
+            temperatures[i] = calculate_temperature_with_altitude(
+                calculate_temperature_from_radiation(
+                    calculate_solar_radiation_for_vertex(vertex, sun_direction, 
+                                                    elevations[i], surface_pressures[i]),
+                    elevations[i], water_fraction[i], surface_pressures[i]),
+                elevations[i]
+            )
+            
+            # Calculate humidity using surface conditions
+            humidity_values[i] = calculate_humidity(surface_pressures[i], temperatures[i], water_fraction[i])
+            
+            # Rainfall calculation remains similar but uses the layered pressure
+            rainfall[i] = calculate_rainfall(lat, lon, elevations[i], temperatures[i], 
+                                        surface_pressures[i], humidity_values[i], 
+                                        vertices, i, faces, elevations)
 
         world_history.append((vertices.copy(), elevations.copy(),
-                            temperatures.copy(), rainfall.copy()))
+                            temperatures.copy(), rainfall.copy(), surface_pressures.copy()))
     
     print("Simulation complete. Preparing interactive visualization...")
 
@@ -767,7 +834,7 @@ if __name__ == "__main__":
     plt.subplots_adjust(bottom=0.25, left=0.3)
 
     current_step = 0
-    vertices, elevations, temperatures, rainfall = world_history[current_step]
+    vertices, elevations, temperatures, rainfall, surface_pressures = world_history[current_step]
     visualize_world_spherical(vertices, faces, elevations, ax_3d, 'elevation') # Initial call to create colorbar
 
     # Add radio buttons for view selection
@@ -775,7 +842,7 @@ if __name__ == "__main__":
     radio = RadioButtons(rax, ('Elevation', 'Temperature', 'Rainfall', 'Pressure'))
 
     def update_view(label):
-        vertices, elevations, temperatures, rainfall = world_history[current_step]
+        vertices, elevations, temperatures, rainfall, surface_pressures = world_history[current_step]
         if label == 'Elevation':
             visualize_world_spherical(vertices, faces, elevations, ax_3d, 'elevation')
         elif label == 'Temperature':
@@ -783,7 +850,7 @@ if __name__ == "__main__":
         elif label == 'Rainfall':
             visualize_world_spherical(vertices, faces, rainfall, ax_3d, 'rainfall')
         elif label == 'Pressure':
-            visualize_world_spherical(vertices, faces, rainfall, ax_3d, 'pressure')
+            visualize_world_spherical(vertices, faces, surface_pressures, ax_3d, 'pressure')
         fig.canvas.draw_idle()
 
     radio.on_clicked(update_view)
