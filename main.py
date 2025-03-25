@@ -23,6 +23,12 @@ def lat_lon_to_cartesian(lat, lon, radius):
 def grid_index_to_lat_lon(lat_index, lon_index, lat_resolution, lon_resolution):
     latitude = (lat_index / lat_resolution) * 180.0 - 90.0
     longitude = (lon_index / lon_resolution) * 360.0 - 180.0
+    if isinstance(lat_index, np.ndarray): #Vectorized version
+        latitude = (lat_index / lat_resolution) * 180.0 - 90.0
+        longitude = (lon_index / lon_resolution) * 360.0 - 180.0
+    else: # Original single value version
+        latitude = (lat_index / lat_resolution) * 180.0 - 90.0
+        longitude = (lon_index / lon_resolution) * 360.0 - 180.0
     return latitude, longitude
 
 def lat_lon_to_grid_index(lat, lon, lat_resolution, lon_resolution):
@@ -97,30 +103,44 @@ def generate_initial_world_3d(lat_resolution=50, lon_resolution=100, radius_elev
     return world, plates, plate_assignment
 
 def precalculate_distances(lat_resolution, lon_resolution):
-    """Pre-calculates Haversine distances between all grid points."""
-    distance_matrix = np.zeros((lat_resolution, lon_resolution, lat_resolution, lon_resolution), dtype=float)
-    for lat_index1 in range(lat_resolution):
-        for lon_index1 in range(lon_resolution):
-            lat1, lon1 = grid_index_to_lat_lon(lat_index1, lon_index1, lat_resolution, lon_resolution)
-            for lat_index2 in range(lat_resolution):
-                for lon_index2 in range(lon_resolution):
-                    if (lat_index1 == lat_index2 and lon_index1 == lon_index2): #Distance to self is 0
-                        continue
-                    lat2, lon2 = grid_index_to_lat_lon(lat_index2, lon_index2, lat_resolution, lon_resolution)
-                    distance_degrees = haversine_distance(lat1, lon1, lat2, lon2, radius=1) # Angular distance in radians
-                    distance_degrees = np.degrees(distance_degrees) # Convert to degrees
-                    distance_matrix[lat_index1, lon_index1, lat_index2, lon_index2] = distance_degrees
-    return distance_matrix
+    """Pre-calculates Haversine distances between all grid points using efficient vectorization."""
+    lat_indices = np.arange(lat_resolution)
+    lon_indices = np.arange(lon_resolution)
+
+    lat_grid1, lon_grid1 = np.meshgrid(lat_indices, lon_indices, indexing='ij')
+    lat_grid2, lon_grid2 = np.meshgrid(lat_indices, lon_indices, indexing='ij')
+
+    lat1, lon1 = grid_index_to_lat_lon(lat_grid1, lon_grid1, lat_resolution, lon_resolution) # Now grid form
+    lat2, lon2 = grid_index_to_lat_lon(lat_grid2, lon_grid2, lat_resolution, lon_resolution) # Now grid form
+
+    lat1_rad = np.radians(lat1) # Still grid form
+    lon1_rad = np.radians(lon1) # Still grid form
+    lat2_rad = np.radians(lat2) # Still grid form
+    lon2_rad = np.radians(lon2) # Still grid form
+
+    dlon = lon2_rad[..., np.newaxis, np.newaxis] - lon1_rad[np.newaxis, np.newaxis, ...] # Broadcasting for all pairs
+    dlat = lat2_rad[..., np.newaxis, np.newaxis] - lat1_rad[np.newaxis, np.newaxis, ...] # Broadcasting for all pairs
+
+
+    a = np.sin(dlat / 2)**2 + np.cos(lat1_rad[np.newaxis, np.newaxis, ...]) * np.cos(lat2_rad[..., np.newaxis, np.newaxis]) * np.sin(dlon / 2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    distance_degrees = np.degrees(c)
+
+    return distance_degrees
+
 
 def get_spherical_neighbors(lat_index, lon_index, lat_resolution, lon_resolution, max_distance_degrees, distance_matrix):
-    """Finds neighbors within a maximum spherical distance using pre-calculated matrix."""
+    """Finds neighbors within a maximum spherical distance, handling longitude wrapping."""
     neighbors = []
     for ni in range(lat_resolution):
         for nj in range(lon_resolution):
             if ni == lat_index and nj == lon_index:
                 continue # Skip self
 
-            distance_degrees = distance_matrix[lat_index, lon_index, ni, nj]
+            # Handle longitude wrapping for distance calculation
+            wrapped_nj = nj % lon_resolution
+
+            distance_degrees = distance_matrix[lat_index, lon_index, ni, wrapped_nj] # Use wrapped nj for distance lookup
             if distance_degrees <= max_distance_degrees:
                 neighbors.append((ni, nj))
     return neighbors
@@ -230,8 +250,8 @@ def load_simulation(filename):
         return None
 
 if __name__ == "__main__":
-    lat_resolution = 50 # Reduced for performance testing, increase later
-    lon_resolution = 50 # Reduced for performance testing, increase later
+    lat_resolution = 50 # Increased resolution for better visualization
+    lon_resolution = 50 # Increased resolution for better visualization
     radius_elevation = 10
     num_plates = 5
     num_steps = 50
