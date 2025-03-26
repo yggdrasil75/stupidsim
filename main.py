@@ -1,320 +1,281 @@
-import numpy as np
-import random
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from scipy.ndimage import gaussian_filter
-from matplotlib.widgets import Slider
-import pickle
-import sys
 import math
 
-PLANET_RADIUS_KM = 6371.0
-ORBITAL_DISTANCE_AU = 1.0
-AXIAL_TILT_DEGREES = 23.5
+from matplotlib import pyplot as plt
+from matplotlib.widgets import RadioButtons, Slider
+import numpy as np
 
-def lat_lon_to_cartesian(lat, lon, radius):
-    lat_rad = np.radians(lat)
-    lon_rad = np.radians(lon)
-    x = radius * np.cos(lat_rad) * np.cos(lon_rad)
-    y = radius * np.cos(lat_rad) * np.sin(lon_rad)
-    z = radius * np.sin(lat_rad)
-    return x, y, z
+from globals import PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA, loadConfig, saveConfig
+from humidity import calculate_humidity, calculate_rainfall
+from plate import Plate, simulate_plate_tectonics_spherical
+from pressure import calculate_pressure_with_circulation, update_pressure_systems
+from storms import generate_storm_systems, update_storm_systems
+from temperature import calculate_solar_radiation_for_vertex, calculate_sun_direction, calculate_temperature_from_radiation, calculate_temperature_with_greenhouse
+from utils import cartesian_to_lat_lon
+from viewer import visualize_world_spherical
 
-def grid_index_to_lat_lon(lat_index, lon_index, lat_resolution, lon_resolution):
-    latitude = (lat_index / lat_resolution) * 180.0 - 90.0
-    longitude = (lon_index / lon_resolution) * 360.0 - 180.0
-    if isinstance(lat_index, np.ndarray): #Vectorized version
-        latitude = (lat_index / lat_resolution) * 180.0 - 90.0
-        longitude = (lon_index / lon_resolution) * 360.0 - 180.0
-    else: # Original single value version
-        latitude = (lat_index / lat_resolution) * 180.0 - 90.0
-        longitude = (lon_index / lon_resolution) * 360.0 - 180.0
-    return latitude, longitude
 
-def lat_lon_to_grid_index(lat, lon, lat_resolution, lon_resolution):
-    lat_index = int(((lat + 90.0) / 180.0) * lat_resolution)
-    lon_index = int(((lon + 180.0) / 360.0) * lon_resolution)
-    return lat_index, lon_index
+def generate_icosphere(subdivisions=3, radius=1.0):
+    """Generate an icosphere mesh with given number of subdivisions."""
+    # Golden ratio
+    t = (1.0 + math.sqrt(5.0)) / 2.0
 
-def haversine_distance(lat1, lon1, lat2, lon2, radius=PLANET_RADIUS_KM):
-    """
-    Calculate the great-circle distance between two points on a sphere using the Haversine formula.
-    Lat and Lon are in degrees. Radius is in km by default.
-    """
-    lat1_rad = np.radians(lat1)
-    lon1_rad = np.radians(lon1)
-    lat2_rad = np.radians(lat2)
-    lon2_rad = np.radians(lon2)
+    # Create initial icosahedron vertices
+    vertices = [
+        (-1, t, 0), (1, t, 0), (-1, -t, 0), (1, -t, 0),
+        (0, -1, t), (0, 1, t), (0, -1, -t), (0, 1, -t),
+        (t, 0, -1), (t, 0, 1), (-t, 0, -1), (-t, 0, 1)
+    ]
 
-    dlon = lon2_rad - lon1_rad
-    dlat = lat2_rad - lat1_rad
+    # Normalize vertices to unit sphere
+    vertices = [np.array(v)/np.linalg.norm(v) for v in vertices]
 
-    a = np.sin(dlat / 2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2)**2
-    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    # Create initial icosahedron faces
+    faces = [
+        (0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
+        (1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
+        (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9),
+        (4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1)
+    ]
 
-    distance = radius * c
-    return distance
+    # Subdivide the mesh
+    for _ in range(subdivisions):
+        new_faces = []
+        edge_vertices = {}
 
-class Plate:
-    def __init__(self, plate_id, center_x, center_y, movement_x, movement_y):
-        self.plate_id = plate_id
-        self.center_x = center_x
-        self.center_y = center_y
-        self.movement_x = movement_x
-        self.movement_y = movement_y
-        self.cells = set()
+        for face in faces:
+            # Get edge vertices
+            edge_midpoints = []
+            for i in range(3):
+                v1, v2 = face[i], face[(i+1)%3]
+                key = tuple(sorted((v1, v2)))
+                if key not in edge_vertices:
+                    # Create new vertex at midpoint
+                    mid = (vertices[v1] + vertices[v2]) / 2
+                    mid = mid / np.linalg.norm(mid)
+                    edge_vertices[key] = len(vertices)
+                    vertices.append(mid)
+                edge_midpoints.append(edge_vertices[key])
 
-    def move(self):
-        self.center_x += self.movement_x
-        self.center_y += self.movement_y
-        lat_resolution = world.shape[0]
-        lon_resolution = world.shape[1]
-        self.center_x = self.center_x % lat_resolution
-        self.center_y = self.center_y % lon_resolution
+            # Create 4 new faces
+            a, b, c = face
+            d, e, f = edge_midpoints
+            new_faces.extend([
+                (a, d, f),
+                (d, b, e),
+                (f, e, c),
+                (d, e, f)
+            ])
 
-def generate_initial_world_3d(lat_resolution=50, lon_resolution=100, radius_elevation=10, num_plates=5):
-    world = np.zeros((lat_resolution, lon_resolution), dtype=float)
-    for x in range(lat_resolution):
-        for y in range(lon_resolution):
-            world[x, y] = random.uniform(-radius_elevation, radius_elevation)
+        faces = new_faces
 
+    # Convert to numpy arrays
+    vertices = np.array(vertices) * radius
+    faces = np.array(faces)
+
+    return vertices, faces
+
+def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5, surface_pressures=None):
+    """Generate initial world with spherical mesh and plates."""
+    vertices, faces = generate_icosphere(subdivisions, radius)
+
+    # Add random elevation to vertices using spherical harmonics for more natural distribution
+    elevations = np.zeros(len(vertices))
+    if surface_pressures is None:
+        surface_pressures = np.zeros(len(vertices))
+    for i, vertex in enumerate(vertices):
+        # Convert to spherical coordinates
+        lat, lon = cartesian_to_lat_lon(*vertex)
+
+        # Create more interesting initial elevations using noise
+        noise = (np.sin(lon * 2) * np.cos(lat * 3) +
+                 np.sin(lon * 5) * np.cos(lat * 2)) * 5
+        elevations[i] = noise + np.random.uniform(-2, 2)
+        surface_pressures[i] = SEA_LEVEL_PRESSURE_HPA # Initialize pressure to sea level
+
+    # Scale vertices with elevations
+    vertices = vertices / np.linalg.norm(vertices, axis=1)[:, np.newaxis] * (radius + elevations[:, np.newaxis])
+
+    # Create plates
     plates = []
+    plate_assignment = np.zeros(len(vertices), dtype=int)
+
+    # Generate random plate center locations on the sphere using Fibonacci sphere algorithm
+    plate_centers = []
     for i in range(num_plates):
-        center_x = random.randint(0, lat_resolution - 1)
-        center_y = random.randint(0, lon_resolution - 1)
-        movement_x = random.uniform(-0.1, 0.1)
-        movement_y = random.uniform(-0.1, 0.1)
-        plates.append(Plate(i + 1, center_x, center_y, movement_x, movement_y))
+        y = 1 - (i / float(num_plates - 1)) * 2  # y goes from 1 to -1
+        radius = math.sqrt(1 - y * y)  # radius at y
+        theta = math.pi * (3 - math.sqrt(5)) * i  # golden angle increment
+        x = math.cos(theta) * radius
+        z = math.sin(theta) * radius
+        plate_centers.append(np.array([x, y, z]) * PLANET_RADIUS_KM)
 
-    plate_assignment = np.zeros_like(world, dtype=int)
-    for x in range(lat_resolution):
-        for y in range(lon_resolution):
-            closest_plate_id = 0
-            min_distance_sq = float('inf')
-            for plate in plates:
-                distance_sq = (x - plate.center_x)**2 + (y - plate.center_y)**2
-                if distance_sq < min_distance_sq:
-                    min_distance_sq = distance_sq
-                    closest_plate_id = plate.plate_id
-            plate_assignment[x, y] = closest_plate_id
-            if closest_plate_id != 0:
-                plates[closest_plate_id-1].cells.add((x,y))
+    for i in range(num_plates):
+        center_point = plate_centers[i]
 
-    return world, plates, plate_assignment
+        # Create random movement direction (tangent to sphere)
+        tangent = np.cross(center_point, np.random.randn(3))
+        tangent = tangent / np.linalg.norm(tangent)
 
-def precalculate_distances(lat_resolution, lon_resolution):
-    """Pre-calculates Haversine distances between all grid points using efficient vectorization."""
-    lat_indices = np.arange(lat_resolution)
-    lon_indices = np.arange(lon_resolution)
+        plate = Plate(i + 1, -1, tangent)  # Note: speed is set in Plate.__init__
+        plate.center_point = center_point.copy()
+        plates.append(plate)
 
-    lat_grid1, lon_grid1 = np.meshgrid(lat_indices, lon_indices, indexing='ij')
-    lat_grid2, lon_grid2 = np.meshgrid(lat_indices, lon_indices, indexing='ij')
+    # Assign vertices to nearest plate center
+    for i, vertex in enumerate(vertices):
+        min_dist = float('inf')
+        closest_plate = None
 
-    lat1, lon1 = grid_index_to_lat_lon(lat_grid1, lon_grid1, lat_resolution, lon_resolution) # Now grid form
-    lat2, lon2 = grid_index_to_lat_lon(lat_grid2, lon_grid2, lat_resolution, lon_resolution) # Now grid form
+        for plate in plates:
+            dist = np.linalg.norm(vertex - plate.center_point)
+            if dist < min_dist:
+                min_dist = dist
+                closest_plate = plate
 
-    lat1_rad = np.radians(lat1) # Still grid form
-    lon1_rad = np.radians(lon1) # Still grid form
-    lat2_rad = np.radians(lat2) # Still grid form
-    lon2_rad = np.radians(lon2) # Still grid form
+        if closest_plate:
+            plate_assignment[i] = closest_plate.plate_id
+            closest_plate.vertices.add(i)
 
-    dlon = lon2_rad[..., np.newaxis, np.newaxis] - lon1_rad[np.newaxis, np.newaxis, ...] # Broadcasting for all pairs
-    dlat = lat2_rad[..., np.newaxis, np.newaxis] - lat1_rad[np.newaxis, np.newaxis, ...] # Broadcasting for all pairs
-
-
-    a = np.sin(dlat / 2)**2 + np.cos(lat1_rad[np.newaxis, np.newaxis, ...]) * np.cos(lat2_rad[..., np.newaxis, np.newaxis]) * np.sin(dlon / 2)**2
-    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
-    distance_degrees = np.degrees(c)
-
-    return distance_degrees
-
-
-def get_spherical_neighbors(lat_index, lon_index, lat_resolution, lon_resolution, max_distance_degrees, distance_matrix):
-    """Finds neighbors within a maximum spherical distance, handling longitude wrapping."""
-    neighbors = []
-    for ni in range(lat_resolution):
-        for nj in range(lon_resolution):
-            if ni == lat_index and nj == lon_index:
-                continue # Skip self
-
-            # Handle longitude wrapping for distance calculation
-            wrapped_nj = nj % lon_resolution
-
-            distance_degrees = distance_matrix[lat_index, lon_index, ni, wrapped_nj] # Use wrapped nj for distance lookup
-            if distance_degrees <= max_distance_degrees:
-                neighbors.append((ni, nj))
-    return neighbors
-
-def simulate_plate_tectonics_3d(world, plates, plate_assignment, step_size=1.0, lat_resolution=30, lon_resolution=60, neighbor_distance_degrees=10.0, distance_matrix=None):
-    for plate in plates:
-        plate.move()
-
-    boundary_effect_grid = np.zeros_like(world, dtype=float) # Re-initialize for each step
-    for x in range(lat_resolution):
-        for y in range(lon_resolution):
-            current_plate_id = plate_assignment[x, y]
-            if current_plate_id == 0:
-                continue
-
-            neighbors = get_spherical_neighbors(x, y,  lat_resolution, lon_resolution, neighbor_distance_degrees, distance_matrix)
-
-            for nx, ny in neighbors:
-                neighbor_plate_id = plate_assignment[nx, ny]
-                if neighbor_plate_id != current_plate_id and neighbor_plate_id != 0:
-                    # Simplified Boundary Interaction: Elevation Adjustment based on plate difference
-                    if plates[current_plate_id-1].plate_id < plates[neighbor_plate_id-1].plate_id: #Example interaction
-                        boundary_effect_grid[x, y] += 0.001 * step_size # One plate pushes up
-                        boundary_effect_grid[nx, ny] -= 0.001 * step_size # Other plate pushes down (or vice versa)
-
-
-    world += boundary_effect_grid
-    world = gaussian_filter(world, sigma=0.5) # Keep smoothing, but adjust if needed
-
-    # Re-assign plate_assignment based on moved plates (VERY IMPORTANT for boundary updates)
-    new_plate_assignment = np.zeros_like(world, dtype=int)
-    for x in range(lat_resolution):
-        for y in range(lon_resolution):
-            closest_plate_id = 0
-            min_distance_sq = float('inf')
-            for plate in plates:
-                distance_sq = (x - plate.center_x)**2 + (y - plate.center_y)**2
-                if distance_sq < min_distance_sq:
-                    min_distance_sq = distance_sq
-                    closest_plate_id = plate.plate_id
-            new_plate_assignment[x, y] = closest_plate_id
-    plate_assignment = new_plate_assignment
-
-    return world, plates, plate_assignment
-
-def calculate_solar_radiation(lat, day_of_year):
-    solar_constant = 1361
-    axial_tilt_rad = np.radians(AXIAL_TILT_DEGREES)
-    declination = axial_tilt_rad * np.sin(2 * np.pi * (day_of_year - 81) / 365)
-    lat_rad = np.radians(lat)
-    solar_zenith_angle = np.arccos(np.sin(lat_rad) * np.sin(declination) + np.cos(lat_rad) * np.cos(declination))
-    radiation = solar_constant * np.cos(solar_zenith_angle)
-    radiation = max(radiation, 0)
-    return radiation
-
-def calculate_temperature(lat, day_of_year, elevation=0):
-    radiation = calculate_solar_radiation(lat, day_of_year)
-    sea_level_temp = 15
-    temp_drop_per_km = 6.5
-    temperature = sea_level_temp + (radiation / 1361 * 30) - (elevation / 10) * temp_drop_per_km
-    return temperature
-
-def visualize_world_3d(world_data, ax, lat_resolution, lon_resolution):
-    ax.clear()
-    latitudes = np.linspace(-90, 90, lat_resolution)
-    longitudes = np.linspace(-180, 180, lon_resolution)
-    lon_grid, lat_grid = np.meshgrid(longitudes, latitudes)
-    radius_grid = PLANET_RADIUS_KM + world_data
-    x, y, z = lat_lon_to_cartesian(lat_grid, lon_grid, radius_grid)
-
-    ax.plot_surface(x, y, z, facecolors=plt.cm.terrain(world_data / (2*world_data.max()) + 0.5),
-                    rstride=1, cstride=1, linewidth=0, antialiased=False)
-
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_aspect('equal')
-    ax.view_init(elev=30, azim=45)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_zticks([])
-
-def save_simulation(filename, world, plates, plate_assignment, sim_params):
-    """Saves the simulation state to a file using pickle."""
-    with open(filename, 'wb') as f:
-        pickle.dump({
-            'world': world,
-            'plates': plates,
-            'plate_assignment': plate_assignment,
-            'sim_params': sim_params
-        }, f)
-    print(f"Simulation saved to '{filename}'")
-
-def load_simulation(filename):
-    """Loads the simulation state from a file using pickle."""
-    try:
-        with open(filename, 'rb') as f:
-            saved_state = pickle.load(f)
-            return (
-                saved_state['world'],
-                saved_state['plates'],
-                saved_state['plate_assignment'],
-                saved_state['sim_params']
-            )
-    except FileNotFoundError:
-        print(f"Save file '{filename}' not found. Starting a new simulation.")
-        return None
+    return vertices, faces, plates, plate_assignment, elevations, surface_pressures
 
 if __name__ == "__main__":
-    lat_resolution = 50 # Increased resolution for better visualization
-    lon_resolution = 50 # Increased resolution for better visualization
-    radius_elevation = 10
-    num_plates = 5
-    num_steps = 50
-    step_size = 0.5
-    neighbor_distance_degrees = 5.0 # Reduced neighbor distance to 5 degrees
+    config = loadConfig()
+    # Simulation parameters
+    subdivisions = config['simulation']['subdivisions']  # Controls mesh resolution (higher = more detailed)
+    radius = PLANET_RADIUS_KM
+    num_plates = config['plate_tectonics']['initial_num_plates'] #15 # Increased number of plates for more fragmentation
+    num_steps = 12
+    step_size = 0.03
+    max_neighbor_distance_km = 1000  # Distance for plate boundary interactions
+    days_per_step = 30  # Each step represents a month
+    current_day = 0
+    current_hour = 12  # Noon
+    pressures = 0
+    surface_pressures = None # Initialize surface_pressures to None
 
     sim_params = {
-        'lat_resolution': lat_resolution,
-        'lon_resolution': lon_resolution,
-        'radius_elevation': radius_elevation,
+        'subdivisions': subdivisions,
+        'radius': radius,
         'num_plates': num_plates,
         'num_steps': num_steps,
         'step_size': step_size,
-        'neighbor_distance_degrees': neighbor_distance_degrees
+        'max_neighbor_distance_km': max_neighbor_distance_km
     }
 
-    save_file = "simulation_save.pkl"
 
-    distance_matrix = precalculate_distances(lat_resolution, lon_resolution) # Pre-calculate distances
+    vertices, faces, plates, plate_assignment, elevations, surface_pressures = generate_initial_world_spherical(
+        subdivisions, radius, num_plates, surface_pressures
+    )
+    print("Starting a new simulation.")
 
-    if len(sys.argv) > 1:
-        load_file = sys.argv[1]
-        loaded_data = load_simulation(load_file)
-        if loaded_data:
-            world, plates, plate_assignment, loaded_params = loaded_data
-            lat_resolution = loaded_params['lat_resolution']
-            lon_resolution = loaded_params['lon_resolution']
-            radius_elevation = loaded_params['radius_elevation']
-            num_plates = loaded_params['num_plates']
-            step_size = loaded_params['step_size']
-            neighbor_distance_degrees = loaded_params['neighbor_distance_degrees']
-            sim_params['neighbor_distance_degrees'] = neighbor_distance_degrees
-            distance_matrix = precalculate_distances(lat_resolution, lon_resolution) # Re-calculate distance matrix on load (resolution might have changed)
-            print(f"Simulation loaded from '{load_file}'.")
-        else:
-            world, plates, plate_assignment = generate_initial_world_3d(lat_resolution, lon_resolution, radius_elevation, num_plates)
-            print("Starting a new simulation.")
-    else:
-        world, plates, plate_assignment = generate_initial_world_3d(lat_resolution, lon_resolution, num_plates=num_plates)
-        print("Starting a new simulation.")
-
-
+    # Run simulation
     world_history = []
+    active_storms = []
     for step in range(num_steps):
         print(f"Simulating step {step + 1}/{num_steps}")
-        world, plates, plate_assignment = simulate_plate_tectonics_3d(
-            world, plates, plate_assignment, step_size=step_size,
-            lat_resolution=lat_resolution, lon_resolution=lon_resolution,
-            neighbor_distance_degrees=neighbor_distance_degrees,
-            distance_matrix=distance_matrix # Pass distance_matrix
+
+        # Update time
+        current_day += days_per_step
+        current_day %= 365  # Wrap around year
+        current_hour = (current_hour + 6) % 24  # Advance 6 hours each step
+
+        # Update storm systems
+        active_storms = update_storm_systems(active_storms, vertices, elevations, days_per_step)
+        
+        # Generate new storms periodically
+        if step % 3 == 0:  # Every 3 steps
+            new_storms = generate_storm_systems(vertices, elevations, current_day, num_storms=2)
+            active_storms.extend(new_storms)
+        
+        # Plate tectonics simulation
+        vertices, plates, plate_assignment, elevations = simulate_plate_tectonics_spherical(
+            vertices, faces, plates, plate_assignment, elevations,
+            days_per_step, max_neighbor_distance_km, step_size
         )
-        world_history.append(world.copy())
+
+        # Calculate water fraction for each vertex (simplified)
+        water_fraction = np.where(elevations < 0, 1.0, 0.0)
+
+        # Calculate climate variables
+        sun_direction = calculate_sun_direction(current_day, current_hour)
+        temperatures = np.array([
+            calculate_temperature_from_radiation(
+                calculate_solar_radiation_for_vertex(vertex, sun_direction, elevations[i], SEA_LEVEL_PRESSURE_HPA),
+                elevations[i],
+                water_fraction[i],
+                SEA_LEVEL_PRESSURE_HPA
+            )
+            for i, vertex in enumerate(vertices)
+        ])
+        rainfall = np.zeros(len(vertices))
+        humidity_values = np.zeros(len(vertices))
+        # Update pressure systems with storms
+        surface_pressures = update_pressure_systems(vertices, faces, elevations, temperatures, 
+                                                current_day, current_hour, active_storms)
+
+        for i, vertex in enumerate(vertices):
+            lat, lon = cartesian_to_lat_lon(*vertex)
+
+            # Get plate properties
+            plate_id = plate_assignment[i]
+            if plate_id > 0:
+                plate = plates[plate_id-1]
+                plate_temp = plate.temperature
+            else:
+                plate_temp = 15
+
+            # Calculate surface pressure considering atmospheric layers
+            surface_pressures[i] = calculate_pressure_with_circulation(elevations[i], temperatures[i], humidity_values[i])
+
+            # Calculate temperature at surface considering atmospheric layers
+            temperatures[i] = calculate_temperature_with_greenhouse(calculate_solar_radiation_for_vertex(vertex, sun_direction, 
+                                                elevations[i], surface_pressures[i]),
+                elevations[i], 
+                water_fraction[i], 
+                surface_pressures[i],
+                humidity_values[i]
+            )
+
+            # Calculate humidity using surface conditions
+            humidity_values[i] = calculate_humidity(surface_pressures[i], temperatures[i], water_fraction[i])
+
+            # Rainfall calculation remains similar but uses the layered pressure
+            rainfall[i] = calculate_rainfall(lat, lon, elevations[i], temperatures[i],
+                                        surface_pressures[i], humidity_values[i],
+                                        vertices, i, faces, elevations)
+
+        world_history.append((vertices.copy(), elevations.copy(),
+                            temperatures.copy(), rainfall.copy(), surface_pressures.copy())) # Store surface_pressures as well
 
     print("Simulation complete. Preparing interactive visualization...")
 
-    fig = plt.figure(figsize=(10, 8))
+    # Set up visualization
+    fig = plt.figure(figsize=(12, 10))
     ax_3d = fig.add_subplot(111, projection='3d')
-    plt.subplots_adjust(bottom=0.25)
+    plt.subplots_adjust(bottom=0.25, left=0.3)
 
     current_step = 0
-    visualize_world_3d(world_history[current_step], ax_3d, lat_resolution, lon_resolution)
-    ax_3d.set_title(f'World Evolution - Step {current_step + 1}')
+    vertices, elevations, temperatures, rainfall, surface_pressures = world_history[current_step] # Unpack surface_pressures
+    visualize_world_spherical(vertices, faces, elevations, ax_3d, 'elevation', elevations=elevations) # Initial call to create colorbar, pass elevations
 
+    # Add radio buttons for view selection
+    rax = plt.axes([0.05, 0.4, 0.15, 0.15])
+    radio = RadioButtons(rax, ('Elevation', 'Temperature', 'Rainfall', 'Pressure'))
+
+    def update_view(label):
+        vertices, elevations, temperatures, rainfall, surface_pressures = world_history[current_step] # Unpack surface_pressures
+        if label == 'Elevation':
+            visualize_world_spherical(vertices, faces, elevations, ax_3d, 'elevation', elevations=elevations)
+        elif label == 'Temperature':
+            visualize_world_spherical(vertices, faces, temperatures, ax_3d, 'temperature', elevations=elevations)
+        elif label == 'Rainfall':
+            visualize_world_spherical(vertices, faces, rainfall, ax_3d, 'rainfall', elevations=elevations)
+        elif label == 'Pressure':
+            visualize_world_spherical(vertices, faces, temperatures, ax_3d, 'pressure', elevations=elevations) # Pass temperatures as data and elevations
+        fig.canvas.draw_idle()
+
+    radio.on_clicked(update_view)
+
+    # Add step slider
     ax_slider = plt.axes([0.25, 0.1, 0.5, 0.03])
     step_slider = Slider(
         ax=ax_slider,
@@ -325,15 +286,13 @@ if __name__ == "__main__":
         valstep=1
     )
 
-    def update(val):
-        step = int(step_slider.val)
-        visualize_world_3d(world_history[step], ax_3d, lat_resolution, lon_resolution)
-        ax_3d.set_title(f'World Evolution - Step {step + 1}')
-        fig.canvas.draw_idle()
+    def update_step(val):
+        global current_step
+        current_step = int(step_slider.val)
+        label = radio.value_selected
+        update_view(label)
 
-    step_slider.on_changed(update)
-
+    step_slider.on_changed(update_step)
+    saveConfig(config)
+	
     plt.show()
-
-    save_simulation(save_file, world, plates, plate_assignment, sim_params)
-    print(f"Simulation automatically saved to '{save_file}'.")

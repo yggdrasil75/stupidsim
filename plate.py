@@ -1,75 +1,49 @@
-# world.py
-import numpy as np
-import math
 import random
-from utils import generate_icosphere, cartesian_to_lat_lon, haversine_distance, find_spherical_neighbors
-from plate import Plate
-from constants import PLANET_RADIUS_KM
 
-def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5, surface_pressures=None):
-    """Generate initial world with spherical mesh and plates."""
-    vertices, faces = generate_icosphere(subdivisions, radius)
+import numpy as np
 
-    # Add random elevation to vertices using spherical harmonics for more natural distribution
-    elevations = np.zeros(len(vertices))
-    if surface_pressures is None:
-        surface_pressures = np.zeros(len(vertices))
-    for i, vertex in enumerate(vertices):
-        # Convert to spherical coordinates
-        lat, lon = cartesian_to_lat_lon(*vertex)
-
-        # Create more interesting initial elevations using noise
-        noise = (np.sin(lon * 2) * np.cos(lat * 3) +
-                 np.sin(lon * 5) * np.cos(lat * 2)) * 5
-        elevations[i] = noise + np.random.uniform(-2, 2)
-        surface_pressures[i] = 1013.25 # Initialize pressure to sea level
-
-    # Scale vertices with elevations
-    vertices = vertices / np.linalg.norm(vertices, axis=1)[:, np.newaxis] * (radius + elevations[:, np.newaxis])
-
-    # Create plates
-    plates = []
-    plate_assignment = np.zeros(len(vertices), dtype=int)
-
-    # Generate random plate center locations on the sphere using Fibonacci sphere algorithm
-    plate_centers = []
-    for i in range(num_plates):
-        y = 1 - (i / float(num_plates - 1)) * 2  # y goes from 1 to -1
-        radius = math.sqrt(1 - y * y)  # radius at y
-        theta = math.pi * (3 - math.sqrt(5)) * i  # golden angle increment
-        x = math.cos(theta) * radius
-        z = math.sin(theta) * radius
-        plate_centers.append(np.array([x, y, z]) * PLANET_RADIUS_KM)
-
-    for i in range(num_plates):
-        center_point = plate_centers[i]
-
-        # Create random movement direction (tangent to sphere)
-        tangent = np.cross(center_point, np.random.randn(3))
-        tangent = tangent / np.linalg.norm(tangent)
-
-        plate = Plate(i + 1, -1, tangent)  # Note: speed is set in Plate.__init__
-        plate.center_point = center_point.copy()
-        plates.append(plate)
-
-    # Assign vertices to nearest plate center
-    for i, vertex in enumerate(vertices):
-        min_dist = float('inf')
-        closest_plate = None
-
-        for plate in plates:
-            dist = np.linalg.norm(vertex - plate.center_point)
-            if dist < min_dist:
-                min_dist = dist
-                closest_plate = plate
-
-        if closest_plate:
-            plate_assignment[i] = closest_plate.plate_id
-            closest_plate.vertices.add(i)
-
-    return vertices, faces, plates, plate_assignment, elevations, surface_pressures
+from globals import MAX_PLATE_SPEED_CM_YR, MIN_PLATE_SPEED_CM_YR, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA
+from temperature import calculate_temperature
+from utils import cartesian_to_lat_lon, find_spherical_neighbors
 
 
+
+class Plate:
+    def __init__(self, plate_id, center_vertex, movement_direction):
+        self.plate_id = plate_id
+        self.center_vertex = center_vertex
+        # Initialize with a direction but no magnitude
+        self.movement_direction = movement_direction / np.linalg.norm(movement_direction)
+        self.speed_cm_yr = random.uniform(MIN_PLATE_SPEED_CM_YR, MAX_PLATE_SPEED_CM_YR)
+        self.vertices = set()
+        self.center_point = None
+        self.temperature = 15  # Average temperature in °C
+        self.pressure = SEA_LEVEL_PRESSURE_HPA  # Average pressure in hPa
+        self.elevation = 0
+        self.water_fraction = 0
+
+    def move(self, days_elapsed):
+        """Move the plate based on real-world time scaling."""
+        # Convert speed from cm/year to km/day
+        speed_km_day = (self.speed_cm_yr / 100000) / 365.25
+        movement_distance = speed_km_day * days_elapsed
+
+        # Apply movement
+        movement_vector = self.movement_direction * movement_distance
+        self.center_point += movement_vector
+
+        # Project back to sphere surface
+        self.center_point = self.center_point / np.linalg.norm(self.center_point) * PLANET_RADIUS_KM
+
+        # Update plate temperature based on movement (with pressure)
+        lat, lon = cartesian_to_lat_lon(*self.center_point)
+        elevation = 0  # Using 0 as plate center elevation for simplicity
+        self.temperature = calculate_temperature(lat, lon, 0, 12, elevation, 0, self.pressure)
+
+        # Update plate pressure based on temperature (ideal gas law)
+        # Higher temperatures generally lead to lower pressure systems
+        self.pressure = SEA_LEVEL_PRESSURE_HPA * (1 - 0.01 * (self.temperature - 15))
+        
 def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment, elevations, days_elapsed=30, max_neighbor_distance_km=1000, step_size=0.03):
     """Simulate plate tectonics on spherical mesh with pressure and temperature effects."""
     # Move plates
@@ -161,3 +135,16 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
             closest_plate.vertices.add(i)
 
     return vertices, plates, new_plate_assignment, elevations
+
+def calculate_erosion(elevation, rainfall, humidity, wind_speed):
+    """Calculate erosion based on rainfall, humidity, and wind."""
+    # Water erosion
+    water_erosion = rainfall * 0.001  # More rain = more erosion
+
+    # Wind erosion (depends on humidity - drier areas have more wind erosion)
+    wind_erosion = wind_speed * (1 - humidity/100) * 0.005
+
+    # Total erosion (only applies to land above sea level)
+    if elevation > 0:
+        return water_erosion + wind_erosion
+    return 0

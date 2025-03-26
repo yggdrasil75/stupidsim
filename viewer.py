@@ -1,7 +1,8 @@
-# visualization.py
-import matplotlib.pyplot as plt
+from matplotlib import pyplot as plt
 import numpy as np
-from constants import cbar_obj  # Import the global variable
+
+from pressure import calculate_pressure_with_layers
+from globals import cbar_obj
 
 def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', elevations=None):
     global cbar_obj
