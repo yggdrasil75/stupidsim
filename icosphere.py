@@ -1060,7 +1060,7 @@ if __name__ == "__main__":
                 plate_temp = 15
 
             # Calculate surface pressure considering atmospheric layers
-            surface_pressures[i] = calculate_pressure_with_composition(elevations[i], temperatures[i], humidity_values[i])
+            surface_pressures[i] = calculate_pressure_with_circulation(elevations[i], temperatures[i], humidity_values[i])
 
             # Calculate temperature at surface considering atmospheric layers
             temperatures[i] = calculate_temperature_with_greenhouse(calculate_solar_radiation_for_vertex(vertex, sun_direction, 
