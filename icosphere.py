@@ -411,52 +411,135 @@ def calculate_coriolis_effect(lat, wind_speed):
     deflection = np.degrees(f * wind_speed * CORIOLIS_FACTOR)
     return deflection
 
+def calculate_coriolis_parameter(lat):
+    """Calculate the Coriolis parameter (f) at a given latitude.
+    
+    Args:
+        lat (float): Latitude in degrees
+        
+    Returns:
+        float: Coriolis parameter in 1/s
+    """
+    omega = 7.2921e-5  # Earth's angular velocity in rad/s
+    return 2 * omega * np.sin(np.radians(lat))
+
 def calculate_wind_patterns(lat, elevation, temperature_gradient, pressure_gradient):
-    """Calculate prevailing wind direction based on latitude, elevation, and pressure gradient."""
+    """Calculate prevailing wind direction based on latitude, elevation, and pressure gradient.
+    
+    Args:
+        lat (float): Latitude in degrees
+        elevation (float): Elevation in km
+        temperature_gradient (float): Temperature change over distance
+        pressure_gradient (float): Pressure change over distance (hPa/km)
+        
+    Returns:
+        int: Wind direction (0=E, 1=N, 2=W, 3=S)
+    """
     # Modified by elevation (mountains disrupt wind patterns)
     if elevation > 2000:
         return random.choice([0,1,2,3])  # Unpredictable in high mountains
     
-    # Get global circulation pressure effect
-    global_pressure, cell_type = calculate_global_circulation(lat, elevation)
-    local_pressure_effect = pressure_gradient * 0.5  # Scale down local effect
+    # Calculate geostrophic wind
+    distance_km = 100  # Assume pressure gradient over 100 km
+    wind_speed, wind_dir_deg = calculate_geostrophic_wind(pressure_gradient, lat, distance_km)
     
-    # Combine global and local pressure effects
-    combined_pressure = global_pressure + local_pressure_effect
+    # Convert wind direction to our simplified 4-direction system
+    if wind_dir_deg >= 315 or wind_dir_deg < 45:
+        base_dir = 0  # East
+    elif wind_dir_deg >= 45 and wind_dir_deg < 135:
+        base_dir = 1  # North
+    elif wind_dir_deg >= 135 and wind_dir_deg < 225:
+        base_dir = 2  # West
+    else:
+        base_dir = 3  # South
     
-    # Determine wind direction based on cell type and hemisphere
-    if cell_type == "Hadley":
-        if lat > 0:  # Northern hemisphere - NE trade winds
-            base_dir = 1  # North
-            deflection = calculate_coriolis_effect(lat, 10)  # Trade winds ~10 m/s
-        else:  # Southern hemisphere - SE trade winds
-            base_dir = 3  # South
-            deflection = calculate_coriolis_effect(lat, 10)
-    elif cell_type == "Ferrel":
-        if lat > 0:  # Northern hemisphere - SW winds
-            base_dir = 2  # West
-            deflection = calculate_coriolis_effect(lat, 15)  # Westerlies ~15 m/s
-        else:  # Southern hemisphere - NW winds
-            base_dir = 0  # East
-            deflection = calculate_coriolis_effect(lat, 15)
-    else:  # Polar cell
-        if lat > 0:  # Northern hemisphere - NE winds
-            base_dir = 1  # North
-            deflection = calculate_coriolis_effect(lat, 5)  # Polar easterlies ~5 m/s
-        else:  # Southern hemisphere - SE winds
-            base_dir = 3  # South
-            deflection = calculate_coriolis_effect(lat, 5)
+    # Apply thermal wind effect (due to temperature gradient)
+    thermal_effect = np.sign(temperature_gradient) * 0.5
+    if lat > 0:  # Northern hemisphere
+        thermal_dir = (base_dir + int(thermal_effect)) % 4
+    else:  # Southern hemisphere
+        thermal_dir = (base_dir - int(thermal_effect)) % 4
     
-    # Apply Coriolis deflection
-    final_dir = (base_dir + int(deflection/90)) % 4
-    
-    # Modify slightly based on local pressure gradient
-    if local_pressure_effect > 2:  # Strong local high pressure
-        final_dir = (final_dir + 1) % 4  # Rotate clockwise
-    elif local_pressure_effect < -2:  # Strong local low pressure
-        final_dir = (final_dir - 1) % 4  # Rotate counter-clockwise
+    # Final wind direction
+    final_dir = thermal_dir
     
     return final_dir
+
+def calculate_geostrophic_wind(pressure_gradient, lat, distance):
+    """Calculate geostrophic wind speed and direction.
+    
+    Args:
+        pressure_gradient (float): Pressure difference in hPa
+        lat (float): Latitude in degrees
+        distance (float): Distance between pressure measurements in km
+        
+    Returns:
+        tuple: (speed in m/s, direction in degrees)
+    """
+    # Constants
+    rho = 1.2  # Air density kg/m³
+    f = calculate_coriolis_parameter(lat)
+    
+    # Avoid division by zero near equator
+    if abs(f) < 1e-10:
+        return 0, 0
+    
+    # Convert units
+    dp = pressure_gradient * 100  # Convert hPa to Pa
+    distance_m = distance * 1000  # Convert km to m
+    
+    # Calculate geostrophic wind speed (m/s)
+    speed = (dp / distance_m) / (rho * abs(f))
+    
+    # Determine direction (90° to pressure gradient, clockwise in NH, counter-clockwise in SH)
+    if lat >= 0:  # Northern hemisphere
+        direction = 90  # Blows parallel to isobars, high pressure to right
+    else:  # Southern hemisphere
+        direction = 270  # Blows parallel to isobars, high pressure to left
+    
+    return speed, direction
+
+def update_pressure_systems(vertices, elevations, temperatures, day_of_year, hour_of_day):
+    """Update pressure systems with diurnal and seasonal effects."""
+    pressures = np.zeros(len(vertices))
+    
+    for i, vertex in enumerate(vertices):
+        lat, lon = cartesian_to_lat_lon(*vertex)
+        elevation = elevations[i]
+        temperature = temperatures[i]
+        
+        # Base pressure from elevation and temperature
+        base_pressure = calculate_pressure_with_layers(elevation, temperature)
+        
+        # Global circulation pattern
+        circulation_pressure, _ = calculate_global_circulation(lat, elevation)
+        
+        # Diurnal variation
+        diurnal_variation = calculate_diurnal_pressure_variation(
+            lat, lon, elevation, day_of_year, hour_of_day, temperature
+        )
+        
+        # Seasonal variation
+        seasonal_variation = calculate_seasonal_pressure_variation(lat, day_of_year)
+        
+        # Combine all effects
+        combined_pressure = (
+            0.6 * circulation_pressure +
+            0.3 * base_pressure +
+            0.05 * diurnal_variation +
+            0.05 * seasonal_variation
+        )
+        
+        pressures[i] = combined_pressure
+    
+    # Apply smoothing to create more coherent pressure systems
+    smoothed_pressures = np.zeros_like(pressures)
+    for i in range(len(vertices)):
+        neighbors = find_spherical_neighbors(vertices, faces, i, 1000)
+        neighbor_pressures = [pressures[j] for j in neighbors]
+        smoothed_pressures[i] = np.mean([pressures[i]] + neighbor_pressures)
+    
+    return smoothed_pressures
 
 def calculate_pressure_with_circulation(elevation, temperature, humidity):
     """Calculate atmospheric pressure accounting for global circulation."""
@@ -773,6 +856,51 @@ def calculate_temperature(lat, lon, day_of_year, hour_of_day, elevation, water_f
     # Never below absolute zero
     return max(-273, temperature)
 
+def calculate_seasonal_pressure_variation(lat, day_of_year):
+    """Calculate seasonal pressure variations including shifting pressure belts."""
+    # Seasonal shift of pressure belts (degrees latitude)
+    seasonal_shift = AXIAL_TILT_DEGREES * np.sin(2*np.pi*(day_of_year-80)/365.25)
+    
+    # Base pressure anomalies by latitude
+    if abs(lat) < 30 - abs(seasonal_shift):
+        # Subtropical high pressure
+        pressure_anomaly = 5 * np.cos(np.radians(lat*3))
+    elif abs(lat) < 60 - abs(seasonal_shift/2):
+        # Mid-latitude low pressure
+        pressure_anomaly = -8 * np.sin(np.radians(lat*1.5))
+    else:
+        # Polar high pressure
+        pressure_anomaly = 10 * np.cos(np.radians(lat))
+    
+    # Monsoon-like reversal near continents (simplified)
+    if 10 < abs(lat) < 30:
+        monsoon_factor = np.sin(2*np.pi*(day_of_year-105)/365.25)
+        pressure_anomaly += monsoon_factor * 5
+    
+    return pressure_anomaly
+
+def calculate_diurnal_pressure_variation(lat, lon, elevation, day_of_year, hour_of_day, temperature):
+    """Calculate diurnal pressure variations including thermal tides."""
+    # Base amplitude (hPa) - stronger at low latitudes and over land
+    base_amplitude = 2.0  # Typical diurnal variation is 1-3 hPa
+    
+    # Enhanced over land (we'll use elevation as proxy for land/sea)
+    if elevation > 0:
+        base_amplitude *= 1.5
+        
+    # Latitude effect (stronger near equator)
+    lat_factor = np.cos(np.radians(lat))**2
+    
+    # Solar heating effect (max at local noon)
+    local_noon_offset = (lon / 15) % 24  # 15 degrees per hour
+    local_hour = (hour_of_day - local_noon_offset) % 24
+    solar_effect = np.cos(np.radians(local_hour * 15))  # 15 degrees per hour
+    
+    # Combined diurnal variation
+    diurnal_variation = base_amplitude * lat_factor * solar_effect
+    
+    return diurnal_variation
+
 def calculate_temperature_with_altitude(surface_temp, elevation_km):
     """Calculate temperature at given altitude considering atmospheric layers."""
     current_temp = surface_temp
@@ -831,15 +959,15 @@ def calculate_erosion(elevation, rainfall, humidity, wind_speed):
         return water_erosion + wind_erosion
     return 0
 
-def calculate_rainfall(lat, lon, elevation, temperature, pressure, humidity, vertices, vertex_idx, faces, elevations, max_distance_km=1000): # ADDED faces and elevations
+def calculate_rainfall(lat, lon, elevation, temperature, pressure, humidity, vertices, vertex_idx, faces, elevations, max_distance_km=1000):
     """Calculate rainfall based on pressure systems, humidity, and topography."""
     # Calculate pressure gradient
-    neighbors = find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km) # ADDED faces
-    neighbor_pressures = [calculate_pressure(elevations[n], temperature) for n in neighbors] # ADDED elevations
-    avg_neighbor_pressure = np.mean(neighbor_pressures) if neighbor_pressures else pressure # Handle no neighbors
-    pressure_gradient = pressure - avg_neighbor_pressure
-
-    # Determine wind direction based on pressure gradient
+    neighbors = find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km)
+    neighbor_pressures = [calculate_pressure(elevations[n], temperature) for n in neighbors]
+    avg_neighbor_pressure = np.mean(neighbor_pressures) if neighbor_pressures else pressure
+    pressure_gradient = (pressure - avg_neighbor_pressure) / max_distance_km  # hPa/km
+    
+    # Calculate wind direction with improved Coriolis effect
     wind_dir = calculate_wind_patterns(lat, elevation, 0, pressure_gradient)
 
     # Calculate water availability (from nearby water bodies)
@@ -1030,6 +1158,7 @@ if __name__ == "__main__":
         # Update time
         current_day += days_per_step
         current_day %= 365  # Wrap around year
+        current_hour = (current_hour + 6) % 24  # Advance 6 hours each step
 
         # Plate tectonics simulation
         vertices, plates, plate_assignment, elevations = simulate_plate_tectonics_spherical(
@@ -1042,12 +1171,19 @@ if __name__ == "__main__":
 
         # Calculate climate variables
         sun_direction = calculate_sun_direction(current_day, current_hour)
-        temperatures = np.zeros(len(vertices))
+        temperatures = np.array([
+            calculate_temperature_from_radiation(
+                calculate_solar_radiation_for_vertex(vertex, sun_direction, elevations[i], SEA_LEVEL_PRESSURE_HPA),
+                elevations[i],
+                water_fraction[i],
+                SEA_LEVEL_PRESSURE_HPA
+            )
+            for i, vertex in enumerate(vertices)
+        ])
         rainfall = np.zeros(len(vertices))
         humidity_values = np.zeros(len(vertices))
-        surface_pressures = np.zeros(len(vertices)) # Initialize surface_pressures here for each step
+        surface_pressures = update_pressure_systems(vertices, elevations, temperatures, current_day, current_hour)
 
-        # In the main simulation loop:
         for i, vertex in enumerate(vertices):
             lat, lon = cartesian_to_lat_lon(*vertex)
 
