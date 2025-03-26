@@ -14,6 +14,10 @@ SEA_LEVEL_PRESSURE_HPA = 1013.25  # Standard atmospheric pressure at sea level
 GAS_CONSTANT = 287.05  # Specific gas constant for dry air (J/kg·K)
 GRAVITY = 9.81  # m/s²
 cbar_obj = None  # Global variable to store the colorbar object
+HADLEY_CELL_WIDTH = 30  # Degrees latitude
+FERREL_CELL_WIDTH = 30  # Degrees latitude
+POLAR_CELL_WIDTH = 30   # Degrees latitude
+CORIOLIS_FACTOR = 0.0001  # Simplified Coriolis effect factor
 # Atmospheric layers (altitude in km, temperature gradient in °C/km)
 ATMOSPHERIC_LAYERS = [
     {"name": "Troposphere", "altitude_range": (0, 12), "temp_gradient": -6.5},
@@ -21,6 +25,43 @@ ATMOSPHERIC_LAYERS = [
     {"name": "Mesosphere", "altitude_range": (50, 80), "temp_gradient": -2.8},
     {"name": "Thermosphere", "altitude_range": (80, 700), "temp_gradient": 0.0}
 ]
+# Atmospheric composition constants (by volume)
+ATMOSPHERIC_COMPOSITION = {
+    'N2': 0.7808,  # Nitrogen
+    'O2': 0.2095,  # Oxygen
+    'Ar': 0.0093,  # Argon
+    'CO2': 0.0004, # Carbon dioxide
+    'H2O': 0.01,   # Water vapor (variable)
+    'CH4': 1.8e-6, # Methane
+    'O3': 7.0e-6   # Ozone (variable)
+}
+# Specific gas constants (J/kg·K)
+GAS_CONSTANTS = {
+    'N2': 296.80,
+    'O2': 259.84,
+    'Ar': 208.13,
+    'CO2': 188.92,
+    'H2O': 461.50,
+    'CH4': 518.28,
+    'O3': 173.21
+}
+# Molecular weights (kg/mol)
+MOLECULAR_WEIGHTS = {
+    'N2': 0.0280134,
+    'O2': 0.0319988,
+    'Ar': 0.039948,
+    'CO2': 0.0440095,
+    'H2O': 0.01801528,
+    'CH4': 0.0160425,
+    'O3': 0.0479982
+}
+# Greenhouse gas absorption coefficients (W/m² per kg/m²)
+GREENHOUSE_ABSORPTION = {
+    'CO2': 0.05,
+    'H2O': 0.1,
+    'CH4': 0.03,
+    'O3': 0.15
+}
 
 def generate_icosphere(subdivisions=3, radius=1.0):
     """Generate an icosphere mesh with given number of subdivisions."""
@@ -327,6 +368,214 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
             closest_plate.vertices.add(i)
 
     return vertices, plates, new_plate_assignment, elevations
+
+def calculate_global_circulation(lat, elevation):
+    """Calculate large-scale atmospheric circulation patterns."""
+    abs_lat = abs(lat)
+    
+    # Determine which cell the location is in
+    if abs_lat < HADLEY_CELL_WIDTH:
+        # Hadley Cell (0-30°)
+        cell_type = "Hadley"
+        # Rising air near equator, descending near 30°
+        if lat > 0:  # Northern hemisphere
+            pressure = SEA_LEVEL_PRESSURE_HPA - 10 * (1 - abs_lat/HADLEY_CELL_WIDTH)
+        else:  # Southern hemisphere
+            pressure = SEA_LEVEL_PRESSURE_HPA - 10 * (1 - abs_lat/HADLEY_CELL_WIDTH)
+    elif abs_lat < HADLEY_CELL_WIDTH + FERREL_CELL_WIDTH:
+        # Ferrel Cell (30-60°)
+        cell_type = "Ferrel"
+        # Rising air near 60°, descending near 30°
+        relative_lat = (abs_lat - HADLEY_CELL_WIDTH) / FERREL_CELL_WIDTH
+        if lat > 0:  # Northern hemisphere
+            pressure = SEA_LEVEL_PRESSURE_HPA + 15 * (1 - relative_lat)
+        else:  # Southern hemisphere
+            pressure = SEA_LEVEL_PRESSURE_HPA + 15 * (1 - relative_lat)
+    else:
+        # Polar Cell (60-90°)
+        cell_type = "Polar"
+        # Rising air near 60°, descending near poles
+        relative_lat = (abs_lat - HADLEY_CELL_WIDTH - FERREL_CELL_WIDTH) / POLAR_CELL_WIDTH
+        pressure = SEA_LEVEL_PRESSURE_HPA - 5 * relative_lat
+    
+    # Adjust for elevation
+    pressure *= np.exp(-elevation * 1000 / (GAS_CONSTANT * 288))  # Scale height adjustment
+    
+    return pressure, cell_type
+
+def calculate_coriolis_effect(lat, wind_speed):
+    """Calculate apparent deflection due to Coriolis effect."""
+    # Coriolis parameter (f = 2Ωsinφ)
+    f = 2 * 7.2921e-5 * np.sin(np.radians(lat))
+    # Simplified deflection (degrees)
+    deflection = np.degrees(f * wind_speed * CORIOLIS_FACTOR)
+    return deflection
+
+def calculate_wind_patterns(lat, elevation, temperature_gradient, pressure_gradient):
+    """Calculate prevailing wind direction based on latitude, elevation, and pressure gradient."""
+    # Modified by elevation (mountains disrupt wind patterns)
+    if elevation > 2000:
+        return random.choice([0,1,2,3])  # Unpredictable in high mountains
+    
+    # Get global circulation pressure effect
+    global_pressure, cell_type = calculate_global_circulation(lat, elevation)
+    local_pressure_effect = pressure_gradient * 0.5  # Scale down local effect
+    
+    # Combine global and local pressure effects
+    combined_pressure = global_pressure + local_pressure_effect
+    
+    # Determine wind direction based on cell type and hemisphere
+    if cell_type == "Hadley":
+        if lat > 0:  # Northern hemisphere - NE trade winds
+            base_dir = 1  # North
+            deflection = calculate_coriolis_effect(lat, 10)  # Trade winds ~10 m/s
+        else:  # Southern hemisphere - SE trade winds
+            base_dir = 3  # South
+            deflection = calculate_coriolis_effect(lat, 10)
+    elif cell_type == "Ferrel":
+        if lat > 0:  # Northern hemisphere - SW winds
+            base_dir = 2  # West
+            deflection = calculate_coriolis_effect(lat, 15)  # Westerlies ~15 m/s
+        else:  # Southern hemisphere - NW winds
+            base_dir = 0  # East
+            deflection = calculate_coriolis_effect(lat, 15)
+    else:  # Polar cell
+        if lat > 0:  # Northern hemisphere - NE winds
+            base_dir = 1  # North
+            deflection = calculate_coriolis_effect(lat, 5)  # Polar easterlies ~5 m/s
+        else:  # Southern hemisphere - SE winds
+            base_dir = 3  # South
+            deflection = calculate_coriolis_effect(lat, 5)
+    
+    # Apply Coriolis deflection
+    final_dir = (base_dir + int(deflection/90)) % 4
+    
+    # Modify slightly based on local pressure gradient
+    if local_pressure_effect > 2:  # Strong local high pressure
+        final_dir = (final_dir + 1) % 4  # Rotate clockwise
+    elif local_pressure_effect < -2:  # Strong local low pressure
+        final_dir = (final_dir - 1) % 4  # Rotate counter-clockwise
+    
+    return final_dir
+
+def calculate_pressure_with_circulation(elevation, temperature, humidity):
+    """Calculate atmospheric pressure accounting for global circulation."""
+    # First calculate standard pressure
+    standard_pressure = calculate_pressure_with_composition(elevation, temperature, humidity)
+    
+    # Get lat/lon from vertex (approximate - we don't have vertex info here)
+    # In the main loop, we'll need to pass lat/lon to this function
+    lat = 0  # Placeholder - actual implementation needs lat/lon
+    lon = 0
+    
+    # Get global circulation effect
+    global_pressure, _ = calculate_global_circulation(lat, elevation)
+    
+    # Combine effects (weighted average)
+    combined_pressure = 0.7 * global_pressure + 0.3 * standard_pressure
+    
+    return combined_pressure
+
+def calculate_effective_gas_constant(humidity):
+    """Calculate effective gas constant based on atmospheric composition and humidity."""
+    # Adjust water vapor content based on humidity
+    adjusted_composition = ATMOSPHERIC_COMPOSITION.copy()
+    adjusted_composition['H2O'] = (humidity/100) * 0.04  # Max ~4% at 100% humidity
+    
+    # Calculate weighted average gas constant
+    total = 0
+    weighted_sum = 0
+    for gas, fraction in adjusted_composition.items():
+        weighted_sum += fraction * GAS_CONSTANTS[gas]
+        total += fraction
+    
+    # Normalize (remaining is other trace gases)
+    if total < 1:
+        weighted_sum += (1 - total) * GAS_CONSTANTS['N2']  # Assume remainder is N2
+    
+    return weighted_sum
+
+def calculate_mean_molecular_weight(humidity):
+    """Calculate mean molecular weight of atmosphere based on humidity."""
+    adjusted_composition = ATMOSPHERIC_COMPOSITION.copy()
+    adjusted_composition['H2O'] = (humidity/100) * 0.04
+    
+    total = 0
+    weighted_sum = 0
+    for gas, fraction in adjusted_composition.items():
+        weighted_sum += fraction * MOLECULAR_WEIGHTS[gas]
+        total += fraction
+    
+    if total < 1:
+        weighted_sum += (1 - total) * MOLECULAR_WEIGHTS['N2']
+    
+    return weighted_sum
+
+def calculate_pressure_with_composition(elevation, temperature, humidity):
+    """Calculate atmospheric pressure accounting for composition and humidity."""
+    # Get adjusted gas constant
+    R = calculate_effective_gas_constant(humidity)
+    
+    # Convert elevation to meters and temperature to Kelvin
+    elevation_m = elevation * 1000
+    temp_k = temperature + 273.15
+    
+    # Calculate scale height (H = RT/Mg)
+    mean_molecular_weight = calculate_mean_molecular_weight(humidity)
+    scale_height = (R * temp_k) / (mean_molecular_weight * GRAVITY)
+    
+    # Calculate pressure
+    pressure = SEA_LEVEL_PRESSURE_HPA * np.exp(-elevation_m / scale_height)
+    return pressure
+
+def calculate_greenhouse_effect(temperature, humidity, pressure, co2_level=ATMOSPHERIC_COMPOSITION['CO2']):
+    """Calculate greenhouse effect based on atmospheric composition."""
+    # Calculate air density (kg/m³)
+    R = calculate_effective_gas_constant(humidity)
+    temp_k = temperature + 273.15
+    density = pressure * 100 / (R * temp_k)  # Convert hPa to Pa
+    
+    # Calculate greenhouse gas column densities (kg/m²)
+    # Approximate as density * scale height
+    mean_molecular_weight = calculate_mean_molecular_weight(humidity)
+    scale_height = (R * temp_k) / (mean_molecular_weight * GRAVITY)
+    
+    greenhouse_effect = 0
+    for gas in ['CO2', 'H2O', 'CH4', 'O3']:
+        if gas == 'CO2':
+            concentration = co2_level
+        elif gas == 'H2O':
+            concentration = (humidity/100) * ATMOSPHERIC_COMPOSITION['H2O']
+        else:
+            concentration = ATMOSPHERIC_COMPOSITION[gas]
+        
+        column_density = density * scale_height * concentration
+        greenhouse_effect += column_density * GREENHOUSE_ABSORPTION[gas]
+    
+    return greenhouse_effect
+
+def calculate_temperature_with_greenhouse(radiation, elevation, water_fraction, pressure, humidity):
+    """Calculate temperature including greenhouse effects."""
+    # Base temperature from radiation
+    base_temp = (radiation / 200) - 10
+    
+    # Elevation effect
+    elevation_effect = -6.5 * (elevation / 1000)
+    
+    # Water moderating effect
+    water_moderation = water_fraction * 5
+    
+    # Greenhouse effect
+    greenhouse_effect = calculate_greenhouse_effect(
+        base_temp + elevation_effect + water_moderation,
+        humidity,
+        pressure
+    )
+    
+    # Final temperature with greenhouse effect
+    temperature = base_temp + elevation_effect + water_moderation + greenhouse_effect
+    
+    return max(-273, temperature)
 
 def calculate_pressure(elevation, temperature):
     """Calculate atmospheric pressure based on elevation and temperature."""
@@ -811,15 +1060,15 @@ if __name__ == "__main__":
                 plate_temp = 15
 
             # Calculate surface pressure considering atmospheric layers
-            surface_pressures[i] = calculate_pressure_with_layers(elevations[i], plate_temp)
+            surface_pressures[i] = calculate_pressure_with_composition(elevations[i], temperatures[i], humidity_values[i])
 
             # Calculate temperature at surface considering atmospheric layers
-            temperatures[i] = calculate_temperature_with_altitude(
-                calculate_temperature_from_radiation(
-                    calculate_solar_radiation_for_vertex(vertex, sun_direction,
-                                                    elevations[i], surface_pressures[i]),
-                    elevations[i], water_fraction[i], surface_pressures[i]),
-                elevations[i]
+            temperatures[i] = calculate_temperature_with_greenhouse(calculate_solar_radiation_for_vertex(vertex, sun_direction, 
+                                                elevations[i], surface_pressures[i]),
+                elevations[i], 
+                water_fraction[i], 
+                surface_pressures[i],
+                humidity_values[i]
             )
 
             # Calculate humidity using surface conditions
