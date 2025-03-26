@@ -181,6 +181,9 @@ if __name__ == "__main__":
         # Update storm systems
         active_storms = update_storm_systems(active_storms, vertices, elevations, days_per_step)
         
+        # Calculate water fraction for each vertex (simplified)
+        water_fraction = np.where(elevations < 0, 1.0, 0.0)
+        
         # Generate new storms periodically
         if step % 3 == 0:  # Every 3 steps
             new_storms = generate_storm_systems(vertices, elevations, current_day, num_storms=2)
@@ -189,11 +192,9 @@ if __name__ == "__main__":
         # Plate tectonics simulation
         vertices, plates, plate_assignment, elevations = simulate_plate_tectonics_spherical(
             vertices, faces, plates, plate_assignment, elevations,
-            days_per_step, max_neighbor_distance_km, step_size
+            days_per_step, max_neighbor_distance_km, step_size, active_storms, water_fraction
         )
 
-        # Calculate water fraction for each vertex (simplified)
-        water_fraction = np.where(elevations < 0, 1.0, 0.0)
 
         # Calculate climate variables
         sun_direction = calculate_sun_direction(current_day, current_hour)
@@ -219,8 +220,10 @@ if __name__ == "__main__":
             plate_id = plate_assignment[i]
             if plate_id > 0:
                 plate = plates[plate_id-1]
+                surface_pressures[i] = plate.pressure
                 plate_temp = plate.temperature
             else:
+                surface_pressures[i] = SEA_LEVEL_PRESSURE_HPA
                 plate_temp = 15
 
             # Calculate surface pressure considering atmospheric layers
@@ -270,7 +273,7 @@ if __name__ == "__main__":
         elif label == 'Rainfall':
             visualize_world_spherical(vertices, faces, rainfall, ax_3d, 'rainfall', elevations=elevations)
         elif label == 'Pressure':
-            visualize_world_spherical(vertices, faces, temperatures, ax_3d, 'pressure', elevations=elevations) # Pass temperatures as data and elevations
+            visualize_world_spherical(vertices, faces, surface_pressures, ax_3d, 'pressure', elevations=elevations)
         fig.canvas.draw_idle()
 
     radio.on_clicked(update_view)

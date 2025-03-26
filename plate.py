@@ -3,6 +3,7 @@ import random
 import numpy as np
 
 from globals import MAX_PLATE_SPEED_CM_YR, MIN_PLATE_SPEED_CM_YR, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA
+from pressure import calculate_diurnal_pressure_variation, calculate_pressure_with_layers, calculate_seasonal_pressure_variation
 from temperature import calculate_temperature
 from utils import cartesian_to_lat_lon, find_spherical_neighbors
 
@@ -21,8 +22,86 @@ class Plate:
         self.pressure = SEA_LEVEL_PRESSURE_HPA  # Average pressure in hPa
         self.elevation = 0
         self.water_fraction = 0
+        self.pressure_systems = {
+            'base': SEA_LEVEL_PRESSURE_HPA,
+            'seasonal': 0,
+            'diurnal': 0,
+            'storm': 0,
+            'boundary': 0
+        }
+        self.humidity = 50  # Average humidity in %
+        self.humidity_history = []  # Track humidity changes over time
+        self.evaporation_rate = 0
+        self.precipitation_rate = 0
+        self.last_update_day = 0
 
-    def move(self, days_elapsed):
+    def update_pressure_systems(self, day_of_year, hour_of_day, elevation, temperature, active_storms):
+        """Update all pressure systems for this plate."""
+        lat, lon = cartesian_to_lat_lon(*self.center_point)
+        
+        # Base pressure from elevation and temperature
+        self.pressure_systems['base'] = calculate_pressure_with_layers(elevation, temperature, lat)
+        
+        # Seasonal variation
+        self.pressure_systems['seasonal'] = calculate_seasonal_pressure_variation(lat, day_of_year)
+        
+        # Diurnal variation
+        self.pressure_systems['diurnal'] = calculate_diurnal_pressure_variation(
+            lat, lon, elevation, day_of_year, hour_of_day, temperature
+        )
+        
+        # Storm effects
+        storm_effect = 0
+        for storm in active_storms:
+            storm_effect += storm.calculate_pressure_effect(lat, lon)
+        self.pressure_systems['storm'] = storm_effect
+        
+        # Combine all effects with different weights
+        self.pressure = (
+            0.6 * self.pressure_systems['base'] +
+            0.15 * self.pressure_systems['seasonal'] +
+            0.05 * self.pressure_systems['diurnal'] +
+            0.2 * self.pressure_systems['storm'] +
+            self.pressure_systems['boundary']
+        )
+        
+        # Update last update time
+        self.last_update_day = day_of_year
+
+    def update_humidity_systems(self, day_of_year, elevations, water_fraction, vertices):
+        """Update humidity based on plate conditions and neighboring water"""
+        if not self.vertices:
+            return
+            
+        # Calculate average conditions for the plate
+        avg_elevation = np.mean([elevations[i] for i in self.vertices])
+        avg_water = np.mean([water_fraction[i] for i in self.vertices])
+        
+        # Get plate center coordinates
+        lat, lon = cartesian_to_lat_lon(*self.center_point)
+        
+        # Seasonal humidity variation
+        seasonal_factor = 1 + 0.3 * np.sin(np.radians(day_of_year/365 * 360))
+        
+        # Evaporation based on temperature and water availability
+        self.evaporation_rate = (0.5 * avg_water * (1 + 0.02 * (self.temperature - 15)) * seasonal_factor)
+        
+        # Precipitation based on humidity and elevation
+        self.precipitation_rate = (0.3 * self.humidity * (1 + 0.01 * avg_elevation)) * seasonal_factor
+        
+        # Net humidity change
+        humidity_change = self.evaporation_rate - self.precipitation_rate
+        
+        # Update plate humidity with damping
+        self.humidity += humidity_change * 0.1
+        self.humidity = np.clip(self.humidity, 10, 90)  # Keep within reasonable bounds
+        
+        # Record history
+        self.humidity_history.append(self.humidity)
+        if len(self.humidity_history) > 100:
+            self.humidity_history.pop(0)
+
+    def move(self, days_elapsed, day_of_year, hour_of_day, active_storms, elevations, water_fraction, vertices):
         """Move the plate based on real-world time scaling."""
         # Convert speed from cm/year to km/day
         speed_km_day = (self.speed_cm_yr / 100000) / 365.25
@@ -35,25 +114,37 @@ class Plate:
         # Project back to sphere surface
         self.center_point = self.center_point / np.linalg.norm(self.center_point) * PLANET_RADIUS_KM
 
+        # Calculate average elevation for the plate
+        if self.vertices:
+            avg_elevation = np.mean([elevations[i] for i in self.vertices])
+        else:
+            avg_elevation = 0
+            
+        # Update plate climate systems
+        self.update_pressure_systems(day_of_year, hour_of_day, avg_elevation, self.temperature, active_storms)
+        self.update_humidity_systems(day_of_year, elevations, water_fraction, vertices)
+        
         # Update plate temperature based on movement (with pressure)
         lat, lon = cartesian_to_lat_lon(*self.center_point)
-        elevation = 0  # Using 0 as plate center elevation for simplicity
-        self.temperature = calculate_temperature(lat, lon, 0, 12, elevation, 0, self.pressure)
-
-        # Update plate pressure based on temperature (ideal gas law)
-        # Higher temperatures generally lead to lower pressure systems
-        self.pressure = SEA_LEVEL_PRESSURE_HPA * (1 - 0.01 * (self.temperature - 15))
+        self.temperature = calculate_temperature(lat, lon, 0, 12, avg_elevation, 0, self.pressure)
         
-def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment, elevations, days_elapsed=30, max_neighbor_distance_km=1000, step_size=0.03):
+def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment, elevations, days_elapsed=30, max_neighbor_distance_km=1000, step_size=0.03, active_storms=[], water_fraction=0):
     """Simulate plate tectonics on spherical mesh with pressure and temperature effects."""
-    # Move plates
+    # Get current date and time
+    day_of_year = (plates[0].last_update_day + days_elapsed) % 365
+    hour_of_day = 12  # Noon for simplicity
+    
+    # Move plates and update their pressure systems
     for plate in plates:
-        plate.move(days_elapsed)
+        plate.move(days_elapsed, day_of_year, hour_of_day, active_storms, elevations, water_fraction, vertices)
+    if water_fraction is None:
+        water_fraction = np.where(elevations < 0, 1.0, 0.0)
 
     # Calculate boundary effects
     boundary_effects = np.zeros_like(elevations)
     pressure_changes = np.zeros(len(vertices))
     temperature_changes = np.zeros(len(vertices))
+    humidity_changes = np.zeros(len(vertices))
 
     for i, vertex in enumerate(vertices):
         current_plate_id = plate_assignment[i]
@@ -68,7 +159,6 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
 
             if neighbor_plate_id != current_plate_id and neighbor_plate_id != 0:
                 # Simplified boundary interaction
-                current_plate = plates[current_plate_id-1]
                 neighbor_plate = plates[neighbor_plate_id-1]
 
                 # Elevation adjustment based on plate movement
@@ -79,6 +169,15 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
                 pressure_diff = current_plate.pressure - neighbor_plate.pressure
                 pressure_changes[i] += pressure_diff * 0.01
                 pressure_changes[neighbor_idx] -= pressure_diff * 0.01
+                
+                # Humidity transfer between plates
+                humidity_diff = current_plate.humidity - neighbor_plate.humidity
+                humidity_changes[i] -= humidity_diff * 0.01
+                humidity_changes[neighbor_idx] += humidity_diff * 0.01
+                
+                # Update plate boundary pressure effects
+                current_plate.pressure_systems['boundary'] += pressure_diff * 0.005
+                neighbor_plate.pressure_systems['boundary'] -= pressure_diff * 0.005
 
                 # Temperature changes at plate boundaries
                 temp_diff = current_plate.temperature - neighbor_plate.temperature
@@ -94,10 +193,14 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
         if plate_vertices:
             avg_pressure_change = np.mean(pressure_changes[plate_vertices])
             avg_temp_change = np.mean(temperature_changes[plate_vertices])
+            avg_humidity_change = np.mean(humidity_changes[plate_vertices])
 
             # Update plate properties (dampened changes)
             plate.pressure += avg_pressure_change * 0.1
             plate.temperature += avg_temp_change * 0.1
+            plate.humidity += avg_humidity_change * 0.1
+            plate.humidity = np.clip(plate.humidity, 10, 90)
+
 
             # Plate speed affected by temperature (warmer plates move faster)
             plate.speed_cm_yr *= (1 + 0.01 * (plate.temperature - 15))

@@ -71,40 +71,64 @@ def calculate_pressure(elevation, temperature):
     pressure = SEA_LEVEL_PRESSURE_HPA * np.exp(-elevation_m * GRAVITY / (GAS_CONSTANT * temp_k))
     return pressure
 
-def calculate_pressure_with_layers(elevation_km, surface_temp):
-    """Calculate pressure considering atmospheric layers."""
-    current_pressure = SEA_LEVEL_PRESSURE_HPA
+def calculate_pressure_with_layers(elevation_km, surface_temp, lat=None):
+    """Calculate pressure considering atmospheric layers with hydrostatic equilibrium and density variations.
+    
+    Args:
+        elevation_km (float): Elevation in kilometers (negative for below sea level).
+        surface_temp (float): Surface temperature in degrees Celsius.
+        
+    Returns:
+        float: Pressure in hPa at the given elevation.
+    """
+    current_pressure = SEA_LEVEL_PRESSURE_HPA  # Start with sea level pressure
     current_temp = surface_temp + 273.15  # Convert to Kelvin
+    current_altitude = 0.0  # Start at sea level
     remaining_altitude = max(0, -elevation_km)  # Convert elevation to altitude (positive up)
-
+    
+    # Calculate mean molecular weight at sea level (dry air approximation)
+    mean_molecular_weight = calculate_mean_molecular_weight(0)  # 0% humidity for simplicity
+    
     for layer in ATMOSPHERIC_LAYERS:
-        layer_bottom, layer_top = layer["altitude_range"]
+        # Determine altitude range based on latitude if available
+        if lat is not None and layer.get("lat_variation"):
+            abs_lat = abs(lat)
+            if abs_lat < 30:
+                layer_range = layer["lat_variation"]["equator"]
+            elif abs_lat < 60:
+                layer_range = layer["lat_variation"]["midlat"]
+            else:
+                layer_range = layer["lat_variation"]["polar"]
+        else:
+            layer_range = layer["altitude_range"]
+        
+        layer_bottom, layer_top = layer_range
         gradient = layer["temp_gradient"]
-
-        # Calculate how much of this layer we need to process
+        
+        # Calculate the thickness of the layer segment we need to process
         layer_thickness = min(layer_top, remaining_altitude + layer_bottom) - layer_bottom
         if layer_thickness <= 0:
             continue
-
-        # Calculate temperature at top of this segment
-        temp_change = gradient * layer_thickness
-        temp_top = current_temp + temp_change
-
-        # Calculate pressure through this layer segment
+        
+        # Calculate temperature at the top of this layer segment
+        temp_top = current_temp + gradient * layer_thickness
+        
         if gradient == 0:
             # Isothermal layer
-            current_pressure *= np.exp(-GRAVITY * layer_thickness * 1000 /
-                                     (GAS_CONSTANT * current_temp))
+            scale_height = (GAS_CONSTANT * current_temp) / (mean_molecular_weight * GRAVITY)
+            current_pressure *= np.exp(-layer_thickness * 1000 / scale_height)
         else:
             # Non-isothermal layer
-            current_pressure *= (temp_top / current_temp) ** (-GRAVITY / (gradient * 1000 * GAS_CONSTANT))
-
+            exponent = -GRAVITY * mean_molecular_weight / (GAS_CONSTANT * gradient * 1000)
+            current_pressure *= (temp_top / current_temp) ** exponent
+        
         current_temp = temp_top
+        current_altitude += layer_thickness
         remaining_altitude -= layer_thickness
-
+        
         if remaining_altitude <= 0:
             break
-
+    
     return current_pressure
 
 def calculate_coriolis_effect(lat, wind_speed):
@@ -191,7 +215,7 @@ def update_pressure_systems(vertices, faces, elevations, temperatures, day_of_ye
         temperature = temperatures[i]
         
         # Base pressure from elevation and temperature
-        base_pressure = calculate_pressure_with_layers(elevation, temperature)
+        base_pressure = calculate_pressure_with_layers(elevation, temperature, lat)
         
         # Global circulation pattern
         circulation_pressure, _ = calculate_global_circulation(lat, elevation)

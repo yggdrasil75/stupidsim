@@ -28,10 +28,62 @@ POLAR_CELL_WIDTH = 30   # Degrees latitude
 CORIOLIS_FACTOR = 0.0001  # Simplified Coriolis effect factor
 # Atmospheric layers (altitude in km, temperature gradient in °C/km)
 ATMOSPHERIC_LAYERS = [
-    {"name": "Troposphere", "altitude_range": (0, 12), "temp_gradient": -6.5},
-    {"name": "Stratosphere", "altitude_range": (12, 50), "temp_gradient": 0.1},
-    {"name": "Mesosphere", "altitude_range": (50, 80), "temp_gradient": -2.8},
-    {"name": "Thermosphere", "altitude_range": (80, 700), "temp_gradient": 0.0}
+    {
+        "name": "troposphere",
+        "altitude_range": (0, 12),  # Default mid-latitude range
+        "temp_gradient": -6.5,  # °C per km
+        "lat_variation": {
+            "equator": (0, 18),  # Higher at equator (0-18km)
+            "midlat": (0, 12),   # Mid-latitude range (0-12km)
+            "polar": (0, 8)      # Lower at poles (0-8km)
+        }
+    },
+    {
+        "name": "tropopause",
+        "altitude_range": (12, 15),  # Default mid-latitude range
+        "temp_gradient": 0,  # Isothermal
+        "lat_variation": {
+            "equator": (18, 20),  # Higher at equator (18-20km)
+            "midlat": (12, 15),   # Mid-latitude range (12-15km)
+            "polar": (8, 10)       # Lower at poles (8-10km)
+        }
+    },
+    {
+        "name": "stratosphere",
+        "altitude_range": (15, 50),
+        "temp_gradient": 1.0,  # Temperature inversion
+        "lat_variation": None  # No latitudinal variation
+    },
+    {
+        "name": "stratopause",
+        "altitude_range": (50, 55),
+        "temp_gradient": 0,  # Isothermal
+        "lat_variation": None
+    },
+    {
+        "name": "mesosphere",
+        "altitude_range": (55, 85),
+        "temp_gradient": -2.0,  # Temperature decreases with altitude
+        "lat_variation": None
+    },
+    {
+        "name": "mesopause",
+        "altitude_range": (85, 90),
+        "temp_gradient": 0,  # Isothermal
+        "lat_variation": None
+    },
+    {
+        "name": "thermosphere",
+        "altitude_range": (90, 500),
+        "temp_gradient": 2.5,  # Temperature increases with altitude
+        "lat_variation": None
+    },
+    {
+        "name": "exosphere",
+        "altitude_range": (500, 10000),
+        "temp_gradient": 0,  # Effectively isothermal
+        "lat_variation": None
+    }
 ]
 # Atmospheric composition constants (by volume)
 ATMOSPHERIC_COMPOSITION = {
