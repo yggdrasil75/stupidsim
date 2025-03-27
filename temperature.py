@@ -1,11 +1,11 @@
 import numpy as np
 
-from globals import ATMOSPHERIC_COMPOSITION, ATMOSPHERIC_LAYERS, AXIAL_TILT_DEGREES, GRAVITY, GREENHOUSE_ABSORPTION, SEA_LEVEL_PRESSURE_HPA
+from globals import ALBEDO_VALUES, ATMOSPHERIC_COMPOSITION, ATMOSPHERIC_LAYERS, AXIAL_TILT_DEGREES, GRAVITY, GREENHOUSE_ABSORPTION, SEA_LEVEL_PRESSURE_HPA
 from pressure import calculate_effective_gas_constant
 from utils import calculate_mean_molecular_weight
 
 
-def calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation, pressure):
+def calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation, pressure, albedo):
     """Calculate solar radiation at a given point considering axial tilt, time, and pressure."""
     solar_constant = 1361  # W/m^2
 
@@ -37,7 +37,9 @@ def calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation, pre
 
     # Total solar radiation
     radiation = solar_constant * cos_zenith * atmospheric_transmittance * elevation_factor
-    return max(0, radiation)
+    effective_radiation = radiation * (1 - albedo)
+    
+    return max(0, effective_radiation)
 
 def calculate_sun_direction(day_of_year, hour_of_day):
     """Calculate the direction vector to the sun based on time of year and time of day."""
@@ -100,10 +102,10 @@ def calculate_temperature_from_radiation(radiation, elevation, water_fraction, p
     # Never below absolute zero
     return max(-273, temperature)
 
-def calculate_temperature(lat, lon, day_of_year, hour_of_day, elevation, water_fraction, pressure):
+def calculate_temperature(lat, lon, day_of_year, hour_of_day, elevation, water_fraction, pressure, albedo):
     """Calculate temperature considering solar radiation, elevation, water bodies, and pressure."""
     # Calculate solar radiation with pressure effects
-    radiation = calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation, pressure)
+    radiation = calculate_solar_radiation(lat, lon, day_of_year, hour_of_day, elevation, pressure, albedo)
 
     # Base temperature from radiation
     base_temp = (radiation / 200) - 10  # Scale radiation to reasonable temps
@@ -199,3 +201,21 @@ def calculate_temperature_with_greenhouse(radiation, elevation, water_fraction, 
     temperature = base_temp + elevation_effect + water_moderation + greenhouse_effect
     
     return max(-273, temperature)
+
+def get_seasonal_albedo(surface_type, day_of_year, latitude):
+    """Adjust albedo for seasonal effects."""
+    base_albedo = ALBEDO_VALUES[surface_type]
+    
+    if surface_type == 'ice':
+        # Seasonal ice melt - more reflective in winter
+        season_factor = np.sin(np.radians(day_of_year/365 * 360))
+        if latitude > 0:  # Northern hemisphere
+            season_factor *= -1
+        return base_albedo * (1 + 0.3 * season_factor)
+    
+    elif surface_type in ['forest', 'grassland']:
+        # Vegetation changes - less reflective in growing season
+        season_factor = np.sin(np.radians(day_of_year/365 * 360))
+        return base_albedo * (1 - 0.1 * season_factor)
+    
+    return base_albedo

@@ -4,13 +4,13 @@ from matplotlib import pyplot as plt
 from matplotlib.widgets import RadioButtons, Slider
 import numpy as np
 
-from globals import PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA, loadConfig, saveConfig
+from globals import ALBEDO_VALUES, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA, loadConfig, saveConfig
 from humidity import calculate_humidity, calculate_rainfall
 from plate import Plate, simulate_plate_tectonics_spherical
 from pressure import calculate_pressure_with_circulation, update_pressure_systems
 from storms import generate_storm_systems, update_storm_systems
 from temperature import calculate_solar_radiation_for_vertex, calculate_sun_direction, calculate_temperature_from_radiation, calculate_temperature_with_greenhouse
-from utils import cartesian_to_lat_lon
+from utils import cartesian_to_lat_lon, determine_surface_type
 from viewer import visualize_world_spherical
 
 
@@ -143,10 +143,10 @@ if __name__ == "__main__":
     subdivisions = config['simulation']['subdivisions']  # Controls mesh resolution (higher = more detailed)
     radius = PLANET_RADIUS_KM
     num_plates = config['plate_tectonics']['initial_num_plates'] #15 # Increased number of plates for more fragmentation
-    num_steps = 12
-    step_size = 0.03
-    max_neighbor_distance_km = 1000  # Distance for plate boundary interactions
-    days_per_step = 30  # Each step represents a month
+    num_steps = config['simulation']['num_steps']
+    step_size = config['simulation']['step_size']
+    max_neighbor_distance_km = config['simulation']['max_neighbor_distance_km']  # Distance for plate boundary interactions
+    days_per_step = config['simulation']['days_per_step']  # Each step represents a month
     current_day = 0
     current_hour = 12  # Noon
     pressures = 0
@@ -189,11 +189,6 @@ if __name__ == "__main__":
             new_storms = generate_storm_systems(vertices, elevations, current_day, num_storms=2)
             active_storms.extend(new_storms)
         
-        # Plate tectonics simulation
-        vertices, plates, plate_assignment, elevations = simulate_plate_tectonics_spherical(
-            vertices, faces, plates, plate_assignment, elevations,
-            days_per_step, max_neighbor_distance_km, step_size, active_storms, water_fraction
-        )
 
 
         # Calculate climate variables
@@ -207,6 +202,12 @@ if __name__ == "__main__":
             )
             for i, vertex in enumerate(vertices)
         ])
+        # Plate tectonics simulation
+        vertices, plates, plate_assignment, elevations = simulate_plate_tectonics_spherical(
+            vertices, faces, plates, plate_assignment, elevations,
+            days_per_step, max_neighbor_distance_km, step_size, 
+            active_storms, water_fraction
+        )
         rainfall = np.zeros(len(vertices))
         humidity_values = np.zeros(len(vertices))
         # Update pressure systems with storms
@@ -215,6 +216,16 @@ if __name__ == "__main__":
 
         for i, vertex in enumerate(vertices):
             lat, lon = cartesian_to_lat_lon(*vertex)
+            
+			
+			# Determine surface type and albedo
+            surface_type = determine_surface_type(elevations[i], temperatures[i], water_fraction[i])
+            albedo = ALBEDO_VALUES[surface_type]
+
+            # Update radiation calculation with albedo
+            radiation = calculate_solar_radiation_for_vertex(
+                vertex, sun_direction, elevations[i], surface_pressures[i]
+            ) * (1 - albedo)
 
             # Get plate properties
             plate_id = plate_assignment[i]

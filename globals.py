@@ -148,3 +148,12 @@ GREENHOUSE_ABSORPTION = {
     'CH4': 0.03,
     'O3': 0.15
 }
+ALBEDO_VALUES = {
+    'water': 0.06,       # Ocean water
+    'ice': 0.6,         # Fresh ice/snow
+    'forest': 0.15,     # Dense forest
+    'grassland': 0.25,  # Grassland
+    'desert': 0.35,     # Sandy desert
+    'rock': 0.2,        # Bare rock
+    'urban': 0.15       # Cities (if implemented)
+}

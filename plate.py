@@ -2,7 +2,7 @@ import random
 
 import numpy as np
 
-from globals import MAX_PLATE_SPEED_CM_YR, MIN_PLATE_SPEED_CM_YR, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA
+from globals import ALBEDO_VALUES, MAX_PLATE_SPEED_CM_YR, MIN_PLATE_SPEED_CM_YR, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA
 from pressure import calculate_diurnal_pressure_variation, calculate_pressure_with_layers, calculate_seasonal_pressure_variation
 from temperature import calculate_temperature
 from utils import cartesian_to_lat_lon, find_spherical_neighbors
@@ -34,6 +34,16 @@ class Plate:
         self.evaporation_rate = 0
         self.precipitation_rate = 0
         self.last_update_day = 0
+        self.albedo = 0.3  # Default mid-range albedo
+        self.albedo_history = []  # Track albedo changes over time
+        self.surface_composition = {
+            'water': 0,
+            'ice': 0,
+            'forest': 0,
+            'grassland': 0,
+            'desert': 0,
+            'rock': 0
+        }
 
     def update_pressure_systems(self, day_of_year, hour_of_day, elevation, temperature, active_storms):
         """Update all pressure systems for this plate."""
@@ -67,6 +77,67 @@ class Plate:
         
         # Update last update time
         self.last_update_day = day_of_year
+        
+    def update_albedo(self, elevations, water_fraction, temperatures, day_of_year):
+        """Calculate plate albedo based on surface composition."""
+        if not self.vertices:
+            return
+            
+        # Calculate surface composition percentages
+        surface_counts = {
+            'water': 0,
+            'ice': 0,
+            'forest': 0,
+            'grassland': 0,
+            'desert': 0,
+            'rock': 0
+        }
+        
+        for vertex_idx in self.vertices:
+            elev = elevations[vertex_idx]
+            water = water_fraction[vertex_idx]
+            temp = temperatures[vertex_idx]
+            
+            # Determine surface type for this vertex
+            if water > 0.9:
+                surface_type = 'water'
+            elif temp < -5 and water > 0.1:
+                surface_type = 'ice'
+            elif elev < 0:
+                surface_type = 'water'
+            elif water > 0.3:
+                surface_type = 'forest' if temp > 10 else 'grassland'
+            elif elev > 4000:
+                surface_type = 'ice' if temp < 0 else 'rock'
+            elif temp > 30 and water < 0.1:
+                surface_type = 'desert'
+            else:
+                surface_type = 'grassland'
+                
+            surface_counts[surface_type] += 1
+        
+        # Calculate percentages
+        total = len(self.vertices)
+        for key in surface_counts:
+            self.surface_composition[key] = surface_counts[key] / total
+        
+        # Calculate weighted average albedo
+        weighted_albedo = 0
+        for surface_type, percentage in self.surface_composition.items():
+            weighted_albedo += percentage * ALBEDO_VALUES[surface_type]
+        
+        # Apply seasonal adjustments
+        lat, lon = cartesian_to_lat_lon(*self.center_point)
+        if 'ice' in self.surface_composition and self.surface_composition['ice'] > 0.1:
+            season_factor = np.sin(np.radians(day_of_year/365 * 360))
+            if lat > 0:  # Northern hemisphere
+                season_factor *= -1
+            weighted_albedo *= (1 + 0.3 * season_factor)
+        
+        self.albedo = weighted_albedo
+        self.albedo_history.append(weighted_albedo)
+        if len(self.albedo_history) > 100:
+            self.albedo_history.pop(0)
 
     def update_humidity_systems(self, day_of_year, elevations, water_fraction, vertices):
         """Update humidity based on plate conditions and neighboring water"""
@@ -126,9 +197,9 @@ class Plate:
         
         # Update plate temperature based on movement (with pressure)
         lat, lon = cartesian_to_lat_lon(*self.center_point)
-        self.temperature = calculate_temperature(lat, lon, 0, 12, avg_elevation, 0, self.pressure)
+        self.temperature = calculate_temperature(lat, lon, 0, 12, avg_elevation, 0, self.pressure, self.albedo)
         
-def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment, elevations, days_elapsed=30, max_neighbor_distance_km=1000, step_size=0.03, active_storms=[], water_fraction=0):
+def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment, elevations, days_elapsed=30, max_neighbor_distance_km=1000, step_size=0.03, active_storms=[], water_fraction=0, temperatures=None):
     """Simulate plate tectonics on spherical mesh with pressure and temperature effects."""
     # Get current date and time
     day_of_year = (plates[0].last_update_day + days_elapsed) % 365
@@ -200,7 +271,8 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
             plate.temperature += avg_temp_change * 0.1
             plate.humidity += avg_humidity_change * 0.1
             plate.humidity = np.clip(plate.humidity, 10, 90)
-
+            plate.move(days_elapsed, day_of_year, hour_of_day, active_storms, 
+                  elevations, water_fraction, vertices)
 
             # Plate speed affected by temperature (warmer plates move faster)
             plate.speed_cm_yr *= (1 + 0.01 * (plate.temperature - 15))

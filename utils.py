@@ -20,6 +20,23 @@ def calculate_mean_molecular_weight(humidity):
     
     return weighted_sum
 
+def determine_surface_type(elevation, temperature, water_fraction):
+    """Determine surface type for albedo calculation."""
+    if water_fraction > 0.9:
+        return 'water'
+    elif temperature < -5 and water_fraction > 0.1:  # Cold and wet = ice
+        return 'ice'
+    elif elevation < 0:  # Underwater
+        return 'water'
+    elif water_fraction > 0.3:  # Wet land
+        return 'forest' if temperature > 10 else 'grassland'
+    elif elevation > 4000:  # High altitude
+        return 'ice' if temperature < 0 else 'rock'
+    elif temperature > 30 and water_fraction < 0.1:  # Hot and dry
+        return 'desert'
+    else:
+        return 'grassland'
+
 def cartesian_to_lat_lon(x, y, z):
     """Convert cartesian coordinates to latitude/longitude."""
     lat = np.degrees(np.arcsin(z / np.sqrt(x**2 + y**2 + z**2)))
