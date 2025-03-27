@@ -1,7 +1,7 @@
 from random import random
 import numpy as np
 from globals import ATMOSPHERIC_COMPOSITION, ATMOSPHERIC_LAYERS, AXIAL_TILT_DEGREES, CORIOLIS_FACTOR, FERREL_CELL_WIDTH, GAS_CONSTANT, GAS_CONSTANTS, GRAVITY, HADLEY_CELL_WIDTH, POLAR_CELL_WIDTH, SEA_LEVEL_PRESSURE_HPA
-from utils import calculate_mean_molecular_weight, cartesian_to_lat_lon, find_spherical_neighbors
+from utils import calculate_mean_molecular_weight, cartesian_to_lat_lon, find_spherical_neighbors, haversine_distance
 
 
 def calculate_seasonal_pressure_variation(lat, day_of_year):
@@ -231,7 +231,15 @@ def update_pressure_systems(vertices, faces, elevations, temperatures, day_of_ye
         # Storm effects
         storm_effect = 0
         for storm in active_storms:
-            storm_effect += storm.calculate_pressure_effect(lat, lon)
+            for i, vertex in enumerate(vertices):
+                lat, lon = cartesian_to_lat_lon(*vertex)
+                distance = haversine_distance(storm.center_lat, storm.center_lon, lat, lon)
+                
+                if distance < storm.radius_km * 2:  # Wider influence area
+                    # Create proper pressure gradient toward storm center
+                    gradient_dir = 1 if storm.pressure_anomaly < 0 else -1  # Low vs high pressure
+                    pressures[i] += gradient_dir * (storm.pressure_anomaly * 
+                                                np.exp(-(distance**2)/(2*(storm.radius_km)**2)))
         
         # Combine all effects
         combined_pressure = (

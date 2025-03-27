@@ -9,7 +9,7 @@ from globals import ALBEDO_VALUES, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA, loa
 from humidity import calculate_humidity, calculate_rainfall
 from plate import Plate, simulate_plate_tectonics_spherical
 from pressure import calculate_pressure_with_circulation, update_pressure_systems
-from storms import generate_storm_systems, update_storm_systems
+from storms import generate_storm_systems
 from temperature import calculate_solar_radiation_for_vertex, calculate_sun_direction, calculate_temperature_from_radiation, calculate_temperature_with_greenhouse
 from utils import cartesian_to_lat_lon, determine_surface_type
 from viewer import visualize_world_spherical
@@ -185,7 +185,18 @@ if __name__ == "__main__":
         current_hour = (current_hour + 6) % 24  # Advance 6 hours each step
 
         # Update storm systems
-        active_storms = update_storm_systems(active_storms, vertices, elevations, days_per_step)
+        
+        for storm in active_storms:
+            for i, vertex in enumerate(vertices):
+                lat, lon = cartesian_to_lat_lon(*vertex)
+                if storm.is_in_rain_band(lat, lon):
+                    rainfall[i] += storm.get_rainfall_intensity(lat, lon)
+            storm.update(vertices, elevations, temperatures, pressures, faces, days_per_step)
+            
+            # Remove dissipated storms
+            if abs(storm.pressure_anomaly) < 1:  # Fully dissipated
+                active_storms.remove(storm)
+        #active_storms = update_storm_systems(active_storms, vertices, elevations, days_per_step)
         
         # Calculate water fraction for each vertex (simplified)
         water_fraction = np.where(elevations < 0, 1.0, 0.0)

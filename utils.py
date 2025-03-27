@@ -1,4 +1,5 @@
 
+import math
 import numpy as np
 
 from globals import ATMOSPHERIC_COMPOSITION, MOLECULAR_WEIGHTS, PLANET_RADIUS_KM
@@ -107,3 +108,47 @@ def calculate_slope(vertices, faces, vertex_idx):
     # Slope = angle between normal and radial vector
     radial_vector = vertices[vertex_idx] / np.linalg.norm(vertices[vertex_idx])
     return np.arccos(np.clip(np.dot(normal, radial_vector), -1, 1))
+
+def calculate_bearing_math(lat1, lon1, lat2, lon2):
+    lat1_rad = math.radians(lat1)
+    lon1_rad = math.radians(lon1)
+    lat2_rad = math.radians(lat2)
+    lon2_rad = math.radians(lon2)
+
+    # Calculate the difference in longitudes
+    dLon = lon2_rad - lon1_rad
+
+    # Calculate bearing using the formula:
+    # θ = atan2(sin(Δlong)*cos(lat2), cos(lat1)*sin(lat2) − sin(lat1)*cos(lat2)*cos(Δlong))
+    x = math.sin(dLon) * math.cos(lat2_rad)
+    y = (math.cos(lat1_rad) * math.sin(lat2_rad) - 
+        (math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(dLon)))
+
+    # Calculate the initial bearing in radians
+    initial_bearing = math.atan2(x, y)
+
+    # Convert from radians to degrees (0-360)
+    initial_bearing_deg = math.degrees(initial_bearing)
+    compass_bearing = (initial_bearing_deg + 360) % 360
+
+    return compass_bearing
+
+def calculate_bearing(lat1, lon1, lat2, lon2):
+    """
+    Vectorized version of calculate_bearing for numpy arrays.
+    All inputs should be numpy arrays of the same shape.
+    """
+    lat1_rad = np.radians(lat1)
+    lon1_rad = np.radians(lon1)
+    lat2_rad = np.radians(lat2)
+    lon2_rad = np.radians(lon2)
+    
+    dLon = lon2_rad - lon1_rad
+    
+    x = np.sin(dLon) * np.cos(lat2_rad)
+    y = np.cos(lat1_rad) * np.sin(lat2_rad) - np.sin(lat1_rad) * np.cos(lat2_rad) * np.cos(dLon)
+    
+    initial_bearing = np.arctan2(x, y)
+    compass_bearing = (np.degrees(initial_bearing) + 360) % 360
+    
+    return compass_bearing

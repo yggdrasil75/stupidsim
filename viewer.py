@@ -9,6 +9,9 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 							show_storms=False, active_storms=None):
 	global cbar_obj
 	ax.clear()
+	ax.set_zorder(1)
+	if show_clouds and cloud_coverage is not None:
+		cloud_mesh.set_zorder(0.5)
 
 	# Main data visualization
 	if data_type == 'elevation':
@@ -72,14 +75,33 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 		for storm in active_storms:
 			lat_rad = np.radians(storm.center_lat)
 			lon_rad = np.radians(storm.center_lon)
-			x = np.cos(lat_rad) * np.cos(lon_rad) * (PLANET_RADIUS_KM + 50)
-			y = np.cos(lat_rad) * np.sin(lon_rad) * (PLANET_RADIUS_KM + 50)
-			z = np.sin(lat_rad) * (PLANET_RADIUS_KM + 50)
 			
+			# Calculate position with a small offset to ensure visibility
+			offset_factor = 1.02  # 2% larger than planet surface
+			x = np.cos(lat_rad) * np.cos(lon_rad) * (PLANET_RADIUS_KM * offset_factor + 50)
+			y = np.cos(lat_rad) * np.sin(lon_rad) * (PLANET_RADIUS_KM * offset_factor + 50)
+			z = np.sin(lat_rad) * (PLANET_RADIUS_KM * offset_factor + 50)
+			
+			# Determine storm properties
 			color = 'red' if storm.pressure_anomaly < 0 else 'blue'
-			size = np.clip(abs(storm.pressure_anomaly), 5, 30)
+			size = np.clip(abs(storm.pressure_anomaly) * 2, 10, 40)  # Increased base size
 			
-			ax.scatter([x], [y], [z], c=color, s=size, edgecolor='black', alpha=0.8)
+			# Use a more visible marker with edge
+			ax.scatter([x], [y], [z], 
+					c=color, 
+					s=size, 
+					edgecolor='white',
+					linewidth=1.5,
+					marker='o',
+					alpha=0.9)
+			
+			# Add a smaller inner marker for better visibility
+			ax.scatter([x], [y], [z], 
+					c=color, 
+					s=size/3, 
+					edgecolor='none',
+					marker='o',
+					alpha=1.0)
 
 	# Colorbar
 	if cbar_obj is None:

@@ -74,6 +74,7 @@ def calculate_solar_radiation_for_vertex(vertex, sun_direction, elevation, surfa
         return 0
 
     pressure_ratio = effective_pressure / SEA_LEVEL_PRESSURE_HPA
+    pressure_ratio = np.clip(pressure_ratio, 0.00001, 1.5)
     air_mass = 1.0 / (cos_zenith + 0.50572 * (96.07995 - np.degrees(np.arccos(cos_zenith))) ** -1.6364)
     atmospheric_transmittance = (0.7 * pressure_ratio) ** air_mass
 
