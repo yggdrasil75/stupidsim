@@ -57,15 +57,13 @@ def calculate_sun_direction(day_of_year, hour_of_day):
 
     return np.array([x, y, z])
 
-def calculate_solar_radiation_for_vertex(vertex, sun_direction, elevation, surface_pressure):
+def calculate_solar_radiation_for_vertex(vertex, sun_direction, elevation, surface_pressure, cloud_coverage=0, cloud_albedo=0.5):
     """Calculate solar radiation considering atmospheric layers."""
     solar_constant = 1361  # W/m^2
 
     # Calculate atmospheric thickness based on elevation
     atmospheric_thickness = max(0, -elevation)  # Convert elevation to altitude
 
-    # Calculate effective pressure (weighted average through atmosphere)
-    # This is a simplified approach - more accurate would be to integrate through layers
     effective_pressure = surface_pressure * np.exp(-atmospheric_thickness / 8.5)  # Scale height approx
 
     # Rest of the calculation remains similar but uses effective_pressure
@@ -79,7 +77,9 @@ def calculate_solar_radiation_for_vertex(vertex, sun_direction, elevation, surfa
     air_mass = 1.0 / (cos_zenith + 0.50572 * (96.07995 - np.degrees(np.arccos(cos_zenith))) ** -1.6364)
     atmospheric_transmittance = (0.7 * pressure_ratio) ** air_mass
 
-    radiation = solar_constant * cos_zenith * atmospheric_transmittance
+    cloud_transmittance = 1 - (cloud_coverage * (1 - 0.3))  # Clouds block 70% of light
+
+    radiation = solar_constant * cos_zenith * atmospheric_transmittance * cloud_transmittance
     return max(0, radiation)
 
 def calculate_temperature_from_radiation(radiation, elevation, water_fraction, pressure):

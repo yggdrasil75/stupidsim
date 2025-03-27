@@ -157,3 +157,13 @@ ALBEDO_VALUES = {
     'rock': 0.2,        # Bare rock
     'urban': 0.15       # Cities (if implemented)
 }
+CLOUD_ALBEDO_VALUES = {
+    'cirrus': 0.3,      # Thin, high clouds
+    'alto': 0.5,        # Mid-level clouds
+    'stratus': 0.7,     # Low, uniform clouds
+    'cumulus': 0.8,     # Puffy, fair-weather clouds
+    'cumulonimbus': 0.9 # Thunderstorm clouds
+}
+
+CLOUD_BASE_ALBEDO = 0.5  # Default cloud albedo
+MAX_CLOUD_COVERAGE = 0.9  # Maximum cloud coverage (90%)

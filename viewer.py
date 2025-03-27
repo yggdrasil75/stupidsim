@@ -67,6 +67,17 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 		title = 'Surface Pressure (atm)'
 		cbar_label = 'Pressure (atm)'
 
+	elif data_type == 'clouds':
+		# Cloud coverage is already normalized between 0-1
+		vmin = np.percentile(data, 5)
+		vmax = np.percentile(data, 95)
+		norm_data = (data - vmin) / (vmax - vmin)
+		face_data = np.mean(data[faces], axis=1)
+		colors = plt.cm.Blues_r(face_data)
+		cmap = 'Blues_r'
+		title = 'Cloud Coverage'
+		cbar_label = 'Coverage (0-1)'
+
 	# Plot the mesh with face colors
 	mesh = ax.plot_trisurf(vertices[:, 0], vertices[:, 1], vertices[:, 2],
 							triangles=faces, color='white',

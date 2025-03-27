@@ -4,6 +4,7 @@ from matplotlib import pyplot as plt
 from matplotlib.widgets import RadioButtons, Slider
 import numpy as np
 
+from clouds import CloudSystem
 from globals import ALBEDO_VALUES, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA, loadConfig, saveConfig
 from humidity import calculate_humidity, calculate_rainfall
 from plate import Plate, simulate_plate_tectonics_spherical
@@ -166,6 +167,7 @@ if __name__ == "__main__":
         subdivisions, radius, num_plates, surface_pressures
     )
     print("Starting a new simulation.")
+    cloud_system = CloudSystem(vertices, elevations)
 
     # Run simulation
     world_history = []
@@ -195,7 +197,8 @@ if __name__ == "__main__":
         sun_direction = calculate_sun_direction(current_day, current_hour)
         temperatures = np.array([
             calculate_temperature_from_radiation(
-                calculate_solar_radiation_for_vertex(vertex, sun_direction, elevations[i], SEA_LEVEL_PRESSURE_HPA),
+                calculate_solar_radiation_for_vertex(vertex, sun_direction, elevations[i], SEA_LEVEL_PRESSURE_HPA,
+                cloud_system.cloud_coverage[i], cloud_system.cloud_albedo[i]),
                 elevations[i],
                 water_fraction[i],
                 SEA_LEVEL_PRESSURE_HPA
@@ -204,6 +207,7 @@ if __name__ == "__main__":
         ])
         rainfall = np.zeros(len(vertices))
         humidity_values = np.zeros(len(vertices))
+        cloud_system.update_clouds(temperatures, humidity_values, surface_pressures, rainfall, current_day)
         # Plate tectonics simulation
         vertices, plates, plate_assignment, elevations = simulate_plate_tectonics_spherical(
             vertices, faces, plates, plate_assignment, elevations,
@@ -224,7 +228,8 @@ if __name__ == "__main__":
 
             # Update radiation calculation with albedo
             radiation = calculate_solar_radiation_for_vertex(
-                vertex, sun_direction, elevations[i], surface_pressures[i]
+                vertex, sun_direction, elevations[i], surface_pressures[i],
+                cloud_system.cloud_coverage[i], cloud_system.cloud_albedo[i]
             ) * (1 - albedo)
 
             # Get plate properties
@@ -242,7 +247,7 @@ if __name__ == "__main__":
 
             # Calculate temperature at surface considering atmospheric layers
             temperatures[i] = calculate_temperature_with_greenhouse(calculate_solar_radiation_for_vertex(vertex, sun_direction, 
-                                                elevations[i], surface_pressures[i]),
+                                                elevations[i], surface_pressures[i],cloud_system.cloud_coverage[i], cloud_system.cloud_albedo[i]),
                 elevations[i], 
                 water_fraction[i], 
                 surface_pressures[i],
@@ -273,7 +278,7 @@ if __name__ == "__main__":
 
     # Add radio buttons for view selection
     rax = plt.axes([0.05, 0.4, 0.15, 0.15])
-    radio = RadioButtons(rax, ('Elevation', 'Temperature', 'Rainfall', 'Pressure'))
+    radio = RadioButtons(rax, ('Elevation', 'Temperature', 'Rainfall', 'Pressure', 'Clouds'))
 
     def update_view(label):
         vertices, elevations, temperatures, rainfall, surface_pressures = world_history[current_step] # Unpack surface_pressures
@@ -285,6 +290,8 @@ if __name__ == "__main__":
             visualize_world_spherical(vertices, faces, rainfall, ax_3d, 'rainfall', elevations=elevations)
         elif label == 'Pressure':
             visualize_world_spherical(vertices, faces, surface_pressures, ax_3d, 'pressure', elevations=elevations)
+        elif label == 'Clouds':
+            visualize_world_spherical(vertices, faces, cloud_system.cloud_coverage, ax_3d, 'clouds', elevations=elevations)
         fig.canvas.draw_idle()
 
     radio.on_clicked(update_view)
