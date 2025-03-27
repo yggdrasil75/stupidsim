@@ -91,3 +91,19 @@ def find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km):
             final_neighbors.append(v)
 
     return final_neighbors
+
+def calculate_slope(vertices, faces, vertex_idx):
+    """Estimate terrain slope (radians) at a vertex using neighboring faces."""
+    neighbors = find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km=100)
+    if not neighbors:
+        return 0
+    
+    # Fit a plane to neighboring vertices
+    points = vertices[neighbors + [vertex_idx]]
+    centroid = np.mean(points, axis=0)
+    _, _, vh = np.linalg.svd(points - centroid)
+    normal = vh[2, :]  # Plane normal vector
+    
+    # Slope = angle between normal and radial vector
+    radial_vector = vertices[vertex_idx] / np.linalg.norm(vertices[vertex_idx])
+    return np.arccos(np.clip(np.dot(normal, radial_vector), -1, 1))

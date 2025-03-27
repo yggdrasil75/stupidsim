@@ -10,8 +10,12 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 
 	if data_type == 'elevation':
 		# Normalize elevations for coloring (using percentile to handle outliers)
-		vmin = np.percentile(data, 5)
-		vmax = np.percentile(data, 95)
+		#vmin = np.percentile(data, 5)
+		#vmax = np.percentile(data, 95)
+		#norm_data = (data - vmin) / (vmax - vmin)
+		#norm_data = np.clip(norm_data, 0, 1)
+
+		vmin, vmax = -10000, 10000
 		norm_data = (data - vmin) / (vmax - vmin)
 		norm_data = np.clip(norm_data, 0, 1)
 

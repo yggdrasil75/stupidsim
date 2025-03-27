@@ -202,14 +202,14 @@ if __name__ == "__main__":
             )
             for i, vertex in enumerate(vertices)
         ])
+        rainfall = np.zeros(len(vertices))
+        humidity_values = np.zeros(len(vertices))
         # Plate tectonics simulation
         vertices, plates, plate_assignment, elevations = simulate_plate_tectonics_spherical(
             vertices, faces, plates, plate_assignment, elevations,
             days_per_step, max_neighbor_distance_km, step_size, 
-            active_storms, water_fraction
+            active_storms, water_fraction, temperatures, rainfall, humidity_values
         )
-        rainfall = np.zeros(len(vertices))
-        humidity_values = np.zeros(len(vertices))
         # Update pressure systems with storms
         surface_pressures = update_pressure_systems(vertices, faces, elevations, temperatures, 
                                                 current_day, current_hour, active_storms)
@@ -308,5 +308,6 @@ if __name__ == "__main__":
 
     step_slider.on_changed(update_step)
     saveConfig(config)
-	
+    plt.title('StupidSim')
+
     plt.show()

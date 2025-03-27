@@ -5,7 +5,7 @@ import numpy as np
 from globals import ALBEDO_VALUES, MAX_PLATE_SPEED_CM_YR, MIN_PLATE_SPEED_CM_YR, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA
 from pressure import calculate_diurnal_pressure_variation, calculate_pressure_with_layers, calculate_seasonal_pressure_variation
 from temperature import calculate_temperature
-from utils import cartesian_to_lat_lon, find_spherical_neighbors
+from utils import calculate_slope, cartesian_to_lat_lon, find_spherical_neighbors
 
 
 
@@ -199,7 +199,9 @@ class Plate:
         lat, lon = cartesian_to_lat_lon(*self.center_point)
         self.temperature = calculate_temperature(lat, lon, 0, 12, avg_elevation, 0, self.pressure, self.albedo)
         
-def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment, elevations, days_elapsed=30, max_neighbor_distance_km=1000, step_size=0.03, active_storms=[], water_fraction=0, temperatures=None):
+def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment, elevations, 
+                                       days_elapsed=30, max_neighbor_distance_km=1000, step_size=0.03, 
+                                       active_storms=[], water_fraction=0, temperatures=None, rainfall=None, humidity=None):
     """Simulate plate tectonics on spherical mesh with pressure and temperature effects."""
     # Get current date and time
     day_of_year = (plates[0].last_update_day + days_elapsed) % 365
@@ -233,7 +235,7 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
                 neighbor_plate = plates[neighbor_plate_id-1]
 
                 # Elevation adjustment based on plate movement
-                boundary_effects[i] += 0.001 * step_size
+                boundary_effects[i] += 0.00001 * step_size
                 boundary_effects[neighbor_idx] -= 0.001 * step_size
 
                 # Pressure changes at plate boundaries
@@ -283,6 +285,14 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
         neighbor_indices = find_spherical_neighbors(vertices, faces, i, max_neighbor_distance_km)
         neighbor_elevations = [elevations[j] for j in neighbor_indices]
         smoothed_elevations[i] = np.mean([elevations[i]] + neighbor_elevations)
+        if elevations[i] > 0:  # Only erode land
+            lat, lon = cartesian_to_lat_lon(*vertices[i])
+            slope = calculate_slope(vertices, faces, i)  # Implement slope calculation (see below)
+            erosion = calculate_erosion(
+                elevations[i], rainfall[i], humidity[i], 
+                temperatures[i], slope, wind_speed=5.0  # Default wind speed
+            )
+            elevations[i] -= erosion * days_elapsed / 365
 
     elevations = smoothed_elevations
 
@@ -311,15 +321,31 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
 
     return vertices, plates, new_plate_assignment, elevations
 
-def calculate_erosion(elevation, rainfall, humidity, wind_speed):
-    """Calculate erosion based on rainfall, humidity, and wind."""
-    # Water erosion
-    water_erosion = rainfall * 0.001  # More rain = more erosion
-
-    # Wind erosion (depends on humidity - drier areas have more wind erosion)
-    wind_erosion = wind_speed * (1 - humidity/100) * 0.005
-
-    # Total erosion (only applies to land above sea level)
+def calculate_erosion(elevation, rainfall, humidity, temperature, slope, wind_speed):
+    """Calculate erosion (mm/year) based on environmental factors.
+    
+    Args:
+        elevation (float): Meters above sea level.
+        rainfall (float): Annual rainfall (mm).
+        humidity (float): Relative humidity (%).
+        temperature (float): Annual mean temperature (°C).
+        slope (float): Terrain steepness (radians).
+        wind_speed (float): Annual mean wind speed (m/s).
+    
+    Returns:
+        float: Erosion rate (mm/year).
+    """
+    # Water erosion (rainfall + slope-dependent)
+    water_erosion = rainfall * 0.0001 * (1 + np.tan(slope))  # ~0.1 mm/yr per 1000mm rain
+    
+    # Wind erosion (humidity-dependent)
+    wind_erosion = wind_speed**2 * (1 - humidity/100) * 0.001  # ~1 mm/yr at 10 m/s in deserts
+    
+    # Thermal weathering (freeze-thaw cycles)
+    freeze_thaw_cycles = max(0, np.abs(temperature - 0) / 10)  # Peaks near 0°C
+    thermal_erosion = freeze_thaw_cycles * 0.05
+    
+    # Total erosion (only on land)
     if elevation > 0:
-        return water_erosion + wind_erosion
+        return water_erosion + wind_erosion + thermal_erosion
     return 0
