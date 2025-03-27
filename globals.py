@@ -1,5 +1,6 @@
 
 import json
+import math
 
 config = {}
 def loadConfig() -> json:
@@ -15,11 +16,36 @@ def saveConfig(config: json =config):
 
 PLANET_RADIUS_KM = 6371.0
 ORBITAL_DISTANCE_AU = 1.0
-AXIAL_TILT_DEGREES = 23.5
-MIN_PLATE_SPEED_CM_YR = 1.0  # ~1 cm/year (slow moving plates)
-MAX_PLATE_SPEED_CM_YR = 10.0  # ~10 cm/year (fast moving plates)
-SEA_LEVEL_PRESSURE_HPA = 1013.25  # Standard atmospheric pressure at sea level
+PLANET_MASS_EARTH = 1.0  # Earth masses
+PLANET_RADIUS_EARTH = 1.0  # Earth radii
 GAS_CONSTANT = 287.05  # Specific gas constant for dry air (J/kg·K)
+# Universal gravitational constant (m^3 kg^-1 s^-2)
+GRAVITATIONAL_CONSTANT = 6.67430e-11
+
+# Earth's mass (kg)
+EARTH_MASS = 5.9722e24
+
+# Earth's radius (m)
+EARTH_RADIUS = 6371000.0
+
+# Calculate actual planet properties
+PLANET_MASS = PLANET_MASS_EARTH * EARTH_MASS
+PLANET_RADIUS = PLANET_RADIUS_EARTH * EARTH_RADIUS
+PLANET_RADIUS_KM = PLANET_RADIUS / 1000.0
+
+# Calculate surface gravity (m/s²)
+GRAVITY = (GRAVITATIONAL_CONSTANT * PLANET_MASS) / (PLANET_RADIUS ** 2)
+
+# Calculate escape velocity (m/s)
+ESCAPE_VELOCITY = math.sqrt(2 * GRAVITATIONAL_CONSTANT * PLANET_MASS / PLANET_RADIUS)
+
+# Calculate atmospheric scale height (m) - approximate
+MEAN_MOLECULAR_WEIGHT = 0.029  # kg/mol (approximate for Earth's air)
+ATMOSPHERIC_SCALE_HEIGHT = (GAS_CONSTANT * 288.15) / (MEAN_MOLECULAR_WEIGHT * GRAVITY)  # Using 288K as reference temp
+AXIAL_TILT_DEGREES = 23.5
+MIN_PLATE_SPEED_CM_YR = 1.0 * (GRAVITY/9.81)  # Scale with gravity
+MAX_PLATE_SPEED_CM_YR = 10.0 * (GRAVITY/9.81)  # Scale with gravity
+SEA_LEVEL_PRESSURE_HPA = 1013.25  # Standard atmospheric pressure at sea level
 GRAVITY = 9.81  # m/s²
 cbar_obj = None  # Global variable to store the colorbar object
 HADLEY_CELL_WIDTH = 30  # Degrees latitude

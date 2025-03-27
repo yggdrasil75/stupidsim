@@ -47,19 +47,21 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 		cbar_label = 'Rainfall (mm)'
 
 	elif data_type == 'pressure':
-		# Use the pressure data directly (it should be passed as 'data' parameter)
-		# Normalize between typical surface pressure range
-		vmin = np.percentile(data, 5)  # Use 5th percentile as min
-		vmax = np.percentile(data, 95)  # Use 95th percentile as max
-		norm_data = (data - vmin) / (vmax - vmin)
+		# Convert pressure data from hPa to atm
+		data_atm = data / 1013.25
+		
+		# Normalize between typical surface pressure range (in atm)
+		vmin = np.percentile(data_atm, 5)  # Use 5th percentile as min
+		vmax = np.percentile(data_atm, 95)  # Use 95th percentile as max
+		norm_data = (data_atm - vmin) / (vmax - vmin)
 		norm_data = np.clip(norm_data, 0, 1)
 
 		# Create face colors
 		face_data = np.mean(norm_data[faces], axis=1)
 		colors = plt.cm.viridis(face_data)
 		cmap = 'viridis'
-		title = 'Surface Pressure (hPa)'
-		cbar_label = 'Pressure (hPa)'
+		title = 'Surface Pressure (atm)'
+		cbar_label = 'Pressure (atm)'
 
 	# Plot the mesh with face colors
 	mesh = ax.plot_trisurf(vertices[:, 0], vertices[:, 1], vertices[:, 2],
