@@ -16,6 +16,13 @@ ext_modules = [
         language='c++',
         extra_compile_args=extra_compile_args,
     ),
+    Extension(
+        'storms_cpp',
+        sources=['storms.cpp'],
+        include_dirs=[pybind11.get_include()],
+        language='c++',
+        extra_compile_args=extra_compile_args,
+    ),
 ]
 
 setup(
