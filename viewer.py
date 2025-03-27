@@ -10,8 +10,6 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 	global cbar_obj
 	ax.clear()
 	ax.set_zorder(1)
-	if show_clouds and cloud_coverage is not None:
-		cloud_mesh.set_zorder(0.5)
 
 	# Main data visualization
 	if data_type == 'elevation':
@@ -60,7 +58,6 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 
 	# Add cloud overlay if enabled
 	if show_clouds and cloud_coverage is not None:
-		print(cloud_coverage)
 		face_clouds = np.mean(cloud_coverage[faces], axis=1)
 		cloud_colors = plt.cm.Blues_r(face_clouds)
 		
@@ -69,6 +66,7 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 									triangles=faces, alpha=0.0)  # Invisible geometry
 		cloud_mesh.set_facecolor(cloud_colors)
 		cloud_mesh.set_alpha(0.3)  # Set transparency after creating mesh
+		cloud_mesh.set_zorder(0.5)
 
 	# Add storm markers if enabled
 	if show_storms and active_storms is not None:
