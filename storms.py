@@ -7,8 +7,8 @@ from utils import calculate_bearing, cartesian_to_lat_lon, find_spherical_neighb
 
 class StormSystem:
     def __init__(self, center_lat, center_lon, pressure_anomaly, radius_km=500, movement_speed_km_day=50):
-        self.center_lat = center_lat
-        self.center_lon = center_lon
+        self.center_lat: float = center_lat
+        self.center_lon: float = center_lon
         self.pressure_anomaly = pressure_anomaly  # Negative for cyclones, positive for anticyclones
         self.radius_km = radius_km
         self.movement_speed_km_day = movement_speed_km_day
@@ -37,14 +37,18 @@ class StormSystem:
     def _find_nearest_vertex(self, vertices):
         # Convert all vertices to lat/lon first
         vertex_coords = np.array([cartesian_to_lat_lon(*v) for v in vertices])
-        vertex_lats = vertex_coords[:, 0]
-        vertex_lons = vertex_coords[:, 1]
+        vertex_lats: float = vertex_coords[:, 0]
+        vertex_lons: float = vertex_coords[:, 1]
         
         # Calculate all distances at once
-        distances = haversine_distance(
-            self.center_lat, self.center_lon,
-            vertex_lats, vertex_lons
-        )
+        distances = np.array([
+            haversine_distance(self.center_lat, self.center_lon, lat, lon)
+            for lat, lon in zip(vertex_lats, vertex_lons)
+        ])
+        # distances = haversine_distance(
+        #     self.center_lat, self.center_lon,
+        #     vertex_lats, vertex_lons
+        # )
         
         return np.argmin(distances)
             

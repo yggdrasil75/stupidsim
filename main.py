@@ -1,3 +1,4 @@
+import json
 import math
 
 from matplotlib import pyplot as plt
@@ -75,7 +76,7 @@ def generate_icosphere(subdivisions=3, radius=1.0):
 
     return vertices, faces
 
-def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5, surface_pressures=None):
+def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5):
     """Generate initial world with spherical mesh and plates."""
     vertices, faces = generate_icosphere(subdivisions, radius)
 
@@ -83,8 +84,7 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
     elevations = np.zeros(len(vertices))
     humidity_values = np.zeros(len(vertices))
     rainfall = np.zeros(len(vertices))
-    if surface_pressures is None:
-        surface_pressures = np.zeros(len(vertices))
+    surface_pressures = np.zeros(len(vertices))
     for i, vertex in enumerate(vertices):
         # Convert to spherical coordinates
         lat, lon = cartesian_to_lat_lon(*vertex)
@@ -143,19 +143,17 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
     return vertices, faces, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall
 
 if __name__ == "__main__":
-    config = loadConfig()
+    config: json = loadConfig()
     # Simulation parameters
-    subdivisions = config['simulation']['subdivisions']  # Controls mesh resolution (higher = more detailed)
-    radius = PLANET_RADIUS_KM
-    num_plates = config['plate_tectonics']['initial_num_plates'] #15 # Increased number of plates for more fragmentation
-    num_steps = config['simulation']['num_steps']
-    step_size = config['simulation']['step_size']
-    max_neighbor_distance_km = config['simulation']['max_neighbor_distance_km']  # Distance for plate boundary interactions
-    days_per_step = config['simulation']['days_per_step']  # Each step represents a month
-    current_day = 0
-    current_hour = 12  # Noon
-    pressures = 0
-    surface_pressures = None # Initialize surface_pressures to None
+    subdivisions: int = config['simulation']['subdivisions']  # Controls mesh resolution (higher = more detailed)
+    radius: float = PLANET_RADIUS_KM
+    num_plates: int = config['plate_tectonics']['initial_num_plates'] #15 # Increased number of plates for more fragmentation
+    num_steps: int = config['simulation']['num_steps']
+    step_size: float = config['simulation']['step_size']
+    max_neighbor_distance_km: int = config['simulation']['max_neighbor_distance_km']  # Distance for plate boundary interactions
+    days_per_step: float = config['simulation']['days_per_step']  # Each step represents a month
+    current_day: int = 0
+    current_hour: int = 12  # Noon
 
     sim_params = {
         'subdivisions': subdivisions,
@@ -168,7 +166,7 @@ if __name__ == "__main__":
 
 
     vertices, faces, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall = generate_initial_world_spherical(
-        subdivisions, radius, num_plates, surface_pressures
+        subdivisions, radius, num_plates
     )
     print("Starting a new simulation.")
     cloud_system = CloudSystem(vertices, elevations)
@@ -191,7 +189,7 @@ if __name__ == "__main__":
                 lat, lon = cartesian_to_lat_lon(*vertex)
                 if storm.is_in_rain_band(lat, lon):
                     rainfall[i] += storm.get_rainfall_intensity(lat, lon)
-            storm.update(vertices, elevations, temperatures, pressures, faces, days_per_step)
+            storm.update(vertices, elevations, temperatures, surface_pressures, faces, days_per_step)
             
             # Remove dissipated storms
             if abs(storm.pressure_anomaly) < 1:  # Fully dissipated
@@ -355,5 +353,8 @@ if __name__ == "__main__":
     step_slider.on_changed(update_step)
     saveConfig(config)
     plt.title('StupidSim')
-
+    for var_name, var_value in locals().copy().items():
+        print(f'{var_name} is {type(var_value)}')
+    for var_name, var_value in globals().copy().items():
+        print(f'{var_name} is {type(var_value)}')
     plt.show()
