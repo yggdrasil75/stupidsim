@@ -10,38 +10,69 @@ class CloudSystem:
         self.cloud_albedo = np.zeros(len(vertices))
         
     def update_clouds(self, temperatures, humidities, pressures, rainfall, day_of_year):
-        """Update cloud coverage based on current atmospheric conditions"""
-        for i in range(len(self.vertices)):
-            # Base cloud formation probability
-            cloud_prob = min(0.9, humidities[i]/100 * 0.7 + 
-                           (1 - pressures[i]/SEA_LEVEL_PRESSURE_HPA) * 0.3)
-            
-            # Temperature effect (more clouds at moderate temps)
-            temp_effect = 1 - abs(temperatures[i] - 20)/30
-            cloud_prob *= max(0.1, temp_effect)
-            
-            # Rainfall effect (more clouds where it's raining)
-            cloud_prob = min(1.0, cloud_prob + rainfall[i]/300)
-            
-            # Seasonal variation
-            seasonal_var = 0.1 * np.sin(2 * np.pi * (day_of_year - 80) / 365.25)
-            cloud_prob = np.clip(cloud_prob + seasonal_var, 0, MAX_CLOUD_COVERAGE)
-            
-            # Determine cloud type based on elevation and conditions
-            if self.elevations[i] > 4000 and temperatures[i] < -20:
-                cloud_type_idx = 0  # cirrus
-            elif rainfall[i] > 50:
-                cloud_type_idx = 4  # cumulonimbus
-            elif cloud_prob > 0.7:
-                cloud_type_idx = 3  # cumulus
-            elif cloud_prob > 0.4:
-                cloud_type_idx = 2  # stratus
-            else:
-                cloud_type_idx = 1  # alto
-            
-            self.cloud_coverage[i] = cloud_prob
-            self.cloud_type[i] = cloud_type_idx
-            self.cloud_albedo[i] = CLOUD_ALBEDO_VALUES[list(CLOUD_ALBEDO_VALUES.keys())[cloud_type_idx]]
+        # Convert inputs to numpy arrays if they aren't already
+        temperatures = np.asarray(temperatures)
+        humidities = np.asarray(humidities)
+        pressures = np.asarray(pressures)
+        rainfall = np.asarray(rainfall)
+        
+        # Calculate dew points
+        dewpoints = temperatures - ((100 - humidities) / 5)
+        
+        # Relative humidity effect (0-1 scale)
+        rh_effect = np.clip((humidities - 50) / 50, 0, 1)
+        
+        # Pressure effect - more clouds in low pressure areas
+        pressure_norm = (1013 - pressures) / 30  # Normalize pressure anomaly
+        pressure_effect = np.clip(pressure_norm, 0, 1)
+        
+        # Stability effect - less clouds when surface temp is much higher than dewpoint
+        temp_dew_diff = temperatures - dewpoints
+        stability_effect = 1 - np.clip((temp_dew_diff - 5) / 15, 0, 1)
+        
+        # Rainfall effect - recent rain indicates existing clouds
+        rainfall_effect = np.clip(rainfall / 100, 0, 0.3)
+        
+        # Seasonal variation
+        seasonal_var = 0.1 * np.sin(2 * np.pi * (day_of_year - 80) / 365.25)
+        
+        # Combine all effects with appropriate weights
+        cloud_prob = (
+            0.5 * rh_effect + 
+            0.3 * pressure_effect + 
+            0.2 * rainfall_effect
+        ) * stability_effect + seasonal_var
+        
+        # Ensure reasonable bounds
+        cloud_prob = np.clip(cloud_prob, 0.05, 0.95)
+        
+        # Determine cloud types
+        cloud_type_idx = np.ones(len(self.vertices), dtype=int)  # Default to alto clouds
+        
+        # High clouds (cirrus)
+        high_cloud_mask = self.elevations > 6000
+        cloud_type_idx[high_cloud_mask] = 0
+        
+        # Storm clouds (cumulonimbus)
+        storm_cloud_mask = rainfall > 10
+        cloud_type_idx[storm_cloud_mask] = 4
+        
+        # Cumulus clouds (unstable air)
+        cumulus_mask = (cloud_prob > 0.6) & (temp_dew_diff < 3) & ~storm_cloud_mask
+        cloud_type_idx[cumulus_mask] = 3
+        
+        # Stratus clouds (stable air)
+        stratus_mask = (cloud_prob > 0.4) & ~cumulus_mask & ~storm_cloud_mask
+        cloud_type_idx[stratus_mask] = 2
+        
+        # Update cloud properties
+        self.cloud_coverage = cloud_prob
+        self.cloud_type = cloud_type_idx
+        
+        # Set albedo based on cloud type
+        cloud_types = list(CLOUD_ALBEDO_VALUES.keys())
+        for i, idx in enumerate(cloud_type_idx):
+            self.cloud_albedo[i] = CLOUD_ALBEDO_VALUES[cloud_types[idx]]
             
     def get_effective_albedo(self, surface_albedo):
         """Calculate combined surface and cloud albedo"""

@@ -1,7 +1,7 @@
 import math
 
 from matplotlib import pyplot as plt
-from matplotlib.widgets import RadioButtons, Slider
+from matplotlib.widgets import CheckButtons, RadioButtons, Slider
 import numpy as np
 
 from clouds import CloudSystem
@@ -81,6 +81,8 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
 
     # Add random elevation to vertices using spherical harmonics for more natural distribution
     elevations = np.zeros(len(vertices))
+    humidity_values = np.zeros(len(vertices))
+    rainfall = np.zeros(len(vertices))
     if surface_pressures is None:
         surface_pressures = np.zeros(len(vertices))
     for i, vertex in enumerate(vertices):
@@ -92,6 +94,8 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
                  np.sin(lon * 5) * np.cos(lat * 2)) * 5
         elevations[i] = noise + np.random.uniform(-2, 2)
         surface_pressures[i] = SEA_LEVEL_PRESSURE_HPA # Initialize pressure to sea level
+        humidity_values[i] = noise + np.random.uniform(-2, 2)
+        rainfall[i] = noise + np.random.uniform(-2, 2)
 
     # Scale vertices with elevations
     vertices = vertices / np.linalg.norm(vertices, axis=1)[:, np.newaxis] * (radius + elevations[:, np.newaxis])
@@ -136,7 +140,7 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
             plate_assignment[i] = closest_plate.plate_id
             closest_plate.vertices.add(i)
 
-    return vertices, faces, plates, plate_assignment, elevations, surface_pressures
+    return vertices, faces, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall
 
 if __name__ == "__main__":
     config = loadConfig()
@@ -163,7 +167,7 @@ if __name__ == "__main__":
     }
 
 
-    vertices, faces, plates, plate_assignment, elevations, surface_pressures = generate_initial_world_spherical(
+    vertices, faces, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall = generate_initial_world_spherical(
         subdivisions, radius, num_plates, surface_pressures
     )
     print("Starting a new simulation.")
@@ -205,8 +209,6 @@ if __name__ == "__main__":
             )
             for i, vertex in enumerate(vertices)
         ])
-        rainfall = np.zeros(len(vertices))
-        humidity_values = np.zeros(len(vertices))
         cloud_system.update_clouds(temperatures, humidity_values, surface_pressures, rainfall, current_day)
         # Plate tectonics simulation
         vertices, plates, plate_assignment, elevations = simulate_plate_tectonics_spherical(
@@ -278,20 +280,46 @@ if __name__ == "__main__":
 
     # Add radio buttons for view selection
     rax = plt.axes([0.05, 0.4, 0.15, 0.15])
-    radio = RadioButtons(rax, ('Elevation', 'Temperature', 'Rainfall', 'Pressure', 'Clouds'))
+    radio = RadioButtons(rax, ('Elevation', 'Temperature', 'Rainfall', 'Pressure'))
+
+    ax_check = plt.axes([0.05, 0.25, 0.15, 0.1])
+    check = CheckButtons(ax_check, ['Show Clouds', 'Show Storms'], [False, False])
+
+    def update_overlays(label):
+        # Get current visualization type
+        current_view = radio.value_selected if hasattr(radio, 'value_selected') else 'elevation'
+        update_view(current_view)
+
+    check.on_clicked(update_overlays)
 
     def update_view(label):
-        vertices, elevations, temperatures, rainfall, surface_pressures = world_history[current_step] # Unpack surface_pressures
+        vertices, elevations, temperatures, rainfall, surface_pressures = world_history[current_step]
+        show_clouds = check.get_status()[0]
+        show_storms = check.get_status()[1]
+        
+        # Determine which data to visualize based on label
         if label == 'Elevation':
-            visualize_world_spherical(vertices, faces, elevations, ax_3d, 'elevation', elevations=elevations)
+            vis_data = elevations
         elif label == 'Temperature':
-            visualize_world_spherical(vertices, faces, temperatures, ax_3d, 'temperature', elevations=elevations)
+            vis_data = temperatures
         elif label == 'Rainfall':
-            visualize_world_spherical(vertices, faces, rainfall, ax_3d, 'rainfall', elevations=elevations)
+            vis_data = rainfall
         elif label == 'Pressure':
-            visualize_world_spherical(vertices, faces, surface_pressures, ax_3d, 'pressure', elevations=elevations)
-        elif label == 'Clouds':
-            visualize_world_spherical(vertices, faces, cloud_system.cloud_coverage, ax_3d, 'clouds', elevations=elevations)
+            vis_data = surface_pressures
+        else:
+            vis_data = elevations  # Default
+        
+        visualize_world_spherical(
+            vertices, faces, 
+            vis_data,
+            ax_3d, 
+            label.lower(),
+            elevations=elevations,
+            show_clouds=show_clouds,
+            cloud_coverage=cloud_system.cloud_coverage,
+            show_storms=show_storms,
+            active_storms=active_storms
+        )
         fig.canvas.draw_idle()
 
     radio.on_clicked(update_view)

@@ -166,4 +166,4 @@ CLOUD_ALBEDO_VALUES = {
 }
 
 CLOUD_BASE_ALBEDO = 0.5  # Default cloud albedo
-MAX_CLOUD_COVERAGE = 0.9  # Maximum cloud coverage (90%)
+MAX_CLOUD_COVERAGE = 1.0
