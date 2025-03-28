@@ -1,7 +1,7 @@
 #include "storms.h"
 #include <algorithm>
 #include <numeric>
-#include "utils.h"  // Assuming you have C++ utils for geographic calculations
+#include "utils.cpp"  // Assuming you have C++ utils for geographic calculations
 
 StormSystem::StormSystem(double lat, double lon, double anomaly, double radius, double speed) :
     center_lat(lat), center_lon(lon), pressure_anomaly(anomaly), 
@@ -19,10 +19,8 @@ StormSystem::StormSystem(double lat, double lon, double anomaly, double radius, 
     age_days = 0;
 }
 
-void StormSystem::update(const std::vector<std::vector<double>>& vertices,
-                       const std::vector<double>& elevations,
-                       const std::vector<double>& temperatures,
-                       const std::vector<double>& pressures,
+void StormSystem::update(const std::vector<std::vector<double>>& vertices, const std::vector<double>& elevations,
+                       const std::vector<double>& temperatures, const std::vector<double>& pressures,
                        const std::vector<std::vector<int>>& faces,
                        int day_elapsed) {
     
@@ -44,12 +42,12 @@ void StormSystem::update(const std::vector<std::vector<double>>& vertices,
     age_days += day_elapsed;
 }
 
-int StormSystem::find_nearest_vertex(const std::vector<std::vector<double>>& vertices) {
+int StormSystem::find_nearest_vertex(const vector<vector<Vertex>>& vertices) {
     int nearest = 0;
     double min_dist = std::numeric_limits<double>::max();
     
-    for (size_t i = 0; i < vertices.size(); ++i) {
-        auto latlon = cartesian_to_lat_lon(vertices[i][0], vertices[i][1], vertices[i][2]);
+    for (int i = 0; i < vertices.size(); ++i) {
+        pair<double, double> latlon = cartesian_to_lat_lon(vertices[i].x, vertices[i].y, vertices[i].z);
         double dist = haversine_distance(center_lat, center_lon, latlon.first, latlon.second);
         if (dist < min_dist) {
             min_dist = dist;
@@ -72,16 +70,16 @@ double StormSystem::calculate_pressure_effect(double lat, double lon, double pla
 }
 
 std::pair<double, double> StormSystem::calculate_wind_field(double lat, double lon) const {
-    double distance = haversine_distance(center_lat, center_lon, lat, lon);
+    double storm_distance = haversine_distance(center_lat, center_lon, lat, lon);
     
-    if (distance < radius_km) {
-        double bearing = calculate_bearing(center_lat, center_lon, lat, lon);
+    if (storm_distance < radius_km) {
+        double bearing = calculate_bearing_math(center_lat, center_lon, lat, lon);
         int rotation_dir = (center_lat >= 0) ? 1 : -1;  // NH vs SH
         double wind_dir = fmod(bearing + 90.0 * rotation_dir, 360.0);
         
         // Wind speed based on pressure gradient and distance from center
         double max_speed = -pressure_anomaly * 3.0;  // Convert pressure to wind speed
-        double speed = max_speed * (distance / radius_km) * std::exp(1.0 - (distance / radius_km));
+        double speed = max_speed * (storm_distance / radius_km) * std::exp(1.0 - (storm_distance / radius_km));
         
         return {wind_dir, speed};
     }
@@ -97,7 +95,7 @@ bool StormSystem::is_in_rain_band(double lat, double lon) const {
     }
     
     // Spiral rain band pattern
-    double angle = std::atan2(lon - center_lon, lat - center_lat) * 180.0 / M_PI;
+    double angle = std::atan2(lon - center_lon, lat - center_lat) * 180.0 / PI;
     double band_width = 30.0;  // degrees
     return fmod(distance, radius_km / 3.0) < (radius_km / 10.0);
 }
@@ -119,15 +117,15 @@ double StormSystem::get_rainfall_intensity(double lat, double lon) const {
 }
 
 double StormSystem::calculate_steering_flow(const std::vector<double>& pressures, 
-                                          const std::vector<std::vector<double>>& vertices,
-                                          const std::vector<std::vector<int>>& faces) {
+                                          const std::vector<std::vector<Vertex>>& vertices,
+                                          const std::vector<std::vector<Face>>& faces) {
     int nearest_idx = find_nearest_vertex(vertices);
     auto latlon = cartesian_to_lat_lon(vertices[nearest_idx][0], vertices[nearest_idx][1], vertices[nearest_idx][2]);
     double lat = latlon.first;
     double lon = latlon.second;
     
     // Find neighboring vertices within 500km
-    auto neighbors = find_spherical_neighbors(vertices, faces, nearest_idx, 500.0);
+    vector<Vertex>& neighbors = find_spherical_neighbors(vertices, faces, nearest_idx, 500.0);
     
     if (neighbors.empty()) {
         return movement_direction;  // No change if no neighbors
@@ -169,8 +167,8 @@ double StormSystem::calculate_steering_flow(const std::vector<double>& pressures
         
         for (int n : neighbors) {
             auto ll = cartesian_to_lat_lon(vertices[n][0], vertices[n][1], vertices[n][2]);
-            sum_sin_lon_pressure += std::sin(ll.second * M_PI / 180.0) * (pressures[n] - pressures[nearest_idx]);
-            sum_cos_lat_pressure += std::cos(ll.first * M_PI / 180.0) * (pressures[n] - pressures[nearest_idx]);
+            sum_sin_lon_pressure += std::sin(ll.second * PI / 180.0) * (pressures[n] - pressures[nearest_idx]);
+            sum_cos_lat_pressure += std::cos(ll.first * PI / 180.0) * (pressures[n] - pressures[nearest_idx]);
         }
         
         double pressure_grad_x = sum_sin_lon_pressure / neighbors.size();
@@ -210,7 +208,7 @@ std::vector<StormSystem> generate_storm_systems(const std::vector<std::vector<do
     static std::mt19937 gen(rd());
     
     // More storms during seasonal extremes
-    double seasonal_factor = 1.0 + 0.5 * std::sin(2.0 * M_PI * (day_of_year - 80) / 365.25);
+    double seasonal_factor = 1.0 + 0.5 * std::sin(2.0 * PI * (day_of_year - 80) / 365.25);
     int num_to_generate = static_cast<int>(num_storms * seasonal_factor);
     
     std::uniform_real_distribution<> lat_dist(-90.0, 90.0);

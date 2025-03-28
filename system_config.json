@@ -1,0 +1,16 @@
+{
+    "star": {
+        "mass_sun": 1.0,
+        "radius_sun": 1.0,
+        "luminosity_sun": 1.0,
+        "temperature_kelvin": 5778,
+        "age_years": 4.6e9,
+        "magnetic_field_strength_t": 1e-3
+    },
+    "planet": {
+        "semi_major_axis_au": 1.0,
+        "eccentricity": 0.0167,
+        "orbital_period_days": 365.25,
+        "inclination_degrees": 0.0
+    }
+}

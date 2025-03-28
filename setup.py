@@ -10,15 +10,22 @@ else:
 
 ext_modules = [
     Extension(
-        'utils_cpp',
+        name='utils_cpp',
         sources=['utils.cpp'],
         include_dirs=[pybind11.get_include()],
         language='c++',
         extra_compile_args=extra_compile_args,
     ),
     Extension(
-        'storms_cpp',
+        name='storms_cpp',
         sources=['storms.cpp'],
+        include_dirs=[pybind11.get_include()],
+        language='c++',
+        extra_compile_args=extra_compile_args,
+    ),
+    Extension(
+        name='globals_cpp',
+        sources=['globals.cpp'],
         include_dirs=[pybind11.get_include()],
         language='c++',
         extra_compile_args=extra_compile_args,

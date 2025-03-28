@@ -1,1 +1,17 @@
-{"planet": {"radius_km": 6371.0, "orbital_distance_au": 1.0, "axial_tilt_degrees": 23.5}, "plate_tectonics": {"min_plate_speed_cm_yr": 1.0, "max_plate_speed_cm_yr": 10.0, "initial_num_plates": 15}, "atmosphere": {"sea_level_pressure_hpa": 1013.25, "gas_constant": 287.05, "gravity": 9.81, "circulation_cells": {"hadley_width": 30, "ferrel_width": 30, "polar_width": 30}, "coriolis_factor": 0.0001, "layers": [{"name": "Troposphere", "altitude_range": [0, 12], "temp_gradient": -6.5}, {"name": "Stratosphere", "altitude_range": [12, 50], "temp_gradient": 0.1}, {"name": "Mesosphere", "altitude_range": [50, 80], "temp_gradient": -2.8}, {"name": "Thermosphere", "altitude_range": [80, 700], "temp_gradient": 0.0}], "composition": {"N2": 0.7808, "O2": 0.2095, "Ar": 0.0093, "CO2": 0.0004, "H2O": 0.01, "CH4": 1.8e-06, "O3": 7e-06}, "gas_constants": {"N2": 296.8, "O2": 259.84, "Ar": 208.13, "CO2": 188.92, "H2O": 461.5, "CH4": 518.28, "O3": 173.21}, "molecular_weights": {"N2": 0.0280134, "O2": 0.0319988, "Ar": 0.039948, "CO2": 0.0440095, "H2O": 0.01801528, "CH4": 0.0160425, "O3": 0.0479982}, "greenhouse_absorption": {"CO2": 0.05, "H2O": 0.1, "CH4": 0.03, "O3": 0.15}}, "simulation": {"subdivisions": 3, "num_steps": 12, "step_size": 0.03, "max_neighbor_distance_km": 1000, "days_per_step": 30}, "visualization": {"temperature_range": [-20, 40], "rainfall_range": [0, 200], "pressure_range": [950, 1050]}}
+{
+    "mass_earth": 1.0,
+	"radius_earth": 1.0,
+	"axial_tilt_degrees": 23.5,
+	"rotation_period_hours": 24.0,
+	"total_water_earth_masses": 0.0025,
+	"total_volatiles_earth_masses": 0.001,
+	"core_mass_fraction": 0.32,
+	"bulk_composition": {
+		"Fe": 0.32,
+		"Mg": 0.20,
+		"Si": 0.19,
+		"O": 0.28,
+		"other": 0.01
+	}
+
+}

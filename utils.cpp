@@ -5,22 +5,22 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
+#include <utility>
+#include "globals.cpp"
 
-namespace py = pybind11;
 using namespace std;
 
 const double PI = 3.14159265358979323846;
 const double EARTH_RADIUS_KM = 6371.0;  // Should match PLANET_RADIUS_KM
+struct Vertex {
+	double x, y, z;
+};
+struct Face {
+	Vertex a, b, c;
+};
 
 // Atmospheric composition and molecular weights would be passed from Python
 // For demonstration, we'll define them here but they should be configurable
-unordered_map<string, double> ATMOSPHERIC_COMPOSITION = {
-    {"N2", 0.78}, {"O2", 0.21}, {"Ar", 0.0093}, {"CO2", 0.0004}, {"H2O", 0.0}
-};
-
-unordered_map<string, double> MOLAR_MASSES = {
-    {"N2", 28.0134}, {"O2", 31.9988}, {"Ar", 39.948}, {"CO2", 44.0095}, {"H2O", 18.01528}
-};
 
 double calculate_mean_molecular_weight(double humidity) {
     auto adjusted_composition = ATMOSPHERIC_COMPOSITION;
@@ -29,12 +29,12 @@ double calculate_mean_molecular_weight(double humidity) {
     double total = 0;
     double weighted_sum = 0;
     for (const auto& [gas, fraction] : adjusted_composition) {
-        weighted_sum += fraction * MOLAR_MASSES[gas];
+        weighted_sum += fraction * MOLECULAR_WEIGHTS[gas];
         total += fraction;
     }
     
     if (total < 1) {
-        weighted_sum += (1 - total) * MOLAR_MASSES["N2"];
+        weighted_sum += (1 - total) * MOLECULAR_WEIGHTS["N2"];
     }
     
     return weighted_sum;
@@ -58,10 +58,10 @@ string determine_surface_type(double elevation, double temperature, double water
     }
 }
 
-tuple<double, double> cartesian_to_lat_lon(double x, double y, double z) {
+pair<double, double> cartesian_to_lat_lon(double x, double y, double z) {
     double lat = asin(z / sqrt(x*x + y*y + z*z)) * 180.0 / PI;
     double lon = atan2(y, x) * 180.0 / PI;
-    return make_tuple(lat, lon);
+    return make_pair(lat, lon);
 }
 
 tuple<double, double, double> lat_lon_to_cartesian(double lat, double lon, double radius) {
@@ -105,32 +105,54 @@ double calculate_bearing_math(double lat1, double lon1, double lat2, double lon2
     return compass_bearing;
 }
 
-// Vectorized version using NumPy arrays
-py::array_t<double> calculate_bearing(py::array_t<double> lat1, py::array_t<double> lon1, 
-                                     py::array_t<double> lat2, py::array_t<double> lon2) {
-    py::buffer_info buf_lat1 = lat1.request();
-    py::buffer_info buf_lon1 = lon1.request();
-    py::buffer_info buf_lat2 = lat2.request();
-    py::buffer_info buf_lon2 = lon2.request();
+vector<Vertex> find_spherical_neighbors(vector<Vertex>& vertices, vector<Face>& faces, 
+									int vertexID, double maxDistanceKm) {
+	std::unordered_set<Vertex> neighbors;
+	const Vertex& center = vertices[vertexID];
+	
+	for (const Face& face : faces){
+		if (face.a == vertexID || face.b == vertexID || face.c == vertexID) {
+			if (face.a != vertexID){
+				neighbors.insert(face.a);
+			}
+			if (face.b != vertexID){
+				neighbors.insert(face.b);
+			}
+			if (face.c != vertexID){
+				neighbors.insert(face.c);
+			}
+		}
+	}
 
-    if (buf_lat1.size != buf_lon1.size || buf_lat1.size != buf_lat2.size || buf_lat1.size != buf_lon2.size) {
+	vector<Vertex> neighbors2;
+	auto& [lat1, lon1] = cartesian_to_lat_lon(center.x, center.y, center.z);
+	for (Vertex v: neighbors){
+		const Vertex& vertex = vertices[v];
+		auto& [lat2, lon2] = cartesian_to_lat_lon(vertex.x, vertex.y, vertex.z);
+		double dist = haversine_distance(lat1, lon1, lat2, lon2);
+
+		if (dist <= maxDistanceKm){
+			neighbors2.push_back(v);
+		}
+	}
+	return neighbors2;
+}
+
+// Vectorized version using NumPy arrays
+vector<double> calculate_bearing(vector<double> lat1, vector<double> lon1, 
+									vector<double> lat2, vector<double> lon2) {
+
+    if (lat1.size() != lon1.size() || lat1.size() != lat2.size() || lat1.size() != lon2.size()) {
         throw std::runtime_error("Input arrays must have the same size");
     }
 
-    auto result = py::array_t<double>(buf_lat1.size);
-    py::buffer_info buf_result = result.request();
+    vector<double> result(lat1.size());
 
-    double* ptr_lat1 = static_cast<double*>(buf_lat1.ptr);
-    double* ptr_lon1 = static_cast<double*>(buf_lon1.ptr);
-    double* ptr_lat2 = static_cast<double*>(buf_lat2.ptr);
-    double* ptr_lon2 = static_cast<double*>(buf_lon2.ptr);
-    double* ptr_result = static_cast<double*>(buf_result.ptr);
-
-    for (size_t i = 0; i < buf_lat1.size; i++) {
-        double lat1_rad = ptr_lat1[i] * PI / 180.0;
-        double lon1_rad = ptr_lon1[i] * PI / 180.0;
-        double lat2_rad = ptr_lat2[i] * PI / 180.0;
-        double lon2_rad = ptr_lon2[i] * PI / 180.0;
+    for (size_t i = 0; i < lat1.size(); i++) {
+        double lat1_rad = lat1[i] * PI / 180.0;
+        double lon1_rad = lon1[i] * PI / 180.0;
+        double lat2_rad = lat2[i] * PI / 180.0;
+        double lon2_rad = lon2[i] * PI / 180.0;
 
         double dLon = lon2_rad - lon1_rad;
 
@@ -138,7 +160,7 @@ py::array_t<double> calculate_bearing(py::array_t<double> lat1, py::array_t<doub
         double y = cos(lat1_rad) * sin(lat2_rad) - sin(lat1_rad) * cos(lat2_rad) * cos(dLon);
 
         double initial_bearing = atan2(x, y);
-        ptr_result[i] = fmod(initial_bearing * 180.0 / PI + 360, 360);
+        result[i] = fmod(initial_bearing * 180.0 / PI + 360, 360);
     }
 
     return result;
