@@ -3,7 +3,7 @@ import math
 import numpy as np
 
 from globals import ATMOSPHERIC_COMPOSITION, MOLECULAR_WEIGHTS, PLANET_RADIUS_KM
-from icosphere import Vertex
+from _icosphere import HaversineDistance, cartesianLatLon, findSphericalNeighbors, haversineDistanceVertex
 
 
 def calculate_mean_molecular_weight(humidity):
@@ -45,12 +45,6 @@ def cartesian_to_lat_lon(x, y, z):
     lon = np.degrees(np.arctan2(y, x))
     return lat, lon
 
-def cartesian_to_lat_lon_vertex(vertex: Vertex):
-    """Convert cartesian coordinates to latitude/longitude."""
-    lat = np.degrees(np.arcsin(vertex.z / np.sqrt(vertex.x**2 + vertex.y**2 + vertex.z**2)))
-    lon = np.degrees(np.arctan2(vertex.y, vertex.x))
-    return lat, lon
-
 def lat_lon_to_cartesian(lat, lon, radius):
     lat_rad = np.radians(lat)
     lon_rad = np.radians(lon)
@@ -77,6 +71,8 @@ def haversine_distance(lat1, lon1, lat2, lon2, radius=PLANET_RADIUS_KM):
 
 def find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km):
     """Find neighbors within a certain distance on the sphere."""
+    return findSphericalNeighbors(vertices, faces, vertex_idx, max_distance_km)
+    print(faces)
     neighbors = set()
     center = vertices[vertex_idx]
 
@@ -90,10 +86,7 @@ def find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km):
     # Then check distance for all vertices
     final_neighbors = []
     for v in neighbors:
-        # Calculate spherical distance
-        lat1, lon1 = cartesian_to_lat_lon(*center)
-        lat2, lon2 = cartesian_to_lat_lon(*vertices[v])
-        dist = haversine_distance(lat1, lon1, lat2, lon2)
+        dist = haversineDistanceVertex(center, v)
 
         if dist <= max_distance_km:
             final_neighbors.append(v)

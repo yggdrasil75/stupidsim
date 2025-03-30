@@ -7,13 +7,13 @@ import numpy as np
 from clouds import CloudSystem
 from globals import ALBEDO_VALUES, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA, loadConfig, saveConfig
 from humidity import calculate_humidity, calculate_rainfall
-from plate import Plate, simulate_plate_tectonics_spherical
+from _plate import Plate, simulate_plate_tectonics_spherical
 from pressure import calculate_pressure_with_circulation, update_pressure_systems
 from storms import generate_storm_systems
 from temperature import calculate_solar_radiation_for_vertex, calculate_sun_direction, calculate_temperature_from_radiation, calculate_temperature_with_greenhouse
-from utils import cartesian_to_lat_lon, cartesian_to_lat_lon_vertex, determine_surface_type
+from utils import cartesian_to_lat_lon, determine_surface_type
 from viewer import visualize_world_spherical
-from icosphere import generate_icosphere
+from _icosphere import _generate_icosphere, cartesianLatLon, latLonCartesian
 
 
 def generate_icosphere_py(subdivisions=3, radius=1.0):
@@ -75,7 +75,7 @@ def generate_icosphere_py(subdivisions=3, radius=1.0):
 
 def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5, surface_pressures=None):
     """Generate initial world with spherical mesh and plates."""
-    vertices, faces = generate_icosphere_py(subdivisions, radius)
+    vertices, faceArray, verteIndexArray = _generate_icosphere(subdivisions, radius)
 
     # Add random elevation to vertices using spherical harmonics for more natural distribution
     elevations = np.zeros(len(vertices))
@@ -138,7 +138,7 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
             plate_assignment[i] = closest_plate.plate_id
             closest_plate.vertices.add(i)
 
-    return vertices, faces, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall
+    return vertices, verteIndexArray, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall
 
 if __name__ == "__main__":
     config = loadConfig()

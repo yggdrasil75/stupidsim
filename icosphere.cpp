@@ -29,7 +29,21 @@ struct Vertex {
         if (y != other.y) return y < other.y;
         return z < other.z;
     }
+    bool operator==(const Vertex& other) const {
+        return x == other.x && y == other.y && z == other.z;
+    }
 };
+
+namespace std {
+    template<> struct hash<Vertex> {
+        size_t operator()(const Vertex& v) const {
+            size_t h1 = hash<double>{}(v.x);
+            size_t h2 = hash<double>{}(v.y);
+            size_t h3 = hash<double>{}(v.z);
+            return h1 ^ (h2 << 1) ^ (h3 << 2);
+        }
+    };
+}
 
 struct Face {
     Vertex a, b, c;
@@ -90,8 +104,7 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
     return faces;
 }
 
-
-std::tuple<std::vector<Vertex>, std::vector<Face>> generate_icosphere(size_t subdivisions=3, double radius=1.0) {
+std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>> generate_icosphere(size_t subdivisions=3, double radius=1.0) {
     // Golden ratio
     const double t = (1.0 + std::sqrt(5.0)) / 2.0;
 
@@ -131,12 +144,12 @@ std::tuple<std::vector<Vertex>, std::vector<Face>> generate_icosphere(size_t sub
         Face(vertices[9], vertices[8], vertices[1])
     };
 
+    faces = subdivide_icosphere(subdivisions, vertices, faces);
+
     // Collect all unique vertices and create face indices
     std::vector<Vertex> unique_vertices;
     std::map<Vertex, size_t> vertex_indices;
     std::vector<Face> unique_faces;
-
-    faces = subdivide_icosphere(subdivisions, vertices, faces);
 
     for (const Face& face : faces) {
         // Add vertices if they don't exist
@@ -158,17 +171,116 @@ std::tuple<std::vector<Vertex>, std::vector<Face>> generate_icosphere(size_t sub
         v.z *= radius;
     }
 
-    return {unique_vertices, unique_faces};
+    return {unique_vertices, unique_faces, vertex_indices};
 }
 
+std::tuple<double, double> cartesianLatLon(Vertex vertex){
+    _Float64 lat_rad = asinf64(vertex.z / sqrtf64(powf64(vertex.x, 2) + powf64(vertex.y, 2) + powf64(vertex.z, 2)));
+    _Float64 lat_deg = lat_rad * (180.0 / M_PI);
 
+    double lon_rad = atan2f64(vertex.y, vertex.x);
+    double lon_deg = lon_rad * (180.0 / M_PI);
+
+    return {lat_deg, lon_deg};
+}
+
+Vertex latLonCartesian(_Float64 lat, _Float64 lon, double radius){
+    _Float64 lonRad = lon * (M_PI / 180);
+    _Float64 latRad = lat * (M_PI / 180);
+
+    double x = radius * cosf64(latRad) * cosf64(lonRad);
+    double y = radius * cosf64(latRad) * sinf64(lonRad);
+    double z = radius * sinf64(latRad);
+
+    return Vertex(x, y, z);
+
+}
+
+double HaversineDistance(double lat1, double lon1, double lat2, double lon2, double radius){
+    double lat1Rad = lat1 * M_PI / 180.0;
+    double lon1Rad = lon1 * M_PI / 180.0;
+    double lat2Rad = lat2 * M_PI / 180.0;
+    double lon2Rad = lon2 * M_PI / 180.0;
+
+    double dlon = lon2Rad - lon1Rad;
+    double dlat = lat2Rad - lat1Rad;
+    
+    double a = pow(sin(dlat / 2), 2) + cos(lat1Rad) * cos(lat2Rad) * pow(sin(dlon / 2), 2);
+    double c = 2 * atan2(sqrt(a), sqrt(1-a));
+    return radius * c;
+}
+
+double haversineDistanceVertex(Vertex v1, Vertex v2, double radius){
+    double dlon = v2.x - v1.x;
+    double dlat = v2.y - v1.y;
+    double a = pow(sin(dlat / 2), 2) + cos(v1.y) * cos(v2.y) * pow(sin(dlon / 2), 2);
+    double c = 2 * atan2(sqrt(a), sqrt(1-a));
+    return radius * c;
+}
+
+std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::map<int, Face> faces,
+                     int vertexID, double maxDistanceKM, double radius) {
+    std::vector<Vertex> neighbors;
+    const Vertex& center = vertices[vertexID];
+    
+    // Find all vertices in adjacent faces
+    for (const auto& facepair : faces) {
+        Face face = facepair.second;
+        // Check if the center vertex is part of this face
+        bool isInFace = (face.a == center) || (face.b == center) || (face.c == center);
+        
+        if (isInFace) {
+            // Add the other two vertices of the face
+            if (face.a == center) {
+                neighbors.push_back(face.b);
+                neighbors.push_back(face.c);
+            } 
+            else if (face.b == center) {
+                neighbors.push_back(face.a);
+                neighbors.push_back(face.c);
+            } 
+            else { // face.c == center
+                neighbors.push_back(face.a);
+                neighbors.push_back(face.b);
+            }
+        }
+    }
+    
+    // Remove duplicates (requires operator< for Vertex)
+    std::sort(neighbors.begin(), neighbors.end());
+    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+    
+    // Filter by distance
+    std::vector<Vertex> finalNeighbors;
+    for (const Vertex& v : neighbors) {
+        double dist = haversineDistanceVertex(v, center, radius);
+        if (dist <= maxDistanceKM) {
+            finalNeighbors.push_back(v);
+        }
+    }
+    
+    return finalNeighbors;
+}
 
 PYBIND11_MODULE(icosphere, m) {
     m.def("generate_icosphere", &generate_icosphere, 
           "Generate an icosphere mesh",
           py::arg("subdivisions") = 3,
           py::arg("radius") = 1.0);
-    
+
+    m.def("cartesianLatLon", &cartesianLatLon, "convert vertex to lat/lon", py::arg("vertex"));
+
+    m.def("latLonCartesian", &latLonCartesian, "convert lat/lon to cartesian", py::arg("lat"), py::arg("lon"), py::arg("radius"));
+
+    m.def("HaversineDistance", &HaversineDistance, "calculates the distance between 2 lat/lon points", 
+            py::arg("lat1"), py::arg("lon1"), py::arg("lat2"), py::arg("lon2"), py::arg("radius"));
+
+    m.def("haversineDistanceVertex", &haversineDistanceVertex, "uses cartesian to get teh distance between 2 points",
+            py::arg("v1"), py::arg("v2"), py::arg("radius"));
+
+    m.def("findSphericalNeighbors", &findSphericalNeighbors, "gets neighbors within distance",
+            py::arg("vertices"), py::arg("faces"), py::arg("centerID"), py::arg("maxDistanceKM"), py::arg("radius"));
+
     py::class_<Vertex>(m, "Vertex")
         .def(py::init<double, double, double>())
         .def_readwrite("x", &Vertex::x)
