@@ -29,14 +29,11 @@ def HaversineDistance(lat1, lon1, lat2, lon2, radius = PLANET_RADIUS_KM) -> floa
     return icosphere.HaversineDistance(lat1, lon1, lat2, lon2, radius)
 
 def findSphericalNeighbors(vertices, faces, vertexID, maxDistanceKM, radius = PLANET_RADIUS_KM):
-    vertices = np.array(npArrayToVertex(v) for v in vertices)
-    facemap = {}
-    for index, face in faces.items():
-        face = NPArrayToFace(face)
-        facemap[index] = face
+    vertices = [npArrayToVertex(v) for v in vertices]
+    facemap = [NPArrayToFace(face) for face in faces]
     neighbors = icosphere.findSphericalNeighbors(vertices, facemap, vertexID, maxDistanceKM, radius)
-    neighbors = np.array(vertexToNparray(v) for v in neighbors)
-    return neighbors
+    npNeighbors = np.array(vertexToNparray(v) for v in neighbors)
+    return npNeighbors
 
 def vertexToNparray(vertex: icosphere.Vertex):
     x: float = vertex.x

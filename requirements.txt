@@ -6,6 +6,7 @@ cycler==0.12.1
 docker-py==0.5.3
 dockerpty==0.3.4
 docopt==0.6.2
+fastrlock==0.8.3
 fig==1.0.1
 fonttools==4.56.0
 h3==4.2.2
@@ -13,10 +14,12 @@ idna==3.10
 kiwisolver==1.4.8
 matplotlib==3.10.1
 numpy==2.2.4
+ordered-set==4.1.0
 packaging==24.2
 pillow==11.1.0
 platformdirs==4.3.7
 pooch==1.8.2
+pybind11==2.13.6
 pyparsing==3.2.2
 pyproj==3.7.1
 pyshp==2.3.1
@@ -26,6 +29,7 @@ PyYAML==3.13
 requests==2.32.3
 scipy==1.15.2
 scooby==0.10.0
+setuptools==78.1.0
 shapely==2.0.7
 six==1.17.0
 texttable==0.8.8
@@ -33,3 +37,4 @@ typing_extensions==4.12.2
 urllib3==2.3.0
 vtk==9.3.1
 websocket-client==0.11.0
+zstandard==0.23.0

@@ -15,64 +15,6 @@ from utils import cartesian_to_lat_lon, determine_surface_type
 from viewer import visualize_world_spherical
 from _icosphere import _generate_icosphere, cartesianLatLon, latLonCartesian
 
-
-def generate_icosphere_py(subdivisions=3, radius=1.0):
-    """Generate an icosphere mesh with given number of subdivisions."""
-    # Golden ratio
-    t = (1.0 + math.sqrt(5.0)) / 2.0
-
-    # Create initial icosahedron vertices using CuPy
-    vertices = np.array([
-        [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
-        [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
-        [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]
-    ], dtype=np.float32)
-
-    # Normalize vertices to unit sphere
-    vertices = vertices / np.linalg.norm(vertices, axis=1)[:, np.newaxis]
-
-    # Create initial icosahedron faces
-    faces = [
-        (0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
-        (1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
-        (3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9),
-        (4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1)
-    ]
-
-    # Subdivide the mesh
-    for _ in range(subdivisions):
-        new_faces = []
-        edge_vertices = {}
-
-        for face in faces:
-            edge_midpoints = []
-            for i in range(3):
-                v1, v2 = face[i], face[(i+1)%3]
-                key = tuple(sorted((v1, v2)))
-                if key not in edge_vertices:
-                    mid = (vertices[v1] + vertices[v2]) / 2
-                    mid = mid / np.linalg.norm(mid)
-                    edge_vertices[key] = len(vertices)
-                    vertices = np.vstack([vertices, mid])
-                edge_midpoints.append(edge_vertices[key])
-
-            a, b, c = face
-            d, e, f = edge_midpoints
-            new_faces.extend([
-                (a, d, f),
-                (d, b, e),
-                (f, e, c),
-                (d, e, f)
-            ])
-
-        faces = new_faces
-
-    # Convert to numpy arrays
-    vertices = np.array(vertices) * radius
-    faces = np.array(faces)
-
-    return vertices, faces
-
 def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5, surface_pressures=None):
     """Generate initial world with spherical mesh and plates."""
     vertices, faceArray, verteIndexArray = _generate_icosphere(subdivisions, radius)
@@ -138,7 +80,7 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
             plate_assignment[i] = closest_plate.plate_id
             closest_plate.vertices.add(i)
 
-    return vertices, verteIndexArray, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall
+    return vertices, faceArray, verteIndexArray, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall
 
 if __name__ == "__main__":
     config = loadConfig()
@@ -165,7 +107,7 @@ if __name__ == "__main__":
     }
 
 
-    vertices, faces, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall = generate_initial_world_spherical(
+    vertices, faceArray, faces, plates, plate_assignment, elevations, surface_pressures, humidity_values, rainfall = generate_initial_world_spherical(
         subdivisions, radius, num_plates, surface_pressures
     )
     print("Starting a new simulation.")
@@ -221,12 +163,12 @@ if __name__ == "__main__":
         cloud_system.update_clouds(temperatures, humidity_values, surface_pressures, rainfall, current_day)
         # Plate tectonics simulation
         vertices, plates, plate_assignment, elevations = simulate_plate_tectonics_spherical(
-            vertices, faces, plates, plate_assignment, elevations,
+            vertices, faceArray, plates, plate_assignment, elevations,
             days_per_step, max_neighbor_distance_km, step_size, 
             active_storms, water_fraction, temperatures, rainfall, humidity_values
         )
         # Update pressure systems with storms
-        surface_pressures = update_pressure_systems(vertices, faces, elevations, temperatures, 
+        surface_pressures = update_pressure_systems(vertices, faceArray, elevations, temperatures, 
                                                 current_day, current_hour, active_storms)
 
         for i, vertex in enumerate(vertices):

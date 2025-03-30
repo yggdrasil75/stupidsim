@@ -32,6 +32,32 @@ struct Vertex {
     bool operator==(const Vertex& other) const {
         return x == other.x && y == other.y && z == other.z;
     }
+    bool operator!=(const Vertex& other) const {
+        return !(*this == other);
+    }
+};
+
+struct Face {
+    Vertex a, b, c;
+    Face(Vertex a, Vertex b, Vertex c) : a(a), b(b), c(c) {}
+    bool operator<(const Face& other) const {
+      if(a != other.a) return a < other.a;
+      if(b != other.b) return b < other.b;
+      return c < other.c;
+    }    
+    bool operator==(const Face& other) const {
+        Vertex this_vertices[3] = {a, b, c};
+        Vertex other_vertices[3] = {other.a, other.b, other.c};
+        std::sort(this_vertices, this_vertices + 3);
+        std::sort(other_vertices, other_vertices + 3);
+
+        return this_vertices[0] == other_vertices[0] &&
+               this_vertices[1] == other_vertices[1] &&
+               this_vertices[2] == other_vertices[2];
+    }
+    bool operator!=(const Face& other) const {
+        return !(*this == other);
+    }
 };
 
 namespace std {
@@ -44,11 +70,6 @@ namespace std {
         }
     };
 }
-
-struct Face {
-    Vertex a, b, c;
-    Face(Vertex a, Vertex b, Vertex c) : a(a), b(b), c(c) {}
-};
 
 std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& vertices, std::vector<Face>& faces) {
     // Create a map from Vertex to its index in the vertices vector
@@ -218,14 +239,13 @@ double haversineDistanceVertex(Vertex v1, Vertex v2, double radius){
     return radius * c;
 }
 
-std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::map<int, Face> faces,
+std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::vector<Face> faces,
                      int vertexID, double maxDistanceKM, double radius) {
     std::vector<Vertex> neighbors;
     const Vertex& center = vertices[vertexID];
     
     // Find all vertices in adjacent faces
-    for (const auto& facepair : faces) {
-        Face face = facepair.second;
+    for (const Face& face : faces) {
         // Check if the center vertex is part of this face
         bool isInFace = (face.a == center) || (face.b == center) || (face.c == center);
         
@@ -288,6 +308,7 @@ PYBIND11_MODULE(icosphere, m) {
         .def_readwrite("z", &Vertex::z);
 
     py::class_<Face>(m, "Face")
+        .def(py::init<Vertex, Vertex, Vertex>())
         .def_readwrite("a", &Face::a)
         .def_readwrite("b", &Face::b)
         .def_readwrite("c", &Face::c);

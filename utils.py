@@ -72,26 +72,6 @@ def haversine_distance(lat1, lon1, lat2, lon2, radius=PLANET_RADIUS_KM):
 def find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km):
     """Find neighbors within a certain distance on the sphere."""
     return findSphericalNeighbors(vertices, faces, vertex_idx, max_distance_km)
-    print(faces)
-    neighbors = set()
-    center = vertices[vertex_idx]
-
-    # First find direct face-connected neighbors
-    for face in faces:
-        if vertex_idx in face:
-            for v in face:
-                if v != vertex_idx:
-                    neighbors.add(v)
-
-    # Then check distance for all vertices
-    final_neighbors = []
-    for v in neighbors:
-        dist = haversineDistanceVertex(center, v)
-
-        if dist <= max_distance_km:
-            final_neighbors.append(v)
-
-    return final_neighbors
 
 def calculate_slope(vertices, faces, vertex_idx):
     """Estimate terrain slope (radians) at a vertex using neighboring faces."""
