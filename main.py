@@ -11,24 +11,25 @@ from plate import Plate, simulate_plate_tectonics_spherical
 from pressure import calculate_pressure_with_circulation, update_pressure_systems
 from storms import generate_storm_systems
 from temperature import calculate_solar_radiation_for_vertex, calculate_sun_direction, calculate_temperature_from_radiation, calculate_temperature_with_greenhouse
-from utils import cartesian_to_lat_lon, determine_surface_type
+from utils import cartesian_to_lat_lon, cartesian_to_lat_lon_vertex, determine_surface_type
 from viewer import visualize_world_spherical
+from icosphere import generate_icosphere
 
 
-def generate_icosphere(subdivisions=3, radius=1.0):
+def generate_icosphere_py(subdivisions=3, radius=1.0):
     """Generate an icosphere mesh with given number of subdivisions."""
     # Golden ratio
     t = (1.0 + math.sqrt(5.0)) / 2.0
 
-    # Create initial icosahedron vertices
-    vertices = [
-        (-1, t, 0), (1, t, 0), (-1, -t, 0), (1, -t, 0),
-        (0, -1, t), (0, 1, t), (0, -1, -t), (0, 1, -t),
-        (t, 0, -1), (t, 0, 1), (-t, 0, -1), (-t, 0, 1)
-    ]
+    # Create initial icosahedron vertices using CuPy
+    vertices = np.array([
+        [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
+        [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+        [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]
+    ], dtype=np.float32)
 
     # Normalize vertices to unit sphere
-    vertices = [np.array(v)/np.linalg.norm(v) for v in vertices]
+    vertices = vertices / np.linalg.norm(vertices, axis=1)[:, np.newaxis]
 
     # Create initial icosahedron faces
     faces = [
@@ -44,20 +45,17 @@ def generate_icosphere(subdivisions=3, radius=1.0):
         edge_vertices = {}
 
         for face in faces:
-            # Get edge vertices
             edge_midpoints = []
             for i in range(3):
                 v1, v2 = face[i], face[(i+1)%3]
                 key = tuple(sorted((v1, v2)))
                 if key not in edge_vertices:
-                    # Create new vertex at midpoint
                     mid = (vertices[v1] + vertices[v2]) / 2
                     mid = mid / np.linalg.norm(mid)
                     edge_vertices[key] = len(vertices)
-                    vertices.append(mid)
+                    vertices = np.vstack([vertices, mid])
                 edge_midpoints.append(edge_vertices[key])
 
-            # Create 4 new faces
             a, b, c = face
             d, e, f = edge_midpoints
             new_faces.extend([
@@ -77,7 +75,7 @@ def generate_icosphere(subdivisions=3, radius=1.0):
 
 def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, num_plates=5, surface_pressures=None):
     """Generate initial world with spherical mesh and plates."""
-    vertices, faces = generate_icosphere(subdivisions, radius)
+    vertices, faces = generate_icosphere_py(subdivisions, radius)
 
     # Add random elevation to vertices using spherical harmonics for more natural distribution
     elevations = np.zeros(len(vertices))

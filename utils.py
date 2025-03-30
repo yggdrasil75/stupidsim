@@ -3,6 +3,7 @@ import math
 import numpy as np
 
 from globals import ATMOSPHERIC_COMPOSITION, MOLECULAR_WEIGHTS, PLANET_RADIUS_KM
+from icosphere import Vertex
 
 
 def calculate_mean_molecular_weight(humidity):
@@ -42,6 +43,12 @@ def cartesian_to_lat_lon(x, y, z):
     """Convert cartesian coordinates to latitude/longitude."""
     lat = np.degrees(np.arcsin(z / np.sqrt(x**2 + y**2 + z**2)))
     lon = np.degrees(np.arctan2(y, x))
+    return lat, lon
+
+def cartesian_to_lat_lon_vertex(vertex: Vertex):
+    """Convert cartesian coordinates to latitude/longitude."""
+    lat = np.degrees(np.arcsin(vertex.z / np.sqrt(vertex.x**2 + vertex.y**2 + vertex.z**2)))
+    lon = np.degrees(np.arctan2(vertex.y, vertex.x))
     return lat, lon
 
 def lat_lon_to_cartesian(lat, lon, radius):
