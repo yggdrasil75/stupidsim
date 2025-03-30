@@ -2,10 +2,11 @@ import random
 
 import numpy as np
 
+from _icosphere import cartesianLatLon
 from globals import ALBEDO_VALUES, MAX_PLATE_SPEED_CM_YR, MIN_PLATE_SPEED_CM_YR, PLANET_RADIUS_KM, SEA_LEVEL_PRESSURE_HPA
 from pressure import calculate_diurnal_pressure_variation, calculate_pressure_with_layers, calculate_seasonal_pressure_variation
 from temperature import calculate_temperature
-from utils import calculate_slope, cartesian_to_lat_lon, find_spherical_neighbors
+from utils import calculate_slope, findSphericalNeighbors
 
 
 
@@ -47,7 +48,7 @@ class Plate:
 
     def update_pressure_systems(self, day_of_year, hour_of_day, elevation, temperature, active_storms):
         """Update all pressure systems for this plate."""
-        lat, lon = cartesian_to_lat_lon(*self.center_point)
+        lat, lon = cartesianLatLon(self.center_point)
         
         # Base pressure from elevation and temperature
         self.pressure_systems['base'] = calculate_pressure_with_layers(elevation, temperature, lat)
@@ -127,7 +128,7 @@ class Plate:
             weighted_albedo += percentage * ALBEDO_VALUES[surface_type]
         
         # Apply seasonal adjustments
-        lat, lon = cartesian_to_lat_lon(*self.center_point)
+        lat, lon = cartesianLatLon(self.center_point)
         if 'ice' in self.surface_composition and self.surface_composition['ice'] > 0.1:
             season_factor = np.sin(np.radians(day_of_year/365 * 360))
             if lat > 0:  # Northern hemisphere
@@ -149,7 +150,7 @@ class Plate:
         avg_water = np.mean([water_fraction[i] for i in self.vertices])
         
         # Get plate center coordinates
-        lat, lon = cartesian_to_lat_lon(*self.center_point)
+        lat, lon = cartesianLatLon(self.center_point)
         
         # Seasonal humidity variation
         seasonal_factor = 1 + 0.3 * np.sin(np.radians(day_of_year/365 * 360))
@@ -196,7 +197,7 @@ class Plate:
         self.update_humidity_systems(day_of_year, elevations, water_fraction, vertices)
         
         # Update plate temperature based on movement (with pressure)
-        lat, lon = cartesian_to_lat_lon(*self.center_point)
+        lat, lon = cartesianLatLon(self.center_point)
         self.temperature = calculate_temperature(lat, lon, 0, 12, avg_elevation, 0, self.pressure, self.albedo)
         
 def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment, elevations, 
@@ -224,7 +225,7 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
         if current_plate_id == 0:
             continue
 
-        neighbors = find_spherical_neighbors(vertices, faces, i, max_neighbor_distance_km)
+        neighbors = findSphericalNeighbors(vertices, faces, i, max_neighbor_distance_km)
         current_plate = plates[current_plate_id-1]
 
         for neighbor_idx in neighbors:
@@ -282,11 +283,11 @@ def simulate_plate_tectonics_spherical(vertices, faces, plates, plate_assignment
     # Smooth elevations
     smoothed_elevations = np.zeros_like(elevations)
     for i in range(len(vertices)):
-        neighbor_indices = find_spherical_neighbors(vertices, faces, i, max_neighbor_distance_km)
+        neighbor_indices = findSphericalNeighbors(vertices, faces, i, max_neighbor_distance_km)
         neighbor_elevations = [elevations[j] for j in neighbor_indices]
         smoothed_elevations[i] = np.mean([elevations[i]] + neighbor_elevations)
         if elevations[i] > 0:  # Only erode land
-            lat, lon = cartesian_to_lat_lon(*vertices[i])
+            lat, lon = cartesianLatLon(vertices[i])
             slope = calculate_slope(vertices, faces, i)  # Implement slope calculation (see below)
             erosion = calculate_erosion(
                 elevations[i], rainfall[i], humidity[i], 

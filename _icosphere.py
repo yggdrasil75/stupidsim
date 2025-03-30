@@ -13,12 +13,12 @@ def _generate_icosphere(subdivisions: int = 3, radius: float = 1.0) -> Tuple[np.
     for i, v in enumerate(vertexIndices):
         vertexIndicesPy[i] = vertexToNparray(v)
     return vert_array, face_array, vertexIndicesPy
-
-def cartesianLatLon(vertex: np.array):
+        
+def cartesianLatLon(vertex: np.array, radius: float=PLANET_RADIUS_KM):
     lat, lon = icosphere.cartesianLatLon(npArrayToVertex(vertex))
     return lat, lon
 
-def latLonCartesian(lat: float, lon: float, radius: float):
+def latLonCartesian(lat: float, lon: float, radius: float = PLANET_RADIUS_KM):
     vertex = icosphere.latLonCartesian(lat, lon, radius)
     return vertexToNparray(vertex)
 
@@ -27,6 +27,9 @@ def haversineDistanceVertex(v1: np.ndarray, v2: np.ndarray, radius = PLANET_RADI
 
 def HaversineDistance(lat1, lon1, lat2, lon2, radius = PLANET_RADIUS_KM) -> float:
     return icosphere.HaversineDistance(lat1, lon1, lat2, lon2, radius)
+
+def calculateBearing(lat1, lon1, lat2, lon2) -> float:
+    return icosphere.calculateBearing(lat1, lon1, lat2, lon2)
 
 def findSphericalNeighbors(vertices, faces, vertexID, maxDistanceKM, radius = PLANET_RADIUS_KM):
     vertices = [npArrayToVertex(v) for v in vertices]

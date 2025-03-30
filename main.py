@@ -11,7 +11,7 @@ from _plate import Plate, simulate_plate_tectonics_spherical
 from pressure import calculate_pressure_with_circulation, update_pressure_systems
 from storms import generate_storm_systems
 from temperature import calculate_solar_radiation_for_vertex, calculate_sun_direction, calculate_temperature_from_radiation, calculate_temperature_with_greenhouse
-from utils import cartesian_to_lat_lon, determine_surface_type
+from utils import determine_surface_type
 from viewer import visualize_world_spherical
 from _icosphere import _generate_icosphere, cartesianLatLon, latLonCartesian
 
@@ -27,7 +27,7 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
         surface_pressures = np.zeros(len(vertices))
     for i, vertex in enumerate(vertices):
         # Convert to spherical coordinates
-        lat, lon = cartesian_to_lat_lon(*vertex)
+        lat, lon = cartesianLatLon(vertex)
 
         # Create more interesting initial elevations using noise
         noise = (np.sin(lon * 2) * np.cos(lat * 3) +
@@ -128,7 +128,7 @@ if __name__ == "__main__":
         
         for storm in active_storms:
             for i, vertex in enumerate(vertices):
-                lat, lon = cartesian_to_lat_lon(*vertex)
+                lat, lon = cartesianLatLon(vertex)
                 if storm.is_in_rain_band(lat, lon):
                     rainfall[i] += storm.get_rainfall_intensity(lat, lon)
             storm.update(vertices, elevations, temperatures, pressures, faces, days_per_step)
@@ -172,7 +172,7 @@ if __name__ == "__main__":
                                                 current_day, current_hour, active_storms)
 
         for i, vertex in enumerate(vertices):
-            lat, lon = cartesian_to_lat_lon(*vertex)
+            lat, lon = cartesianLatLon(vertex)
             
 			
 			# Determine surface type and albedo

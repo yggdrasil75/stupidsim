@@ -73,6 +73,7 @@
         "__nullptr": "cpp",
         "forward_list": "cpp",
         "typeindex": "cpp",
-        "valarray": "cpp"
+        "valarray": "cpp",
+        "__locale": "cpp"
     }
 }

@@ -1,8 +1,9 @@
 import numpy as np
 
+from _icosphere import HaversineDistance, cartesianLatLon
 from globals import SEA_LEVEL_PRESSURE_HPA
 from pressure import calculate_pressure, calculate_wind_patterns, is_upwind
-from utils import cartesian_to_lat_lon, find_spherical_neighbors, haversine_distance
+from utils import findSphericalNeighbors
 
 
 def calculate_humidity(pressure, temperature, water_fraction):
@@ -21,7 +22,7 @@ def calculate_humidity(pressure, temperature, water_fraction):
 def calculate_rainfall(lat, lon, elevation, temperature, pressure, humidity, vertices, vertex_idx, faces, elevations, max_distance_km=1000):
     """Calculate rainfall based on pressure systems, humidity, and topography."""
     # Calculate pressure gradient
-    neighbors = find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km)
+    neighbors = findSphericalNeighbors(vertices, faces, vertex_idx, max_distance_km)
     neighbor_pressures = [calculate_pressure(elevations[n], temperature) for n in neighbors]
     avg_neighbor_pressure = np.mean(neighbor_pressures) if neighbor_pressures else pressure
     pressure_gradient = (pressure - avg_neighbor_pressure) / max_distance_km  # hPa/km
@@ -34,8 +35,8 @@ def calculate_rainfall(lat, lon, elevation, temperature, pressure, humidity, ver
     for n in neighbors:
         n_elevation = elevations[n] # ADDED elevations
         if n_elevation < 0:  # Water body
-            n_lat, n_lon = cartesian_to_lat_lon(*vertices[n])
-            dist = haversine_distance(lat, lon, n_lat, n_lon)
+            n_lat, n_lon = cartesianLatLon(vertices[n])
+            dist = HaversineDistance(lat, lon, n_lat, n_lon)
             water_availability += max(0, 1 - dist/500)  # Water influence up to 500km
 
     # Base precipitation based on pressure system
@@ -55,7 +56,7 @@ def calculate_rainfall(lat, lon, elevation, temperature, pressure, humidity, ver
         # Find highest point in wind direction
         max_upwind_elev = 0
         for n in neighbors:
-            n_lat, n_lon = cartesian_to_lat_lon(*vertices[n])
+            n_lat, n_lon = cartesianLatLon(vertices[n])
             if is_upwind(lat, lon, n_lat, n_lon, wind_dir):
                 max_upwind_elev = max(max_upwind_elev, elevations[n]) # ADDED elevations
 

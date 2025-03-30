@@ -2,7 +2,8 @@ import random
 import numpy as np
 
 from globals import PLANET_RADIUS_KM
-from utils import calculate_bearing, cartesian_to_lat_lon, find_spherical_neighbors, haversine_distance
+from utils import findSphericalNeighbors
+from _icosphere import HaversineDistance, cartesianLatLon
 
 
 class StormSystem:
@@ -36,12 +37,12 @@ class StormSystem:
     
     def _find_nearest_vertex(self, vertices):
         # Convert all vertices to lat/lon first
-        vertex_coords = np.array([cartesian_to_lat_lon(*v) for v in vertices])
+        vertex_coords = np.array([cartesianLatLon(v) for v in vertices])
         vertex_lats = vertex_coords[:, 0]
         vertex_lons = vertex_coords[:, 1]
         
         # Calculate all distances at once
-        distances = haversine_distance(
+        distances = HaversineDistance(
             self.center_lat, self.center_lon,
             vertex_lats, vertex_lons
         )
@@ -50,7 +51,7 @@ class StormSystem:
             
     def calculate_pressure_effect(self, lat, lon):
         """Calculate pressure effect at given coordinates."""
-        distance = haversine_distance(self.center_lat, self.center_lon, lat, lon, PLANET_RADIUS_KM)
+        distance = HaversineDistance(self.center_lat, self.center_lon, lat, lon, PLANET_RADIUS_KM)
         
         if distance > self.radius_km:
             return 0
@@ -61,10 +62,10 @@ class StormSystem:
     
     def calculate_wind_field(self, lat, lon):
         """Calculate wind vector at given coordinates"""
-        distance = haversine_distance(self.center_lat, self.center_lon, lat, lon)
+        distance = HaversineDistance(self.center_lat, self.center_lon, lat, lon)
         
         # Add cyclonic rotation (counter-clockwise in NH, clockwise in SH)
-        bearing = calculate_bearing(self.center_lat, self.center_lon, lat, lon)
+        bearing = calculateBearing(self.center_lat, self.center_lon, lat, lon)
         if distance < self.radius_km:
             rotation_dir = 1 if self.center_lat >= 0 else -1  # NH vs SH
             wind_dir = (bearing + 90 * rotation_dir) % 360
@@ -78,7 +79,7 @@ class StormSystem:
     
     def is_in_rain_band(self, lat, lon):
         """Check if coordinates are within the storm's rain bands"""
-        distance = haversine_distance(self.center_lat, self.center_lon, lat, lon)
+        distance = HaversineDistance(self.center_lat, self.center_lon, lat, lon)
         
         # Rain bands extend 1.5x the radius of the pressure anomaly
         if distance > self.radius_km * 1.5:
@@ -91,7 +92,7 @@ class StormSystem:
     
     def get_rainfall_intensity(self, lat, lon):
         """Calculate rainfall intensity based on distance from storm center"""
-        distance = haversine_distance(self.center_lat, self.center_lon, lat, lon)
+        distance = HaversineDistance(self.center_lat, self.center_lon, lat, lon)
         
         if distance > self.radius_km * 1.5:
             return 0
@@ -106,10 +107,10 @@ class StormSystem:
     def _calculate_steering_flow(self, pressures, vertices, faces):
         # Find nearest vertex
         nearest_idx = self._find_nearest_vertex(vertices)
-        lat, lon = cartesian_to_lat_lon(*vertices[nearest_idx])
+        lat, lon = cartesianLatLon(vertices[nearest_idx])
         
         # Find neighboring vertices within 500km
-        neighbors = find_spherical_neighbors(vertices, faces, nearest_idx, 500)
+        neighbors = findSphericalNeighbors(vertices, faces, nearest_idx, 500)
         
         if not neighbors:
             return self.movement_direction  # No change if no neighbors
@@ -120,7 +121,7 @@ class StormSystem:
         pressure_diff = pressures[nearest_idx] - avg_pressure
         
         # Get coordinates of neighbors
-        neighbor_coords = np.array([cartesian_to_lat_lon(*vertices[n]) for n in neighbors])
+        neighbor_coords = np.array([cartesianLatLon(vertices[n]) for n in neighbors])
         neighbor_lats = neighbor_coords[:, 0]
         neighbor_lons = neighbor_coords[:, 1]
         
@@ -128,8 +129,8 @@ class StormSystem:
         if pressure_diff > 0:  # We're in higher pressure - move toward lower
             low_pressure_neighbors = [n for n in neighbors if pressures[n] < avg_pressure]
             if low_pressure_neighbors:
-                target_lat = np.mean([cartesian_to_lat_lon(*vertices[n])[0] for n in low_pressure_neighbors])
-                target_lon = np.mean([cartesian_to_lat_lon(*vertices[n])[1] for n in low_pressure_neighbors])
+                target_lat = np.mean([cartesianLatLon(vertices[n])[0] for n in low_pressure_neighbors])
+                target_lon = np.mean([cartesianLatLon(vertices[n])[1] for n in low_pressure_neighbors])
             else:
                 return self.movement_direction
         else:  # Already in low pressure - move down gradient
@@ -145,7 +146,7 @@ class StormSystem:
                 target_lat = lat + pressure_grad_x * 100
         
         # Calculate bearing to target
-        new_direction = calculate_bearing(lat, lon, target_lat, target_lon)
+        new_direction = calculateBearing(lat, lon, target_lat, target_lon)
         
         # Smooth direction change (max 15 degrees per day)
         direction_change = (new_direction - self.movement_direction + 360) % 360
@@ -187,7 +188,7 @@ def generate_storm_systems(vertices, elevations, day_of_year, num_storms=5):
         
         # Prefer forming over water
         nearest_vertex = min(range(len(vertices)), 
-                           key=lambda i: haversine_distance(lat, lon, *cartesian_to_lat_lon(*vertices[i])))
+                           key=lambda i: HaversineDistance(lat, lon, *cartesianLatLon(vertices[i])))
         if elevations[nearest_vertex] < 0:  # Water
             pressure_anomaly *= 1.5  # Stronger over water
             

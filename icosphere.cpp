@@ -239,6 +239,31 @@ double haversineDistanceVertex(Vertex v1, Vertex v2, double radius){
     return radius * c;
 }
 
+double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
+    double lat1_rad = lat1 * M_PI / 180.0;
+    double lon1_rad = lon1 * M_PI / 180.0;
+    double lat2_rad = lat2 * M_PI / 180.0;
+    double lon2_rad = lon2 * M_PI / 180.0;
+
+    // Calculate the difference in longitudes
+    double dLon = lon2_rad - lon1_rad;
+
+    // Calculate bearing using the formula:
+    // θ = atan2(sin(Δlong)*cos(lat2), cos(lat1)*sin(lat2) − sin(lat1)*cos(lat2)*cos(Δlong))
+    double x = sin(dLon) * cos(lat2_rad);
+    double y = (cos(lat1_rad) * sin(lat2_rad) - 
+               (sin(lat1_rad) * cos(lat2_rad) * cos(dLon)));
+
+    // Calculate the initial bearing in radians
+    double initial_bearing = atan2(x, y);
+
+    // Convert from radians to degrees (0-360)
+    double initial_bearing_deg = initial_bearing * 180.0 / M_PI;
+    double compass_bearing = fmod(initial_bearing_deg + 360.0, 360.0);
+    
+    return compass_bearing;
+}
+
 std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::vector<Face> faces,
                      int vertexID, double maxDistanceKM, double radius) {
     std::vector<Vertex> neighbors;
@@ -294,6 +319,9 @@ PYBIND11_MODULE(icosphere, m) {
 
     m.def("HaversineDistance", &HaversineDistance, "calculates the distance between 2 lat/lon points", 
             py::arg("lat1"), py::arg("lon1"), py::arg("lat2"), py::arg("lon2"), py::arg("radius"));
+
+    m.def("calculateBearing", &calculateBearing, "calculates the bearing of a storm", 
+            py::arg("lat1"), py::arg("lon1"), py::arg("lat2"), py::arg("lon2"));
 
     m.def("haversineDistanceVertex", &haversineDistanceVertex, "uses cartesian to get teh distance between 2 points",
             py::arg("v1"), py::arg("v2"), py::arg("radius"));

@@ -3,7 +3,7 @@ import math
 import numpy as np
 
 from globals import ATMOSPHERIC_COMPOSITION, MOLECULAR_WEIGHTS, PLANET_RADIUS_KM
-from _icosphere import HaversineDistance, cartesianLatLon, findSphericalNeighbors, haversineDistanceVertex
+from _icosphere import HaversineDistance, cartesianLatLon, findSphericalNeighbors, haversineDistanceVertex, latLonCartesian
 
 
 def calculate_mean_molecular_weight(humidity):
@@ -38,44 +38,10 @@ def determine_surface_type(elevation, temperature, water_fraction):
         return 'desert'
     else:
         return 'grassland'
-
-def cartesian_to_lat_lon(x, y, z):
-    """Convert cartesian coordinates to latitude/longitude."""
-    lat = np.degrees(np.arcsin(z / np.sqrt(x**2 + y**2 + z**2)))
-    lon = np.degrees(np.arctan2(y, x))
-    return lat, lon
-
-def lat_lon_to_cartesian(lat, lon, radius):
-    lat_rad = np.radians(lat)
-    lon_rad = np.radians(lon)
-    x = radius * np.cos(lat_rad) * np.cos(lon_rad)
-    y = radius * np.cos(lat_rad) * np.sin(lon_rad)
-    z = radius * np.sin(lat_rad)
-    return x, y, z
-
-def haversine_distance(lat1, lon1, lat2, lon2, radius=PLANET_RADIUS_KM):
-    """Calculate great-circle distance between two points on a sphere."""
-    lat1_rad = np.radians(lat1)
-    lon1_rad = np.radians(lon1)
-    lat2_rad = np.radians(lat2)
-    lon2_rad = np.radians(lon2)
-
-    dlon = lon2_rad - lon1_rad
-    dlat = lat2_rad - lat1_rad
-
-    a = np.sin(dlat / 2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2)**2
-    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
-
-    distance = radius * c
-    return distance
-
-def find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km):
-    """Find neighbors within a certain distance on the sphere."""
-    return findSphericalNeighbors(vertices, faces, vertex_idx, max_distance_km)
-
+    
 def calculate_slope(vertices, faces, vertex_idx):
     """Estimate terrain slope (radians) at a vertex using neighboring faces."""
-    neighbors = find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km=100)
+    neighbors = findSphericalNeighbors(vertices, faces, vertex_idx, max_distance_km=100)
     if not neighbors:
         return 0
     
@@ -88,47 +54,3 @@ def calculate_slope(vertices, faces, vertex_idx):
     # Slope = angle between normal and radial vector
     radial_vector = vertices[vertex_idx] / np.linalg.norm(vertices[vertex_idx])
     return np.arccos(np.clip(np.dot(normal, radial_vector), -1, 1))
-
-def calculate_bearing_math(lat1, lon1, lat2, lon2):
-    lat1_rad = math.radians(lat1)
-    lon1_rad = math.radians(lon1)
-    lat2_rad = math.radians(lat2)
-    lon2_rad = math.radians(lon2)
-
-    # Calculate the difference in longitudes
-    dLon = lon2_rad - lon1_rad
-
-    # Calculate bearing using the formula:
-    # θ = atan2(sin(Δlong)*cos(lat2), cos(lat1)*sin(lat2) − sin(lat1)*cos(lat2)*cos(Δlong))
-    x = math.sin(dLon) * math.cos(lat2_rad)
-    y = (math.cos(lat1_rad) * math.sin(lat2_rad) - 
-        (math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(dLon)))
-
-    # Calculate the initial bearing in radians
-    initial_bearing = math.atan2(x, y)
-
-    # Convert from radians to degrees (0-360)
-    initial_bearing_deg = math.degrees(initial_bearing)
-    compass_bearing = (initial_bearing_deg + 360) % 360
-
-    return compass_bearing
-
-def calculate_bearing(lat1, lon1, lat2, lon2):
-    """
-    Vectorized version of calculate_bearing for numpy arrays.
-    All inputs should be numpy arrays of the same shape.
-    """
-    lat1_rad = np.radians(lat1)
-    lon1_rad = np.radians(lon1)
-    lat2_rad = np.radians(lat2)
-    lon2_rad = np.radians(lon2)
-    
-    dLon = lon2_rad - lon1_rad
-    
-    x = np.sin(dLon) * np.cos(lat2_rad)
-    y = np.cos(lat1_rad) * np.sin(lat2_rad) - np.sin(lat1_rad) * np.cos(lat2_rad) * np.cos(dLon)
-    
-    initial_bearing = np.arctan2(x, y)
-    compass_bearing = (np.degrees(initial_bearing) + 360) % 360
-    
-    return compass_bearing
