@@ -3,7 +3,8 @@ import math
 import numpy as np
 
 from globals import ATMOSPHERIC_COMPOSITION, MOLECULAR_WEIGHTS, PLANET_RADIUS_KM
-from _icosphere import HaversineDistance, cartesianLatLon, findSphericalNeighbors, haversineDistanceVertex, latLonCartesian
+from _icosphere import HaversineDistance, cartesianLatLon, findSphericalNeighbors, sphericalDistanceCartesian, latLonCartesian
+from _icosphere import calculateSlope as calculate_slope
 
 
 def calculate_mean_molecular_weight(humidity):

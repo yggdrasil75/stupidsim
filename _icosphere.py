@@ -12,10 +12,6 @@ def _generate_icosphere(subdivisions: int = 3, radius: float = 1.0) -> Tuple[np.
     vertexIndicesPy = {}
     for i, v in enumerate(vertexIndices):
         vertexIndicesPy[i] = vertexToNparray(v)
-    print(vert_array)
-    print(face_array)
-    print(vertexIndicesPy)
-    exit()
     return vert_array, face_array, vertexIndicesPy
         
 def cartesianLatLon(vertex: np.array, radius: float=PLANET_RADIUS_KM):
@@ -26,8 +22,8 @@ def latLonCartesian(lat: float, lon: float, radius: float = PLANET_RADIUS_KM):
     vertex = icosphere.latLonCartesian(lat, lon, radius)
     return vertexToNparray(vertex)
 
-def haversineDistanceVertex(v1: np.ndarray, v2: np.ndarray, radius = PLANET_RADIUS_KM) -> float:
-    return icosphere.haversineDistanceVertex(npArrayToVertex(v1), npArrayToVertex(v2), radius)
+def sphericalDistanceCartesian(v1: np.ndarray, v2: np.ndarray, radius = PLANET_RADIUS_KM) -> float:
+    return icosphere.sphericalDistanceCartesian(npArrayToVertex(v1), npArrayToVertex(v2), radius)
 
 def HaversineDistance(lat1, lon1, lat2, lon2, radius = PLANET_RADIUS_KM) -> float:
     return icosphere.HaversineDistance(lat1, lon1, lat2, lon2, radius)
@@ -38,12 +34,12 @@ def calculateBearing(lat1, lon1, lat2, lon2) -> float:
 def findSphericalNeighbors(vertices, faces, vertexID, maxDistanceKM, radius = PLANET_RADIUS_KM):
     vertices = [npArrayToVertex(v) for v in vertices]
     facemap = [NPArrayToFace(face) for face in faces]
-    print(vertices)
-    print(facemap)
     neighbors = icosphere.findSphericalNeighbors(vertices, facemap, vertexID, maxDistanceKM, radius)
-    print(neighbors)
     npNeighbors = np.array(vertexToNparray(v) for v in neighbors)
     return npNeighbors
+
+def calculateSlope(vertices, faces, vertexID, radius = PLANET_RADIUS_KM):
+    return icosphere.calculateSlope([npArrayToVertex(v) for v in vertices], [NPArrayToFace(f) for f in faces], vertexID, radius)
 
 def vertexToNparray(vertex: icosphere.Vertex):
     x: float = vertex.x

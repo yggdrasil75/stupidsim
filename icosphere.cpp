@@ -6,6 +6,13 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
+#include <thread>
+#include <future>
+#include <numeric>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 namespace py = pybind11;
 
@@ -15,8 +22,14 @@ struct Vertex {
     Vertex operator+(const Vertex& other) const {
         return Vertex(x + other.x, y + other.y, z + other.z);
     }
+    Vertex operator-(const Vertex& other) const {
+        return Vertex(x - other.x, y - other.y, z - other.z);
+    }
     Vertex operator/(double scalar) const {
         return Vertex(x / scalar, y / scalar, z / scalar);
+    }
+    Vertex operator*(double scalar) const {
+        return Vertex(x * scalar, y * scalar, z * scalar);
     }
     double length() const {
         return std::sqrt(x*x + y*y + z*z);
@@ -38,6 +51,16 @@ struct Vertex {
     }
 };
 
+Vertex crossProduct(const Vertex& a, const Vertex& b) {
+    return Vertex(a.y * b.z - a.z * b.y,
+                  a.z * b.x - a.x * b.z,
+                  a.x * b.y - a.y * b.x);
+}
+
+double dotProduct(const Vertex& a, const Vertex& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
 struct Face {
     Vertex a, b, c;
     Face(Vertex a, Vertex b, Vertex c) : a(a), b(b), c(c) {}
@@ -45,7 +68,7 @@ struct Face {
       if(a != other.a) return a < other.a;
       if(b != other.b) return b < other.b;
       return c < other.c;
-    }    
+    }
     bool operator==(const Face& other) const {
         Vertex this_vertices[3] = {a, b, c};
         Vertex other_vertices[3] = {other.a, other.b, other.c};
@@ -72,6 +95,11 @@ namespace std {
     };
 }
 
+namespace {
+    std::unordered_map<int, std::vector<Vertex>> neighborCache;
+    std::mutex cacheMutex;
+}
+
 std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& vertices, std::vector<Face>& faces) {
     // Create a map from Vertex to its index in the vertices vector
     std::unordered_map<Vertex, uint32_t> vertex_to_index;
@@ -82,18 +110,18 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
     for (size_t _ = 0; _ < subdivisions; ++_) {
         std::vector<Face> new_faces;
         new_faces.reserve(faces.size() * 4);
-        
+
         // Map from edge (pair of vertex indices) to new vertex
         std::unordered_map<uint64_t, Vertex> edge_vertices;
-        
+
         for (const Face& face : faces) {
             const Vertex& a = face.a;
             const Vertex& b = face.b;
             const Vertex& c = face.c;
-            
+
             // Get or create midpoints for each edge
             Vertex mid_ab, mid_bc, mid_ca;
-            
+
             // Edge AB
             uint64_t key_ab = (static_cast<uint64_t>(vertex_to_index[a]) << 32) | vertex_to_index[b];
             auto it_ab = edge_vertices.find(key_ab);
@@ -105,7 +133,7 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
             } else {
                 mid_ab = it_ab->second;
             }
-            
+
             // Edge BC
             uint64_t key_bc = (static_cast<uint64_t>(vertex_to_index[b]) << 32) | vertex_to_index[c];
             auto it_bc = edge_vertices.find(key_bc);
@@ -117,7 +145,7 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
             } else {
                 mid_bc = it_bc->second;
             }
-            
+
             // Edge CA
             uint64_t key_ca = (static_cast<uint64_t>(vertex_to_index[c]) << 32) | vertex_to_index[a];
             auto it_ca = edge_vertices.find(key_ca);
@@ -129,26 +157,26 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
             } else {
                 mid_ca = it_ca->second;
             }
-            
+
             // Create 4 new faces
             new_faces.emplace_back(a, mid_ab, mid_ca);
             new_faces.emplace_back(mid_ab, b, mid_bc);
             new_faces.emplace_back(mid_ca, mid_bc, c);
             new_faces.emplace_back(mid_ab, mid_bc, mid_ca);
         }
-        
+
         faces = std::move(new_faces);
     }
-    
+
     // Normalize all vertices
     for (Vertex& v : vertices) {
         v = v.normalized();
     }
-    
+
     return faces;
 }
 
-std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>> generate_icosphere(size_t subdivisions=3, double radius=1.0) {
+std::tuple<std::vector<Vertex>, std::vector<std::array<uint32_t, 3>>, std::map<Vertex, size_t>> generate_icosphere(size_t subdivisions=3, double radius=1.0) {
     // Golden ratio
     const double t = (1.0 + std::sqrt(5.0)) / 2.0;
 
@@ -193,7 +221,7 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>> gen
     // Collect all unique vertices and create face indices
     std::vector<Vertex> unique_vertices;
     std::map<Vertex, size_t> vertex_indices;
-    std::vector<Face> unique_faces;
+    std::vector<std::array<uint32_t, 3>> face_indices;
 
     for (const Face& face : faces) {
         // Add vertices if they don't exist
@@ -202,9 +230,8 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>> gen
                 vertex_indices[v] = unique_vertices.size();
                 unique_vertices.push_back(v);
             }
-        }   
+        }
     }
-
 
     // Scale vertices by radius
     for (Vertex& v : unique_vertices) {
@@ -214,34 +241,34 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>> gen
     }
 
     for (const Face& face : faces) {
-        unique_faces.emplace_back(
-            unique_vertices[vertex_indices[face.a]],
-            unique_vertices[vertex_indices[face.b]],
-            unique_vertices[vertex_indices[face.c]]
-        );
+        face_indices.push_back({
+            static_cast<uint32_t>(vertex_indices[face.a]),
+            static_cast<uint32_t>(vertex_indices[face.b]),
+            static_cast<uint32_t>(vertex_indices[face.c])
+        });
     }
 
 
-    return {unique_vertices, unique_faces, vertex_indices};
+    return {unique_vertices, face_indices, vertex_indices};
 }
 
 std::tuple<double, double> cartesianLatLon(Vertex vertex){
-    _Float64 lat_rad = asinf64(vertex.z / sqrtf64(powf64(vertex.x, 2) + powf64(vertex.y, 2) + powf64(vertex.z, 2)));
-    _Float64 lat_deg = lat_rad * (180.0 / M_PI);
+    double lat_rad = std::asin(vertex.z / std::sqrt(std::pow(vertex.x, 2) + std::pow(vertex.y, 2) + std::pow(vertex.z, 2)));
+    double lat_deg = lat_rad * (180.0 / M_PI);
 
-    double lon_rad = atan2f64(vertex.y, vertex.x);
+    double lon_rad = std::atan2(vertex.y, vertex.x);
     double lon_deg = lon_rad * (180.0 / M_PI);
 
     return {lat_deg, lon_deg};
 }
 
-Vertex latLonCartesian(_Float64 lat, _Float64 lon, double radius){
-    _Float64 lonRad = lon * (M_PI / 180);
-    _Float64 latRad = lat * (M_PI / 180);
+Vertex latLonCartesian(double lat, double lon, double radius){
+    double lonRad = lon * (M_PI / 180);
+    double latRad = lat * (M_PI / 180);
 
-    double x = radius * cosf64(latRad) * cosf64(lonRad);
-    double y = radius * cosf64(latRad) * sinf64(lonRad);
-    double z = radius * sinf64(latRad);
+    double x = radius * std::cos(latRad) * std::cos(lonRad);
+    double y = radius * std::cos(latRad) * std::cos(lonRad);
+    double z = radius * std::sin(latRad);
 
     return Vertex(x, y, z);
 
@@ -255,18 +282,16 @@ double HaversineDistance(double lat1, double lon1, double lat2, double lon2, dou
 
     double dlon = lon2Rad - lon1Rad;
     double dlat = lat2Rad - lat1Rad;
-    
+
     double a = pow(sin(dlat / 2), 2) + cos(lat1Rad) * cos(lat2Rad) * pow(sin(dlon / 2), 2);
     double c = 2 * atan2(sqrt(a), sqrt(1-a));
     return radius * c;
 }
 
-double haversineDistanceVertex(Vertex v1, Vertex v2, double radius){
-    double dlon = v2.x - v1.x;
-    double dlat = v2.y - v1.y;
-    double a = pow(sin(dlat / 2), 2) + cos(v1.y) * cos(v2.y) * pow(sin(dlon / 2), 2);
-    double c = 2 * atan2(sqrt(a), sqrt(1-a));
-    return radius * c;
+double sphericalDistanceCartesian(Vertex v1, Vertex v2, double radius){
+    double dotProd = dotProduct(v1.normalized(), v2.normalized());
+    double angle = std::acos(std::clamp(dotProd, -1.0, 1.0));
+    return radius * angle;
 }
 
 double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
@@ -294,23 +319,86 @@ double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
     return compass_bearing;
 }
 
-double calculateSlope(std::vector<Vertex> vertices, std::vector<Face> faces, int vertexID){
+std::vector<Vertex> findSphericalNeighborsThreaded(const std::vector<Vertex>& vertices, const std::vector<Face>& faces,
+                     int vertexID, double maxDistanceKM, double radius) {
+    const Vertex& center = vertices[vertexID];
+    std::vector<Vertex> all_neighbors_with_duplicates;
 
+    auto process_face = [&](const Face& face) {
+        std::vector<Vertex> local_neighbors;
+        bool isInFace = (face.a == center) || (face.b == center) || (face.c == center);
+
+        if (isInFace) {
+            if (face.a == center) {
+                local_neighbors.push_back(face.b);
+                local_neighbors.push_back(face.c);
+            } else if (face.b == center) {
+                local_neighbors.push_back(face.a);
+                local_neighbors.push_back(face.c);
+            } else {
+                local_neighbors.push_back(face.a);
+                local_neighbors.push_back(face.b);
+            }
+        }
+        return local_neighbors;
+    };
+
+    size_t num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 4; // Fallback if concurrency is not detectable
+    std::vector<std::future<std::vector<Vertex>>> futures;
+    size_t faces_per_thread = (faces.size() + num_threads - 1) / num_threads;
+
+    for (size_t i = 0; i < num_threads; ++i) {
+        size_t start_index = i * faces_per_thread;
+        size_t end_index = std::min(start_index + faces_per_thread, faces.size());
+        futures.push_back(std::async(std::launch::async, [&, start_index, end_index]() {
+            std::vector<Vertex> thread_neighbors;
+            for (size_t j = start_index; j < end_index; ++j) {
+                std::vector<Vertex> face_neighbors = process_face(faces[j]);
+                thread_neighbors.insert(thread_neighbors.end(), face_neighbors.begin(), face_neighbors.end());
+            }
+            return thread_neighbors;
+        }));
+    }
+
+    for (auto& future : futures) {
+        std::vector<Vertex> thread_result = future.get();
+        all_neighbors_with_duplicates.insert(all_neighbors_with_duplicates.end(), thread_result.begin(), thread_result.end());
+    }
+
+
+    std::sort(all_neighbors_with_duplicates.begin(), all_neighbors_with_duplicates.end());
+    all_neighbors_with_duplicates.erase(std::unique(all_neighbors_with_duplicates.begin(), all_neighbors_with_duplicates.end()), all_neighbors_with_duplicates.end());
+
+    std::vector<Vertex> finalNeighbors;
+    for (const Vertex& v : all_neighbors_with_duplicates) {
+        double dist = sphericalDistanceCartesian(v, center, radius);
+        if (dist <= maxDistanceKM) {
+            finalNeighbors.push_back(v);
+        }
+    }
+    return finalNeighbors;
 }
 
-std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::vector<Face> faces,
-                     int vertexID, double maxDistanceKM, double radius) {
+std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::vector<Face> faces, int vertexID, double maxDistanceKM, double radius) {
     std::vector<Vertex> neighbors;
     const Vertex& center = vertices[vertexID];
     std::cout << "Finding neighbors for Vertex ID: " << vertexID << " at coordinates (" << center.x << ", " << center.y << ", " << center.z << ")\n";
     
     for (const Face& face : faces) {
-        std::cout << "Vertex is part of Face with vertices: (" << face.a.x << ", " << face.a.y << ", " << face.a.z << ") ("
+        std::cout << "coords of face is: (" << face.a.x << ", " << face.a.y << ", " << face.a.z << ") ("
                     << face.b.x << ", " << face.b.y << ", " << face.b.z << ") ("
                     << face.c.x << ", " << face.c.y << ", " << face.c.z << ")\n";
-        bool isInFace = (face.a == center) || (face.b == center) || (face.c == center);
+        bool isInFace = ((face.a == center) || (face.b == center) || (face.c == center));
+        bool isa = (face.a == center);
+        bool isb = (face.b == center);
+        bool isc = (face.c == center);
+        std::cout << "truth statements are: "<< isa << ", " << isb << ", " << isc;
         
         if (isInFace) {
+            std::cout << "Vertex is part of Face with vertices: (" << face.a.x << ", " << face.a.y << ", " << face.a.z << ") ("
+                        << face.b.x << ", " << face.b.y << ", " << face.b.z << ") ("
+                        << face.c.x << ", " << face.c.y << ", " << face.c.z << ")\n";
 
             if (face.a == center) {
                 neighbors.push_back(face.b);
@@ -334,7 +422,7 @@ std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::ve
 
     std::vector<Vertex> finalNeighbors;
     for (const Vertex& v : neighbors) {
-        double dist = haversineDistanceVertex(v, center, radius);
+        double dist = sphericalDistanceCartesian(v, center, radius);
         std::cout << "Distance from center to vertex at (" << v.x << ", " << v.y << ", " << v.z << "): " << dist << " km\n";
         
         if (dist <= maxDistanceKM) {
@@ -350,9 +438,47 @@ std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::ve
     return finalNeighbors;
 }
 
+double calculateSlope(std::vector<Vertex> vertices, std::vector<Face> faces, int vertexID, double radius){
+    std::vector<Vertex> neighbors = findSphericalNeighborsThreaded(vertices, faces, vertexID, 1000.0, radius); // radius is placeholder here, adjust if needed, max_distance_km=100
+    if (neighbors.empty()) {
+        return 0.0;
+    }
+
+    Vertex vertex = vertices[vertexID];
+    std::vector<Vertex> faceNorms;
+
+    for (const auto& face : faces) {
+        bool is_part_of_face = false;
+        if (face.a == vertex || face.b == vertex || face.c == vertex) {
+            is_part_of_face = true;
+        }
+
+        if (is_part_of_face) {
+            Vertex v1 = face.b - face.a;
+            Vertex v2 = face.c - face.a;
+            Vertex normal = crossProduct(v1, v2).normalized();
+            faceNorms.push_back(normal);
+        }
+    }
+
+    if (faceNorms.empty()) return 0.0;
+
+    Vertex averageNormal(0, 0, 0);
+    for (const auto& normal : faceNorms) {
+        averageNormal = averageNormal + normal;
+    }
+    averageNormal = averageNormal.normalized();
+
+    Vertex radV = vertex.normalized();
+    double dotProd = dotProduct(averageNormal, radV);
+    double dotProdClipped = std::clamp(dotProd, -1.0, 1.0);
+
+    return std::acos(dotProdClipped);
+}
+
 
 PYBIND11_MODULE(icosphere, m) {
-    m.def("generate_icosphere", &generate_icosphere, 
+    m.def("generate_icosphere", &generate_icosphere,
           "Generate an icosphere mesh",
           py::arg("subdivisions") = 3,
           py::arg("radius") = 1.0);
@@ -360,18 +486,22 @@ PYBIND11_MODULE(icosphere, m) {
     m.def("cartesianLatLon", &cartesianLatLon, "convert vertex to lat/lon", py::arg("vertex"));
 
     m.def("latLonCartesian", &latLonCartesian, "convert lat/lon to cartesian", py::arg("lat"), py::arg("lon"), py::arg("radius"));
-
+    
     m.def("HaversineDistance", &HaversineDistance, "calculates the distance between 2 lat/lon points", 
             py::arg("lat1"), py::arg("lon1"), py::arg("lat2"), py::arg("lon2"), py::arg("radius"));
-
+    
     m.def("calculateBearing", &calculateBearing, "calculates the bearing of a storm", 
             py::arg("lat1"), py::arg("lon1"), py::arg("lat2"), py::arg("lon2"));
-
-    m.def("haversineDistanceVertex", &haversineDistanceVertex, "uses cartesian to get teh distance between 2 points",
+    
+    m.def("sphericalDistanceCartesian", &sphericalDistanceCartesian, "uses cartesian to get teh distance between 2 points",
             py::arg("v1"), py::arg("v2"), py::arg("radius"));
-
+    
     m.def("findSphericalNeighbors", &findSphericalNeighbors, "gets neighbors within distance",
             py::arg("vertices"), py::arg("faces"), py::arg("centerID"), py::arg("maxDistanceKM"), py::arg("radius"));
+    
+    m.def("calculateSlope", &calculateSlope, "gets slope from vertices within 1 Mm",
+            py::arg("vertices"), py::arg("faces"), py::arg("centerID"), py::arg("radius"));
+
 
     py::class_<Vertex>(m, "Vertex")
         .def(py::init<double, double, double>())
