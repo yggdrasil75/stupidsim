@@ -10,8 +10,8 @@ else:
 
 ext_modules = [
     Extension(
-        'utils_cpp',
-        sources=['utils.cpp'],
+        'icosphere_cpp',
+        sources=['icosphere.cpp'],
         include_dirs=[pybind11.get_include()],
         language='c++',
         extra_compile_args=extra_compile_args,
@@ -19,7 +19,7 @@ ext_modules = [
 ]
 
 setup(
-    name='utils_cpp',
+    name='icosphere_cpp',
     version='0.1',
     ext_modules=ext_modules,
 )

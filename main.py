@@ -14,7 +14,7 @@ from storms import generate_storm_systems
 from temperature import calculate_solar_radiation_for_vertex, calculate_sun_direction, calculate_temperature_from_radiation, calculate_temperature_with_greenhouse
 from utils import cartesian_to_lat_lon, determine_surface_type
 from viewer import visualize_world_spherical
-
+import icosphere as _icosphere
 
 def generate_icosphere(subdivisions=3, radius=1.0):
     """Generate an icosphere mesh with given number of subdivisions."""
@@ -145,13 +145,12 @@ def generate_initial_world_spherical(subdivisions=3, radius=PLANET_RADIUS_KM, nu
 if __name__ == "__main__":
     config: json = loadConfig()
     # Simulation parameters
-    subdivisions: int = config['simulation']['subdivisions']  # Controls mesh resolution (higher = more detailed)
-    radius: float = PLANET_RADIUS_KM
-    num_plates: int = config['plate_tectonics']['initial_num_plates'] #15 # Increased number of plates for more fragmentation
-    num_steps: int = config['simulation']['num_steps']
-    step_size: float = config['simulation']['step_size']
-    max_neighbor_distance_km: int = config['simulation']['max_neighbor_distance_km']  # Distance for plate boundary interactions
-    days_per_step: float = config['simulation']['days_per_step']  # Each step represents a month
+    subdivisions: int = config['simulation']['subdivisions']  #higher is more accurate. 3 is the bare minimum
+    radius: float = PLANET_RADIUS_KM #in R🜨 (or earth radii) massive changes will probably break calculations, keep between 0.9 and 1.1
+    num_plates: int = config['plate_tectonics']['initial_num_plates'] #will start randomized and grow towards this number, after that, the plates should generally "stick"
+    num_steps: int = config['simulation']['num_steps'] #10 steps should be enough to get the plates. more will actually run the simulation
+    days_per_step, step_size = config['simulation']['step_size'] #in number of days.
+    max_neighbor_distance_km: int = config['simulation']['max_neighbor_distance_km']  # distance for plate interaction
     current_day: int = 0
     current_hour: int = 12  # Noon
 
