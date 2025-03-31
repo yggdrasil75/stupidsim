@@ -106,7 +106,29 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
                 mid_ab = it_ab->second;
             }
             
-            // Similar for BC and CA edges...
+            // Edge BC
+            uint64_t key_bc = (static_cast<uint64_t>(vertex_to_index[b]) << 32) | vertex_to_index[c];
+            auto it_bc = edge_vertices.find(key_bc);
+            if (it_bc == edge_vertices.end()) {
+                mid_bc = (b + c) / 2.0;
+                edge_vertices[key_bc] = mid_bc;
+                vertices.push_back(mid_bc);
+                vertex_to_index[mid_bc] = vertices.size() - 1;
+            } else {
+                mid_bc = it_bc->second;
+            }
+            
+            // Edge CA
+            uint64_t key_ca = (static_cast<uint64_t>(vertex_to_index[c]) << 32) | vertex_to_index[a];
+            auto it_ca = edge_vertices.find(key_ca);
+            if (it_ca == edge_vertices.end()) {
+                mid_ca = (c + a) / 2.0;
+                edge_vertices[key_ca] = mid_ca;
+                vertices.push_back(mid_ca);
+                vertex_to_index[mid_ca] = vertices.size() - 1;
+            } else {
+                mid_ca = it_ca->second;
+            }
             
             // Create 4 new faces
             new_faces.emplace_back(a, mid_ab, mid_ca);
@@ -182,6 +204,15 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>> gen
             }
         }   
     }
+
+
+    // Scale vertices by radius
+    for (Vertex& v : unique_vertices) {
+        v.x *= radius;
+        v.y *= radius;
+        v.z *= radius;
+    }
+
     for (const Face& face : faces) {
         unique_faces.emplace_back(
             unique_vertices[vertex_indices[face.a]],
@@ -190,12 +221,6 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>> gen
         );
     }
 
-    // Scale vertices by radius
-    for (Vertex& v : unique_vertices) {
-        v.x *= radius;
-        v.y *= radius;
-        v.z *= radius;
-    }
 
     return {unique_vertices, unique_faces, vertex_indices};
 }
