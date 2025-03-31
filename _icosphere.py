@@ -8,10 +8,14 @@ def _generate_icosphere(subdivisions: int = 3, radius: float = 1.0) -> Tuple[np.
     
     # Convert to numpy arrays
     vert_array = np.array([vertexToNparray(v) for v in vertices], dtype=np.float64)
-    face_array = np.array([faceToNpArray(f) for f in faces], dtype=np.uint32)
+    face_array = np.array([faceToNpArray(f) for f in faces])
     vertexIndicesPy = {}
     for i, v in enumerate(vertexIndices):
         vertexIndicesPy[i] = vertexToNparray(v)
+    print(vert_array)
+    print(face_array)
+    print(vertexIndicesPy)
+    exit()
     return vert_array, face_array, vertexIndicesPy
         
 def cartesianLatLon(vertex: np.array, radius: float=PLANET_RADIUS_KM):
@@ -34,7 +38,10 @@ def calculateBearing(lat1, lon1, lat2, lon2) -> float:
 def findSphericalNeighbors(vertices, faces, vertexID, maxDistanceKM, radius = PLANET_RADIUS_KM):
     vertices = [npArrayToVertex(v) for v in vertices]
     facemap = [NPArrayToFace(face) for face in faces]
+    print(vertices)
+    print(facemap)
     neighbors = icosphere.findSphericalNeighbors(vertices, facemap, vertexID, maxDistanceKM, radius)
+    print(neighbors)
     npNeighbors = np.array(vertexToNparray(v) for v in neighbors)
     return npNeighbors
 
@@ -49,8 +56,10 @@ def npArrayToVertex(vert: np.ndarray) -> icosphere.Vertex:
     x: float = vert[0]
     y: float = vert[1]
     z: float = vert[2]
-    #print(f"types are: {type(x)}")
-    return icosphere.Vertex(x, y, z)
+    #print(f"vertex at: {x, y, z}")
+    vert = icosphere.Vertex(x, y, z)
+    #print(f"vertex at: {vert.x, vert.y, vert.z}")
+    return vert
 
 def faceToNpArray(face: icosphere.Face):
     return np.array([vertexToNparray(face.a), vertexToNparray(face.b), vertexToNparray(face.c)])

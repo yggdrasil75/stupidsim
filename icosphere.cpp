@@ -1,3 +1,4 @@
+#include <iostream>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -179,10 +180,14 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>> gen
                 vertex_indices[v] = unique_vertices.size();
                 unique_vertices.push_back(v);
             }
-        }
-        
-        // Add face indices
-        unique_faces.push_back(face);
+        }   
+    }
+    for (const Face& face : faces) {
+        unique_faces.emplace_back(
+            unique_vertices[vertex_indices[face.a]],
+            unique_vertices[vertex_indices[face.b]],
+            unique_vertices[vertex_indices[face.c]]
+        );
     }
 
     // Scale vertices by radius
@@ -264,48 +269,62 @@ double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
     return compass_bearing;
 }
 
+double calculateSlope(std::vector<Vertex> vertices, std::vector<Face> faces, int vertexID){
+
+}
+
 std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::vector<Face> faces,
                      int vertexID, double maxDistanceKM, double radius) {
     std::vector<Vertex> neighbors;
     const Vertex& center = vertices[vertexID];
+    std::cout << "Finding neighbors for Vertex ID: " << vertexID << " at coordinates (" << center.x << ", " << center.y << ", " << center.z << ")\n";
     
-    // Find all vertices in adjacent faces
     for (const Face& face : faces) {
-        // Check if the center vertex is part of this face
+        std::cout << "Vertex is part of Face with vertices: (" << face.a.x << ", " << face.a.y << ", " << face.a.z << ") ("
+                    << face.b.x << ", " << face.b.y << ", " << face.b.z << ") ("
+                    << face.c.x << ", " << face.c.y << ", " << face.c.z << ")\n";
         bool isInFace = (face.a == center) || (face.b == center) || (face.c == center);
         
         if (isInFace) {
-            // Add the other two vertices of the face
+
             if (face.a == center) {
                 neighbors.push_back(face.b);
                 neighbors.push_back(face.c);
-            } 
-            else if (face.b == center) {
+            } else if (face.b == center) {
                 neighbors.push_back(face.a);
                 neighbors.push_back(face.c);
-            } 
-            else { // face.c == center
+            } else {
                 neighbors.push_back(face.a);
                 neighbors.push_back(face.b);
             }
         }
     }
+
+    std::cout << "Initial neighbors count (with duplicates): " << neighbors.size() << "\n";
     
-    // Remove duplicates (requires operator< for Vertex)
     std::sort(neighbors.begin(), neighbors.end());
     neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
-    
-    // Filter by distance
+
+    std::cout << "Neighbors count after removing duplicates: " << neighbors.size() << "\n";
+
     std::vector<Vertex> finalNeighbors;
     for (const Vertex& v : neighbors) {
         double dist = haversineDistanceVertex(v, center, radius);
+        std::cout << "Distance from center to vertex at (" << v.x << ", " << v.y << ", " << v.z << "): " << dist << " km\n";
+        
         if (dist <= maxDistanceKM) {
             finalNeighbors.push_back(v);
+            std::cout << "Vertex within range. Added to final neighbors.\n";
+        } else {
+            std::cout << "Vertex out of range. Skipped.\n";
         }
     }
     
+    std::cout << "Total neighbors within max distance: " << finalNeighbors.size() << "\n";
+
     return finalNeighbors;
 }
+
 
 PYBIND11_MODULE(icosphere, m) {
     m.def("generate_icosphere", &generate_icosphere, 
