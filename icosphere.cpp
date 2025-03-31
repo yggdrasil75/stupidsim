@@ -123,7 +123,7 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
             Vertex mid_ab, mid_bc, mid_ca;
 
             // Edge AB
-            uint64_t key_ab = (static_cast<uint64_t>(vertex_to_index[a]) << 32) | vertex_to_index[b];
+            uint64_t key_ab = (static_cast<uint64_t>(std::min(vertex_to_index[a], vertex_to_index[b])) << 32) | std::max(vertex_to_index[a], vertex_to_index[b]); // Optimized key
             auto it_ab = edge_vertices.find(key_ab);
             if (it_ab == edge_vertices.end()) {
                 mid_ab = (a + b) / 2.0;
@@ -135,7 +135,7 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
             }
 
             // Edge BC
-            uint64_t key_bc = (static_cast<uint64_t>(vertex_to_index[b]) << 32) | vertex_to_index[c];
+            uint64_t key_bc = (static_cast<uint64_t>(std::min(vertex_to_index[b], vertex_to_index[c])) << 32) | std::max(vertex_to_index[b], vertex_to_index[c]); // Optimized key
             auto it_bc = edge_vertices.find(key_bc);
             if (it_bc == edge_vertices.end()) {
                 mid_bc = (b + c) / 2.0;
@@ -147,7 +147,7 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
             }
 
             // Edge CA
-            uint64_t key_ca = (static_cast<uint64_t>(vertex_to_index[c]) << 32) | vertex_to_index[a];
+            uint64_t key_ca = (static_cast<uint64_t>(std::min(vertex_to_index[c], vertex_to_index[a])) << 32) | std::max(vertex_to_index[c], vertex_to_index[a]); // Optimized key
             auto it_ca = edge_vertices.find(key_ca);
             if (it_ca == edge_vertices.end()) {
                 mid_ca = (c + a) / 2.0;
@@ -176,6 +176,7 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
     return faces;
 }
 
+// Modified generate_icosphere to return face indices
 std::tuple<std::vector<Vertex>, std::vector<std::array<uint32_t, 3>>, std::map<Vertex, size_t>> generate_icosphere(size_t subdivisions=3, double radius=1.0) {
     // Golden ratio
     const double t = (1.0 + std::sqrt(5.0)) / 2.0;
@@ -221,17 +222,21 @@ std::tuple<std::vector<Vertex>, std::vector<std::array<uint32_t, 3>>, std::map<V
     // Collect all unique vertices and create face indices
     std::vector<Vertex> unique_vertices;
     std::map<Vertex, size_t> vertex_indices;
-    std::vector<std::array<uint32_t, 3>> face_indices;
+    std::vector<std::array<uint32_t, 3>> face_indices; // Store face indices
 
     for (const Face& face : faces) {
-        // Add vertices if they don't exist
+        std::array<uint32_t, 3> current_face_indices;
+        int index_count = 0;
         for (const Vertex& v : {face.a, face.b, face.c}) {
             if (vertex_indices.find(v) == vertex_indices.end()) {
                 vertex_indices[v] = unique_vertices.size();
                 unique_vertices.push_back(v);
             }
+            current_face_indices[index_count++] = vertex_indices[v];
         }
+        face_indices.push_back(current_face_indices);
     }
+
 
     // Scale vertices by radius
     for (Vertex& v : unique_vertices) {
@@ -240,16 +245,8 @@ std::tuple<std::vector<Vertex>, std::vector<std::array<uint32_t, 3>>, std::map<V
         v.z *= radius;
     }
 
-    for (const Face& face : faces) {
-        face_indices.push_back({
-            static_cast<uint32_t>(vertex_indices[face.a]),
-            static_cast<uint32_t>(vertex_indices[face.b]),
-            static_cast<uint32_t>(vertex_indices[face.c])
-        });
-    }
 
-
-    return {unique_vertices, face_indices, vertex_indices};
+    return {unique_vertices, face_indices, vertex_indices}; // Return face indices
 }
 
 std::tuple<double, double> cartesianLatLon(Vertex vertex){
@@ -288,10 +285,10 @@ double HaversineDistance(double lat1, double lon1, double lat2, double lon2, dou
     return radius * c;
 }
 
-double sphericalDistanceCartesian(Vertex v1, Vertex v2, double radius){
-    double dotProd = dotProduct(v1.normalized(), v2.normalized());
-    double angle = std::acos(std::clamp(dotProd, -1.0, 1.0));
-    return radius * angle;
+double sphericalDistanceCartesian(const Vertex& v1, const Vertex& v2, double radius) {
+    double dot_product = dotProduct(v1.normalized(), v2.normalized());
+    double angle = std::acos(std::clamp(dot_product, -1.0, 1.0)); // Angle in radians
+    return radius * angle; // Distance along the sphere's surface
 }
 
 double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
@@ -380,63 +377,6 @@ std::vector<Vertex> findSphericalNeighborsThreaded(const std::vector<Vertex>& ve
     return finalNeighbors;
 }
 
-std::vector<Vertex> findSphericalNeighbors(std::vector<Vertex> vertices, std::vector<Face> faces, int vertexID, double maxDistanceKM, double radius) {
-    std::vector<Vertex> neighbors;
-    const Vertex& center = vertices[vertexID];
-    std::cout << "Finding neighbors for Vertex ID: " << vertexID << " at coordinates (" << center.x << ", " << center.y << ", " << center.z << ")\n";
-    
-    for (const Face& face : faces) {
-        std::cout << "coords of face is: (" << face.a.x << ", " << face.a.y << ", " << face.a.z << ") ("
-                    << face.b.x << ", " << face.b.y << ", " << face.b.z << ") ("
-                    << face.c.x << ", " << face.c.y << ", " << face.c.z << ")\n";
-        bool isInFace = ((face.a == center) || (face.b == center) || (face.c == center));
-        bool isa = (face.a == center);
-        bool isb = (face.b == center);
-        bool isc = (face.c == center);
-        std::cout << "truth statements are: "<< isa << ", " << isb << ", " << isc;
-        
-        if (isInFace) {
-            std::cout << "Vertex is part of Face with vertices: (" << face.a.x << ", " << face.a.y << ", " << face.a.z << ") ("
-                        << face.b.x << ", " << face.b.y << ", " << face.b.z << ") ("
-                        << face.c.x << ", " << face.c.y << ", " << face.c.z << ")\n";
-
-            if (face.a == center) {
-                neighbors.push_back(face.b);
-                neighbors.push_back(face.c);
-            } else if (face.b == center) {
-                neighbors.push_back(face.a);
-                neighbors.push_back(face.c);
-            } else {
-                neighbors.push_back(face.a);
-                neighbors.push_back(face.b);
-            }
-        }
-    }
-
-    std::cout << "Initial neighbors count (with duplicates): " << neighbors.size() << "\n";
-    
-    std::sort(neighbors.begin(), neighbors.end());
-    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
-
-    std::cout << "Neighbors count after removing duplicates: " << neighbors.size() << "\n";
-
-    std::vector<Vertex> finalNeighbors;
-    for (const Vertex& v : neighbors) {
-        double dist = sphericalDistanceCartesian(v, center, radius);
-        std::cout << "Distance from center to vertex at (" << v.x << ", " << v.y << ", " << v.z << "): " << dist << " km\n";
-        
-        if (dist <= maxDistanceKM) {
-            finalNeighbors.push_back(v);
-            std::cout << "Vertex within range. Added to final neighbors.\n";
-        } else {
-            std::cout << "Vertex out of range. Skipped.\n";
-        }
-    }
-    
-    std::cout << "Total neighbors within max distance: " << finalNeighbors.size() << "\n";
-
-    return finalNeighbors;
-}
 
 double calculateSlope(std::vector<Vertex> vertices, std::vector<Face> faces, int vertexID, double radius){
     std::vector<Vertex> neighbors = findSphericalNeighborsThreaded(vertices, faces, vertexID, 1000.0, radius); // radius is placeholder here, adjust if needed, max_distance_km=100
@@ -478,28 +418,30 @@ double calculateSlope(std::vector<Vertex> vertices, std::vector<Face> faces, int
 
 
 PYBIND11_MODULE(icosphere, m) {
+    m.doc() = "Icosphere generation and utility library"; // Module Docstring
+
     m.def("generate_icosphere", &generate_icosphere,
-          "Generate an icosphere mesh",
+          "Generate an icosphere mesh. Returns vertices and face indices.", // Function Docstring
           py::arg("subdivisions") = 3,
           py::arg("radius") = 1.0);
 
-    m.def("cartesianLatLon", &cartesianLatLon, "convert vertex to lat/lon", py::arg("vertex"));
+    m.def("cartesianLatLon", &cartesianLatLon, "Convert a Cartesian vertex to latitude and longitude.", py::arg("vertex"));
 
-    m.def("latLonCartesian", &latLonCartesian, "convert lat/lon to cartesian", py::arg("lat"), py::arg("lon"), py::arg("radius"));
-    
-    m.def("HaversineDistance", &HaversineDistance, "calculates the distance between 2 lat/lon points", 
+    m.def("latLonCartesian", &latLonCartesian, "Convert latitude and longitude to a Cartesian vertex.", py::arg("lat"), py::arg("lon"), py::arg("radius"));
+
+    m.def("HaversineDistance", &HaversineDistance, "Calculate the Haversine distance between two lat/lon points.",
             py::arg("lat1"), py::arg("lon1"), py::arg("lat2"), py::arg("lon2"), py::arg("radius"));
-    
-    m.def("calculateBearing", &calculateBearing, "calculates the bearing of a storm", 
+
+    m.def("calculateBearing", &calculateBearing, "Calculate the bearing between two lat/lon points.",
             py::arg("lat1"), py::arg("lon1"), py::arg("lat2"), py::arg("lon2"));
-    
-    m.def("sphericalDistanceCartesian", &sphericalDistanceCartesian, "uses cartesian to get teh distance between 2 points",
-            py::arg("v1"), py::arg("v2"), py::arg("radius"));
-    
-    m.def("findSphericalNeighbors", &findSphericalNeighbors, "gets neighbors within distance",
-            py::arg("vertices"), py::arg("faces"), py::arg("centerID"), py::arg("maxDistanceKM"), py::arg("radius"));
-    
-    m.def("calculateSlope", &calculateSlope, "gets slope from vertices within 1 Mm",
+
+    m.def("sphericalDistanceCartesian", &sphericalDistanceCartesian, "Calculate spherical distance between two Cartesian vertices.",
+            py::arg("v1"), py::arg("v2"), py::arg("radius")); 
+
+    m.def("findSphericalNeighbors", &findSphericalNeighborsThreaded, "Find neighboring vertices within a given spherical distance.",
+            py::arg("vertices"), py::arg("faces"), py::arg("centerID"), py::arg("maxDistanceKM"), py::arg("radius")); 
+
+    m.def("calculateSlope", &calculateSlope, "Calculate the slope at a vertex based on surrounding face normals.",
             py::arg("vertices"), py::arg("faces"), py::arg("centerID"), py::arg("radius"));
 
 
@@ -507,11 +449,20 @@ PYBIND11_MODULE(icosphere, m) {
         .def(py::init<double, double, double>())
         .def_readwrite("x", &Vertex::x)
         .def_readwrite("y", &Vertex::y)
-        .def_readwrite("z", &Vertex::z);
+        .def_readwrite("z", &Vertex::z)
+        .def("__repr__", [](const Vertex &v) { // Optional: nicer print representation in Python
+            return "<icosphere.Vertex x=" + std::to_string(v.x) + ", y=" + std::to_string(v.y) + ", z=" + std::to_string(v.z) + ">";
+        });
+
 
     py::class_<Face>(m, "Face")
         .def(py::init<Vertex, Vertex, Vertex>())
         .def_readwrite("a", &Face::a)
         .def_readwrite("b", &Face::b)
-        .def_readwrite("c", &Face::c);
+        .def_readwrite("c", &Face::c)
+        .def("__repr__", [](const Face &f) { // Optional: nicer print representation in Python
+            return "<icosphere.Face a=" + std::to_string(f.a.x) + "," + std::to_string(f.a.y) + "," + std::to_string(f.a.z) +
+                   " b=" + std::to_string(f.b.x) + "," + std::to_string(f.b.y) + "," + std::to_string(f.b.z) +
+                   " c=" + std::to_string(f.c.x) + "," + std::to_string(f.c.y) + "," + std::to_string(f.c.z) + ">";
+        });
 }
