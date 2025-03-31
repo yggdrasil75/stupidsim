@@ -35,24 +35,27 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 
     # Plot the main mesh
     mesh = ax.plot_trisurf(vertices[:, 0], vertices[:, 1], vertices[:, 2],
-                            triangles=faces, color='white',
-                            edgecolor='none', alpha=1.0)
-    mesh.set_array(face_data) # set face data for coloring
-    mesh.set_cmap(cmap) # apply colormap
+                            triangles=faces,
+                            array=face_data,  # Pass face_data directly as array
+                            cmap=cmap,        # Apply colormap
+                            linewidth=0,      # Remove edge lines for cleaner look
+                            antialiased=False) # Disable antialiasing for performance and cleaner lines
 
     # Colorbar - keep it for now, even if only elevation is implemented
     if cbar_obj is None:
-        cbar_obj = plt.colorbar(mesh, ax=ax, shrink=0.5)
+        cbar_obj = plt.colorbar(mesh, ax=ax, shrink=0.5, aspect=20) # Adjust aspect ratio
     else:
         cbar_obj.mappable = mesh
         cbar_obj.update_normal(mesh)
 
     cbar_obj.set_label(cbar_label)
+    cbar_obj.ax.tick_params(labelsize=8) # Reduce colorbar label size
 
-    ax.set_title(title)
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
+    ax.set_title(title, fontsize=12) # Reduce title fontsize
+    ax.set_xlabel("X", fontsize=8)   # Reduce axis label fontsize
+    ax.set_ylabel("Y", fontsize=8)
+    ax.set_zlabel("Z", fontsize=8)
+    ax.tick_params(axis='both', which='major', labelsize=6) # Reduce tick label size
     ax.set_aspect('equal')
     ax.view_init(elev=30, azim=45)
     ax.set_xticks([])
@@ -64,7 +67,12 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
 if __name__ == "__main__":
     subdivisions = 3
     radius = PLANET_RADIUS_KM  # Use the global planet radius
-    vertices_cpp, faces_cpp, _ = icosphere.initializeWorld(subdivisions=subdivisions, radius=radius, elevationRange=20000.0)
+    world_state = icosphere.initializeWorld(subdivisions=subdivisions, radius=radius, elevationRange=20000.0)
+    vertices_cpp = world_state.vertices
+    face_history = icosphere.run_simulation(world_state, steps=10) # Run simulation for 10 steps
+    final_faces_cpp = face_history[-1] # Get the faces from the last step
+    vertex_indices_map = world_state.vertex_indices # Access the vertex indices map (remains the same as vertices are not reindexed)
+
 
     # Convert C++ vectors to NumPy arrays
     num_vertices = len(vertices_cpp)
@@ -75,29 +83,20 @@ if __name__ == "__main__":
         vertices_np[i, :] = [v.x, v.y, v.z]
         elevations_np[i] = v.elevation
 
-    num_faces = len(faces_cpp)
-    faces_np = np.zeros((num_faces, 3), dtype=int) # Assuming faces are indexed from 0 to num_vertices-1 based on icosphere generation
-    vertex_map = {}
-    unique_vertices_list = []
-    vertex_index = 0
-
-    for face_cpp in faces_cpp:
-        face_indices = []
-        for vertex_cpp in [face_cpp.a, face_cpp.b, face_cpp.c]:
-            vertex_tuple = (vertex_cpp.x, vertex_cpp.y, vertex_cpp.z) #use coordinates as key
-            if vertex_tuple not in vertex_map:
-                vertex_map[vertex_tuple] = vertex_index
-                unique_vertices_list.append(vertex_cpp)
-                face_indices.append(vertex_index)
-                vertex_index += 1
-            else:
-                face_indices.append(vertex_map[vertex_tuple])
-        faces_np[faces_cpp.index(face_cpp), :] = face_indices
+    num_faces = len(final_faces_cpp) # Use final_faces_cpp here
+    faces_np = np.zeros((num_faces, 3), dtype=int)
+    for i in range(num_faces):
+        face = final_faces_cpp[i] # Use final_faces_cpp here
+        # Use the vertex_indices_map to get the indices
+        faces_np[i, 0] = vertex_indices_map[face.a]
+        faces_np[i, 1] = vertex_indices_map[face.b]
+        faces_np[i, 2] = vertex_indices_map[face.c]
 
 
-    fig = plt.figure(figsize=(10, 10))
+    fig = plt.figure(figsize=(8, 8)) # Adjust figure size
     ax = fig.add_subplot(111, projection='3d')
 
     visualize_world_spherical(vertices_np, faces_np, elevations_np, ax, data_type='elevation')
 
+    plt.tight_layout() # Improve layout to prevent labels from overlapping
     plt.show()

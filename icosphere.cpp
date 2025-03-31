@@ -173,7 +173,7 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
         }
 
         faces = std::move(new_faces);
-        
+
         for (Vertex& v : vertices) {
             v = v.normalized();
         }
@@ -183,7 +183,7 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
 }
 
 // Modified generate_icosphere to return face indices
-std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>> 
+std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>
     generate_icosphere(size_t subdivisions=3, double radius=1.0) {
     // Golden ratio
     const double t = (1.0 + std::sqrt(5.0)) / 2.0;
@@ -261,10 +261,20 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>
     return {unique_vertices, unique_faces, vertex_indices}; // Return face indices
 }
 
-std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>  
-    initializeWorld(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0) {
+// Define a struct to hold the world state
+struct WorldState {
+    std::vector<Vertex> vertices;
+    std::vector<Face> faces;
+    std::map<Vertex, size_t> vertexIndices;
+
+    WorldState() = default;
+    WorldState(const std::vector<Vertex>& v, const std::vector<Face>& f, const std::map<Vertex, size_t>& vi) : vertices(v), faces(f), vertexIndices(vi) {}
+};
+
+
+WorldState initializeWorld(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0) {
     auto [vertices, faces, vertexIndices] = generate_icosphere(subdivisions, radius);
-    
+
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<> distrib(-elevationRange / 2.0, elevationRange / 2.0);
@@ -276,8 +286,28 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>
         face.average_elevation = distrib(gen);
     }
 
-    return {vertices, faces, vertexIndices};
+    return WorldState(vertices, faces, vertexIndices);
 }
+
+WorldState step(WorldState world) {
+    // In this basic step, the world state doesn't change.
+    // Erosion or other simulation logic would be implemented here in future steps.
+    return world;
+}
+
+std::vector<std::vector<Face>> run_simulation(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0, int steps) {
+    WorldState world = initializeWorld(subdivisions, radius, elevationRange)
+    std::vector<std::vector<Face>> face_history;
+    WorldState current_world = world;
+    face_history.push_back(current_world.faces); // Store initial state
+
+    for (int i = 0; i < steps; ++i) {
+        current_world = step(current_world);
+        face_history.push_back(current_world.faces); // Store faces after each step
+    }
+    return face_history;
+}
+
 
 std::tuple<double, double> cartesianLatLon(Vertex vertex){
     double lat_rad = std::asin(vertex.z / std::sqrt(std::pow(vertex.x, 2) + std::pow(vertex.y, 2) + std::pow(vertex.z, 2)));
@@ -333,7 +363,7 @@ double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
     // Calculate bearing using the formula:
     // θ = atan2(sin(Δlong)*cos(lat2), cos(lat1)*sin(lat2) − sin(lat1)*cos(lat2)*cos(Δlong))
     double x = sin(dLon) * cos(lat2_rad);
-    double y = (cos(lat1_rad) * sin(lat2_rad) - 
+    double y = (cos(lat1_rad) * sin(lat2_rad) -
                (sin(lat1_rad) * cos(lat2_rad) * cos(dLon)));
 
     // Calculate the initial bearing in radians
@@ -342,7 +372,7 @@ double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
     // Convert from radians to degrees (0-360)
     double initial_bearing_deg = initial_bearing * 180.0 / M_PI;
     double compass_bearing = fmod(initial_bearing_deg + 360.0, 360.0);
-    
+
     return compass_bearing;
 }
 
@@ -382,7 +412,7 @@ std::vector<Vertex> findSphericalNeighborsThreaded(const std::vector<Vertex>& ve
             std::vector<Vertex> thread_neighbors;
             for (size_t j = start_index; j < end_index; ++j) {
                 std::vector<Vertex> face_neighbors = process_face(faces[j]);
-                thread_neighbors.insert(thread_neighbors.end(), face_neighbors.begin(), face_neighbors.end());
+                thread_neighbors.insert(thread_neighbors.end(), thread_neighbors.begin(), thread_neighbors.end());
             }
             return thread_neighbors;
         }));
@@ -447,36 +477,47 @@ double calculateSlope(std::vector<Vertex> vertices, std::vector<Face> faces, int
 
 
 PYBIND11_MODULE(icosphere, m) {
-    m.doc() = "Icosphere generation and utility library"; 
+    m.doc() = "Icosphere generation and utility library";
 
-    m.def("initializeWorld", &initializeWorld, "Generate an basic world", 
-          py::arg("subdivisions") = 3, py::arg("radius") = 1.0, 
+    py::class_<WorldState>(m, "WorldState")
+        .def(py::init<>())
+        .def_readwrite("vertices", &WorldState::vertices)
+        .def_readwrite("faces", &WorldState::faces)
+        .def_readwrite("vertex_indices", &WorldState::vertexIndices);
+
+    m.def("initializeWorld", &initializeWorld, "Generate an basic world",
+          py::arg("subdivisions") = 3, py::arg("radius") = 1.0,
           py::arg("elevationRange") = 10000.0);
 
-    m.def("cartesianLatLon", &cartesianLatLon, 
+    m.def("step", &step, "Advance the world simulation by one step.", py::arg("world"));
+
+    m.def("run_simulation", &run_simulation, "Run the world simulation for a given number of steps.",
+         py::arg("initial_world"), py::arg("steps"));
+
+    m.def("cartesianLatLon", &cartesianLatLon,
         "Convert a Cartesian vertex to latitude and longitude.", py::arg("vertex"));
 
-    m.def("latLonCartesian", &latLonCartesian, 
-        "Convert latitude and longitude to a Cartesian vertex.", py::arg("lat"), 
+    m.def("latLonCartesian", &latLonCartesian,
+        "Convert latitude and longitude to a Cartesian vertex.", py::arg("lat"),
         py::arg("lon"), py::arg("radius"));
 
-    m.def("HaversineDistance", &HaversineDistance, 
+    m.def("HaversineDistance", &HaversineDistance,
         "Calculate the Haversine distance between two lat/lon points.",
             py::arg("lat1"), py::arg("lon1"), py::arg("lat2"), py::arg("lon2"), py::arg("radius"));
 
-    m.def("sphericalDistanceCartesian", &sphericalDistanceCartesian, 
+    m.def("sphericalDistanceCartesian", &sphericalDistanceCartesian,
         "Calculate spherical distance between two Cartesian vertices.",
-            py::arg("v1"), py::arg("v2"), py::arg("radius")); 
+            py::arg("v1"), py::arg("v2"), py::arg("radius"));
 
     m.def("calculateBearing", &calculateBearing, "Calculate the bearing between two lat/lon points.",
             py::arg("lat1"), py::arg("lon1"), py::arg("lat2"), py::arg("lon2"));
 
-    m.def("findSphericalNeighbors", &findSphericalNeighborsThreaded, 
+    m.def("findSphericalNeighbors", &findSphericalNeighborsThreaded,
         "Find neighboring vertices within a given spherical distance.",
-            py::arg("vertices"), py::arg("faces"), py::arg("centerID"), 
-            py::arg("maxDistanceKM"), py::arg("radius")); 
+            py::arg("vertices"), py::arg("faces"), py::arg("centerID"),
+            py::arg("maxDistanceKM"), py::arg("radius"));
 
-    m.def("calculateSlope", &calculateSlope, 
+    m.def("calculateSlope", &calculateSlope,
         "Calculate the slope at a vertex based on surrounding face normals.",
             py::arg("vertices"), py::arg("faces"), py::arg("centerID"), py::arg("radius"));
 
@@ -487,8 +528,8 @@ PYBIND11_MODULE(icosphere, m) {
         .def_readwrite("y", &Vertex::y)
         .def_readwrite("z", &Vertex::z)
         .def_readwrite("elevation", &Vertex::elevation)
-        .def("__repr__", [](const Vertex &v) { 
-            return "<icosphere.Vertex x=" + std::to_string(v.x) + ", y=" + std::to_string(v.y) + ", z=" + std::to_string(v.z) + 
+        .def("__repr__", [](const Vertex &v) {
+            return "<icosphere.Vertex x=" + std::to_string(v.x) + ", y=" + std::to_string(v.y) + ", z=" + std::to_string(v.z) +
             ", elevation=" + std::to_string(v.elevation) + ">";
         });
 
@@ -499,10 +540,10 @@ PYBIND11_MODULE(icosphere, m) {
         .def_readwrite("b", &Face::b)
         .def_readwrite("c", &Face::c)
         .def_readwrite("average_elevation", &Face::average_elevation)
-        .def("__repr__", [](const Face &f) { 
+        .def("__repr__", [](const Face &f) {
             return "<icosphere.Face a=" + std::to_string(f.a.x) + "," + std::to_string(f.a.y) + "," + std::to_string(f.a.z) +
                    " b=" + std::to_string(f.b.x) + "," + std::to_string(f.b.y) + "," + std::to_string(f.b.z) +
-                   " c=" + std::to_string(f.c.x) + "," + std::to_string(f.c.y) + "," + std::to_string(f.c.z) + 
+                   " c=" + std::to_string(f.c.x) + "," + std::to_string(f.c.y) + "," + std::to_string(f.c.z) +
                    " average_elevation=" + std::to_string(f.average_elevation) + ">";
         });
 }
