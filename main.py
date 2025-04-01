@@ -12,9 +12,8 @@ from plate import Plate, simulate_plate_tectonics_spherical
 from pressure import calculate_pressure_with_circulation, update_pressure_systems
 from storms import generate_storm_systems
 from temperature import calculate_solar_radiation_for_vertex, calculate_sun_direction, calculate_temperature_from_radiation, calculate_temperature_with_greenhouse
-from utils import cartesian_to_lat_lon, determine_surface_type
+from utils import cartesian_to_lat_lon, determine_surface_type, print_function_times
 from viewer import visualize_world_spherical
-import icosphere as _icosphere
 
 def generate_icosphere(subdivisions=3, radius=1.0):
     """Generate an icosphere mesh with given number of subdivisions."""
@@ -149,7 +148,8 @@ if __name__ == "__main__":
     radius: float = PLANET_RADIUS_KM #in R🜨 (or earth radii) massive changes will probably break calculations, keep between 0.9 and 1.1
     num_plates: int = config['plate_tectonics']['initial_num_plates'] #will start randomized and grow towards this number, after that, the plates should generally "stick"
     num_steps: int = config['simulation']['num_steps'] #10 steps should be enough to get the plates. more will actually run the simulation
-    days_per_step, step_size = config['simulation']['step_size'] #in number of days.
+    step_size = config['simulation']['step_size'] # in 1/100ths of days. .30 is 30 days.
+    days_per_step = step_size * 100
     max_neighbor_distance_km: int = config['simulation']['max_neighbor_distance_km']  # distance for plate interaction
     current_day: int = 0
     current_hour: int = 12  # Noon
@@ -352,8 +352,9 @@ if __name__ == "__main__":
     step_slider.on_changed(update_step)
     saveConfig(config)
     plt.title('StupidSim')
-    for var_name, var_value in locals().copy().items():
-        print(f'{var_name} is {type(var_value)}')
-    for var_name, var_value in globals().copy().items():
-        print(f'{var_name} is {type(var_value)}')
+    #for var_name, var_value in locals().copy().items():
+    #    print(f'{var_name} is {type(var_value)}')
+    #for var_name, var_value in globals().copy().items():
+    #    print(f'{var_name} is {type(var_value)}')
+    print_function_times()
     plt.show()

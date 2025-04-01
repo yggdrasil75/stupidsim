@@ -1,11 +1,34 @@
 
 from functools import lru_cache, wraps
 import math
+import threading
 import time
 import numpy as np
 
 from globals import ATMOSPHERIC_COMPOSITION, MOLECULAR_WEIGHTS, PLANET_RADIUS_KM, function_times
 
+_GLOBAL_DISTANCE_CACHE = []
+_CACHE_INITIALIZED = False
+_CACHE_LOCK = threading.Lock() # Lock for thread-safe access to the cache
+
+def timing_decorator(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        global function_times
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+        
+        # Record the time
+        if func.__name__ not in function_times:
+            function_times[func.__name__] = []
+        function_times[func.__name__].append(elapsed_time)
+
+        return result
+    return wrapper
+
+@timing_decorator
 @lru_cache(maxsize=None)
 def calculate_mean_molecular_weight(humidity):
     """Calculate mean molecular weight of atmosphere based on humidity."""
@@ -23,6 +46,7 @@ def calculate_mean_molecular_weight(humidity):
     
     return weighted_sum
 
+@timing_decorator
 @lru_cache(maxsize=None)
 def determine_surface_type(elevation, temperature, water_fraction):
     """Determine surface type for albedo calculation."""
@@ -41,6 +65,7 @@ def determine_surface_type(elevation, temperature, water_fraction):
     else:
         return 'grassland'
 
+@timing_decorator
 @lru_cache(maxsize=None)
 def cartesian_to_lat_lon(x, y, z):
     """Convert cartesian coordinates to latitude/longitude."""
@@ -48,6 +73,7 @@ def cartesian_to_lat_lon(x, y, z):
     lon = np.degrees(np.arctan2(y, x))
     return lat, lon
 
+@timing_decorator
 @lru_cache(maxsize=None)
 def lat_lon_to_cartesian(lat, lon, radius):
     lat_rad = np.radians(lat)
@@ -57,7 +83,8 @@ def lat_lon_to_cartesian(lat, lon, radius):
     z = radius * np.sin(lat_rad)
     return x, y, z
 
-#@lru_cache(maxsize=None)
+@timing_decorator
+@lru_cache(maxsize=None)
 def haversine_distance(lat1, lon1, lat2, lon2, radius=PLANET_RADIUS_KM):
     """Calculate great-circle distance between two points on a sphere."""
     lat1_rad = np.radians(lat1)
@@ -74,33 +101,84 @@ def haversine_distance(lat1, lon1, lat2, lon2, radius=PLANET_RADIUS_KM):
     distance = radius * c
     return distance
 
-#@lru_cache(maxsize=None)
-def find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km):
-    """Find neighbors within a certain distance on the sphere."""
-    neighbors = set()
-    center = vertices[vertex_idx]
+@timing_decorator
+def _calculate_distances_for_vertex_range(vertices, vertex_indices, distances_list):
+    """Calculates distances for a subset of vertices and appends to a list."""
+    for i in vertex_indices:
+        for j in range(i + 1, len(vertices)): # Avoid redundant calculations and self-distances
+            center = vertices[i]
+            neighbor_vertex = vertices[j]
 
-    # First find direct face-connected neighbors
+            lat1, lon1 = cartesian_to_lat_lon(*center)
+            lat2, lon2 = cartesian_to_lat_lon(*neighbor_vertex)
+            dist = haversine_distance(lat1, lon1, lat2, lon2)
+            distances_list.append((dist, (i, j)))
+
+@timing_decorator
+def initialize_distance_cache(vertices, num_threads=4): # Added num_threads parameter
+    """Calculates and sorts all pairwise distances between vertices using threads."""
+    global _GLOBAL_DISTANCE_CACHE, _CACHE_INITIALIZED, _CACHE_LOCK
+    if _CACHE_INITIALIZED:
+        return  # Already initialized
+
+    distances = []
+    num_vertices = len(vertices)
+    threads = []
+    vertices_per_thread = num_vertices // num_threads + (1 if num_vertices % num_threads != 0 else 0) # Distribute vertices roughly evenly
+
+    for thread_id in range(num_threads):
+        start_index = thread_id * vertices_per_thread
+        end_index = min((thread_id + 1) * vertices_per_thread, num_vertices)
+        vertex_indices_for_thread = range(start_index, end_index)
+        if not vertex_indices_for_thread: # Skip if no vertices for this thread
+            continue
+        thread = threading.Thread(target=_calculate_distances_for_vertex_range, args=(vertices, vertex_indices_for_thread, distances))
+        threads.append(thread)
+        thread.start()
+
+    for thread in threads:
+        thread.join() # Wait for all threads to complete
+
+    distances.sort(key=lambda item: item[0]) # Sort by distance after all threads are done
+    with _CACHE_LOCK: # Acquire lock before updating global cache
+        _GLOBAL_DISTANCE_CACHE = distances
+        _CACHE_INITIALIZED = True
+
+@timing_decorator
+def find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km):
+    """
+    Find neighbors within a certain distance using pre-computed and sorted distances.
+    """
+    global _GLOBAL_DISTANCE_CACHE, _CACHE_INITIALIZED
+
+    if not _CACHE_INITIALIZED:
+        initialize_distance_cache(vertices)
+
+    neighbors = set()
+    # First find direct face-connected neighbors (still needed for initial neighbor set)
     for face in faces:
         if vertex_idx in face:
             for v in face:
                 if v != vertex_idx:
                     neighbors.add(v)
 
-    # Then check distance for all vertices
     final_neighbors = []
-    for v in neighbors:
-        # Calculate spherical distance
-        lat1, lon1 = cartesian_to_lat_lon(*center)
-        lat2, lon2 = cartesian_to_lat_lon(*vertices[v])
-        dist = haversine_distance(lat1, lon1, lat2, lon2)
+    for dist, vertex_pair in _GLOBAL_DISTANCE_CACHE:
+        if dist > max_distance_km:
+            break # Since distances are sorted, we can stop searching
 
-        if dist <= max_distance_km:
-            final_neighbors.append(v)
+        v1, v2 = vertex_pair
+        if v1 == vertex_idx:
+            if v2 in neighbors: # Only consider face-connected neighbors initially
+                final_neighbors.append(v2)
+        elif v2 == vertex_idx:
+            if v1 in neighbors: # Only consider face-connected neighbors initially
+                final_neighbors.append(v1)
 
     return final_neighbors
 
 #@lru_cache(maxsize=None)
+@timing_decorator
 def calculate_slope(vertices, faces, vertex_idx):
     """Estimate terrain slope (radians) at a vertex using neighboring faces."""
     neighbors = find_spherical_neighbors(vertices, faces, vertex_idx, max_distance_km=100)
@@ -117,31 +195,7 @@ def calculate_slope(vertices, faces, vertex_idx):
     radial_vector = vertices[vertex_idx] / np.linalg.norm(vertices[vertex_idx])
     return np.arccos(np.clip(np.dot(normal, radial_vector), -1, 1))
 
-@lru_cache(maxsize=None)
-def calculate_bearing_math(lat1, lon1, lat2, lon2):
-    lat1_rad = math.radians(lat1)
-    lon1_rad = math.radians(lon1)
-    lat2_rad = math.radians(lat2)
-    lon2_rad = math.radians(lon2)
-
-    # Calculate the difference in longitudes
-    dLon = lon2_rad - lon1_rad
-
-    # Calculate bearing using the formula:
-    # θ = atan2(sin(Δlong)*cos(lat2), cos(lat1)*sin(lat2) − sin(lat1)*cos(lat2)*cos(Δlong))
-    x = math.sin(dLon) * math.cos(lat2_rad)
-    y = (math.cos(lat1_rad) * math.sin(lat2_rad) - 
-        (math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(dLon)))
-
-    # Calculate the initial bearing in radians
-    initial_bearing = math.atan2(x, y)
-
-    # Convert from radians to degrees (0-360)
-    initial_bearing_deg = math.degrees(initial_bearing)
-    compass_bearing = (initial_bearing_deg + 360) % 360
-
-    return compass_bearing
-
+@timing_decorator
 @lru_cache(maxsize=None)
 def calculate_bearing(lat1, lon1, lat2, lon2):
     """
@@ -162,23 +216,6 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     compass_bearing = (np.degrees(initial_bearing) + 360) % 360
     
     return compass_bearing
-
-def timing_decorator(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        global function_times
-        start_time = time.time()
-        result = func(*args, **kwargs)
-        end_time = time.time()
-        elapsed_time = end_time - start_time
-        
-        # Record the time
-        if func.__name__ not in function_times:
-            function_times[func.__name__] = []
-        function_times[func.__name__].append(elapsed_time)
-
-        return result
-    return wrapper
 
 def print_function_times():
     print("Function Execution Times:")
