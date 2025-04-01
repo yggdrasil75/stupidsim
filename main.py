@@ -68,8 +68,9 @@ def get_vertex_index(vertex_to_find, vertex_indices_map, vertices_np):
     """Finds the index of a vertex in vertices_np based on its data."""
     vertex_data_to_find = np.array([vertex_to_find.x, vertex_to_find.y, vertex_to_find.z])
     for original_vertex, index in vertex_indices_map.items():
+        original_vertex = np.array([original_vertex.x, original_vertex.y, original_vertex.z])
         original_vertex_data = vertices_np[index]
-        if np.allclose(vertex_data_to_find, original_vertex_data):
+        if np.allclose(vertex_data_to_find, original_vertex):
             return index
     return None  # Should not reach here if vertex_indices_map is consistent
 
@@ -95,10 +96,7 @@ if __name__ == "__main__":
     faces_np = np.zeros((num_faces, 3), dtype=int)
     for i, face in enumerate(final_faces_cpp):
         # Use get_vertex_index to find the correct indices
-        print(i)
-        vid = get_vertex_index(face.a, vertex_indices_map, world[-1].vertices)
-        print(vid)
-        faces_np[i, 0] = vid
+        faces_np[i, 0] = get_vertex_index(face.a, vertex_indices_map, world[-1].vertices)
         faces_np[i, 1] = get_vertex_index(face.b, vertex_indices_map, vertices_np)
         faces_np[i, 2] = get_vertex_index(face.c, vertex_indices_map, vertices_np)
 
