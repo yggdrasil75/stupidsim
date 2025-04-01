@@ -64,14 +64,23 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
     ax.set_title(title)
 
 
+def get_vertex_index(vertex_to_find, vertex_indices_map, vertices_np):
+    """Finds the index of a vertex in vertices_np based on its data."""
+    vertex_data_to_find = np.array([vertex_to_find.x, vertex_to_find.y, vertex_to_find.z])
+    for original_vertex, index in vertex_indices_map.items():
+        original_vertex_data = vertices_np[index]
+        if np.allclose(vertex_data_to_find, original_vertex_data):
+            return index
+    return None  # Should not reach here if vertex_indices_map is consistent
+
+
 if __name__ == "__main__":
     subdivisions = 1
     radius = PLANET_RADIUS_KM  # Use the global planet radius
-    #world_state = icosphere.initializeWorld(subdivisions=subdivisions, radius=radius, elevationRange=20000.0)
 
-    world = icosphere.run_simulation(subdivisions=subdivisions, radius=radius, elevationRange=20000.0, steps=10) # Run simulation for 10 steps
-    final_faces_cpp = world[-1].faces # Get the faces from the last step
-    vertex_indices_map = [world[i].vertex_indices for i in range(len(world))] # Access the vertex indices map (remains the same as vertices are not reindexed)
+    world = icosphere.run_simulation(subdivisions=subdivisions, radius=radius, elevationRange=20000.0, steps=10)
+    final_faces_cpp = world[-1].faces
+    vertex_indices_map = world[-1].vertex_indices
 
 
     # Convert C++ vectors to NumPy arrays
@@ -82,22 +91,26 @@ if __name__ == "__main__":
         vertices_np[i, :] = [v.x, v.y, v.z]
         elevations_np[i] = v.elevation
 
-    num_faces = len(final_faces_cpp) # Use final_faces_cpp here
+    num_faces = len(final_faces_cpp)
     faces_np = np.zeros((num_faces, 3), dtype=int)
-    for i in range(num_faces):
-        face = final_faces_cpp[i] # Use final_faces_cpp here
-        # Use the vertex_indices_map to get the indices
-        #print(face)
-        #print(vertex_indices_map[i])
-        faces_np[i, 0] = world[-1].vertex_indices[face.a]
-        faces_np[i, 1] = world[-1].vertex_indices[face.b]
-        faces_np[i, 2] = world[-1].vertex_indices[face.c]
+    for i, face in enumerate(final_faces_cpp):
+        # Use get_vertex_index to find the correct indices
+        print(i)
+        vid = get_vertex_index(face.a, vertex_indices_map, world[-1].vertices)
+        print(vid)
+        faces_np[i, 0] = vid
+        faces_np[i, 1] = get_vertex_index(face.b, vertex_indices_map, vertices_np)
+        faces_np[i, 2] = get_vertex_index(face.c, vertex_indices_map, vertices_np)
+
+        if None in faces_np[i, :]: # Error check
+            print(f"Error: Could not find vertex index for face {i}")
+            break
 
 
-    fig = plt.figure(figsize=(8, 8)) # Adjust figure size
+    fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection='3d')
 
     visualize_world_spherical(vertices_np, faces_np, elevations_np, ax, data_type='elevation')
 
-    plt.tight_layout() # Improve layout to prevent labels from overlapping
+    plt.tight_layout()
     plt.show()
