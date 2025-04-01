@@ -295,17 +295,18 @@ WorldState step(WorldState world) {
     return world;
 }
 
-std::vector<std::vector<Face>> run_simulation(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0, int steps) {
-    WorldState world = initializeWorld(subdivisions, radius, elevationRange)
+std::tuple<std::vector<std::vector<Face>>, std::map<Vertex, size_t>> run_simulation(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0, int steps = 15) {
+    WorldState world = initializeWorld(subdivisions, radius, elevationRange);
     std::vector<std::vector<Face>> face_history;
     WorldState current_world = world;
     face_history.push_back(current_world.faces); // Store initial state
+    std::map<Vertex, size_t> vertexIndices = world.vertexIndices;
 
     for (int i = 0; i < steps; ++i) {
         current_world = step(current_world);
         face_history.push_back(current_world.faces); // Store faces after each step
     }
-    return face_history;
+    return {face_history, vertexIndices};
 }
 
 
@@ -492,7 +493,7 @@ PYBIND11_MODULE(icosphere, m) {
     m.def("step", &step, "Advance the world simulation by one step.", py::arg("world"));
 
     m.def("run_simulation", &run_simulation, "Run the world simulation for a given number of steps.",
-         py::arg("initial_world"), py::arg("steps"));
+          py::arg("subdivisions"), py::arg("radius"), py::arg("elevationRange"), py::arg("steps"));
 
     m.def("cartesianLatLon", &cartesianLatLon,
         "Convert a Cartesian vertex to latitude and longitude.", py::arg("vertex"));
