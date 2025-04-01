@@ -90,6 +90,16 @@ struct Face {
     }
 };
 
+// Define a struct to hold the world state
+struct WorldState {
+    std::vector<Vertex> vertices;
+    std::vector<Face> faces;
+    std::map<Vertex, size_t> vertexIndices;
+
+    WorldState() = default;
+    WorldState(const std::vector<Vertex>& v, const std::vector<Face>& f, const std::map<Vertex, size_t>& vi) : vertices(v), faces(f), vertexIndices(vi) {}
+};
+
 namespace std {
     template<> struct hash<Vertex> {
         size_t operator()(const Vertex& v) const {
@@ -261,17 +271,6 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>
     return {unique_vertices, unique_faces, vertex_indices}; // Return face indices
 }
 
-// Define a struct to hold the world state
-struct WorldState {
-    std::vector<Vertex> vertices;
-    std::vector<Face> faces;
-    std::map<Vertex, size_t> vertexIndices;
-
-    WorldState() = default;
-    WorldState(const std::vector<Vertex>& v, const std::vector<Face>& f, const std::map<Vertex, size_t>& vi) : vertices(v), faces(f), vertexIndices(vi) {}
-};
-
-
 WorldState initializeWorld(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0) {
     auto [vertices, faces, vertexIndices] = generate_icosphere(subdivisions, radius);
 
@@ -295,20 +294,18 @@ WorldState step(WorldState world) {
     return world;
 }
 
-std::tuple<std::vector<std::vector<Face>>, std::map<Vertex, size_t>> run_simulation(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0, int steps = 15) {
+std::vector<WorldState> run_simulation(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0, int steps = 15) {
     WorldState world = initializeWorld(subdivisions, radius, elevationRange);
-    std::vector<std::vector<Face>> face_history;
+    std::vector<WorldState> worldhistory;
     WorldState current_world = world;
-    face_history.push_back(current_world.faces); // Store initial state
-    std::map<Vertex, size_t> vertexIndices = world.vertexIndices;
+    worldhistory.push_back(current_world); // Store initial state
 
     for (int i = 0; i < steps; ++i) {
         current_world = step(current_world);
-        face_history.push_back(current_world.faces); // Store faces after each step
+        worldhistory.push_back(current_world); // Store faces after each step
     }
-    return {face_history, vertexIndices};
+    return worldhistory;
 }
-
 
 std::tuple<double, double> cartesianLatLon(Vertex vertex){
     double lat_rad = std::asin(vertex.z / std::sqrt(std::pow(vertex.x, 2) + std::pow(vertex.y, 2) + std::pow(vertex.z, 2)));
@@ -475,7 +472,6 @@ double calculateSlope(std::vector<Vertex> vertices, std::vector<Face> faces, int
 
     return std::acos(dotProdClipped);
 }
-
 
 PYBIND11_MODULE(icosphere, m) {
     m.doc() = "Icosphere generation and utility library";
