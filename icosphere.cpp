@@ -271,18 +271,27 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>
     return {unique_vertices, unique_faces, vertex_indices}; // Return face indices
 }
 
-WorldState initializeWorld(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0) {
+WorldState initializeWorld(size_t subdivisions = 3, double radius = 1.0, double elevationRange = 10000.0) {
     auto [vertices, faces, vertexIndices] = generate_icosphere(subdivisions, radius);
 
     std::random_device rd;
     std::mt19937 gen(rd());
     std::uniform_real_distribution<> distrib(-elevationRange / 2.0, elevationRange / 2.0);
+    std::uniform_real_distribution<> offsetPercentage(-0.01, 0.01);
 
-    for (Vertex& vertex : vertices){
+    for (Vertex& vertex : vertices) {
         vertex.elevation = distrib(gen);
     }
+
     for (Face& face : faces) {
-        face.average_elevation = distrib(gen);
+        // Directly access vertex elevations using face.a, face.b, face.c
+        double sumElevation = face.a.elevation + face.b.elevation + face.c.elevation;  
+        double vertexAverage = sumElevation / 3.0; // 3 vertices per face
+
+        double offset = offsetPercentage(gen) * elevationRange;
+        face.average_elevation = vertexAverage + offset;
+
+        face.average_elevation = std::clamp(face.average_elevation, -elevationRange / 2.0, elevationRange / 2.0);
     }
 
     return WorldState(vertices, faces, vertexIndices);
