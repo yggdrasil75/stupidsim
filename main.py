@@ -1,3 +1,4 @@
+from collections import defaultdict
 from functools import lru_cache
 from matplotlib import pyplot as plt
 from matplotlib.widgets import RadioButtons, Slider
@@ -8,6 +9,7 @@ from mpl_toolkits.mplot3d import Axes3D
 PLANET_RADIUS_KM = 6371.0
 cbar_obj = None  # Global colorbar object to update
 current_step = 0
+vertex_hierarchy = None
 
 
 def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
@@ -22,7 +24,6 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation',
         face_data = data  #data is already vertex elevations
         vmin = np.min(data)
         vmax = np.max(data)
-        print(f"Min Elevation: {vmin}, Max Elevation: {vmax}")
 		# Normalize data using the original data's vmin and vmax
         norm_data = (face_data - vmin) / (vmax - vmin)      
         colors = plt.cm.terrain(norm_data) #removed clipping as it caused issues with the terrain normalization
@@ -70,19 +71,38 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation',
     ax.set_zticks([])
     ax.set_title(title)
 
-#@lru_cache(maxsize=None)
-def get_vertex_index(vertex_to_find, vertex_indices_map, vertices_np):
+def get_vertex_index_old(vertex_to_find, vertex_indices_map):
     """Finds the index of a vertex in vertices_np based on its data."""
     vertex_data_to_find = np.array([vertex_to_find.x, vertex_to_find.y, vertex_to_find.z])
     for original_vertex, index in vertex_indices_map.items():
         original_vertex = np.array([original_vertex.x, original_vertex.y, original_vertex.z])
-        original_vertex_data = vertices_np[index]
         if np.allclose(vertex_data_to_find, original_vertex):
             return index
     return None  # Should not reach here if vertex_indices_map is consistent
 
+def build_hierarchical_vertex_map(vertices):
+    """Build a 3-level dictionary: x → y → z → vertex index"""
+    x_map = defaultdict(lambda: defaultdict(dict))
+    
+    for vertex, index in vertices.items():
+        x, y, z = vertex.x, vertex.y, vertex.z
+        x_map[x][y][z] = index
+    
+    return x_map
+
+def get_vertex_index(vertex_to_find, x_map):
+    """Find vertex index using hierarchical lookup"""
+    x, y, z = vertex_to_find.x, vertex_to_find.y, vertex_to_find.z
+    
+    try:
+        y_map = x_map[x]
+        z_map = y_map[y]
+        return z_map[z]
+    except KeyError:
+        return None
+
 if __name__ == "__main__":
-    subdivisions = 5
+    subdivisions = 10
     radius = PLANET_RADIUS_KM  # Use the global planet radius
     num_steps = 2
 
@@ -99,13 +119,15 @@ if __name__ == "__main__":
     faces_np = np.zeros((num_faces, 3), dtype=int)
 
     def getWorldPoint(val):
-        vertex_indices_map = world[val].vertex_indices
+        global vertex_hierarchy
+        if vertex_hierarchy is None:
+            vertex_hierarchy = build_hierarchical_vertex_map(world[val].vertex_indices)
         for i, v in enumerate(world[val].vertices):
             vertices_np[i, :] = [v.x, v.y, v.z]
         for i, face in enumerate(final_faces_cpp):
-            faces_np[i, 0] = get_vertex_index(face.a, vertex_indices_map, world[val].vertices)
-            faces_np[i, 1] = get_vertex_index(face.b, vertex_indices_map, world[val].vertices)
-            faces_np[i, 2] = get_vertex_index(face.c, vertex_indices_map, world[val].vertices)
+            faces_np[i, 0] = get_vertex_index(face.a, vertex_hierarchy)
+            faces_np[i, 1] = get_vertex_index(face.b, vertex_hierarchy)
+            faces_np[i, 2] = get_vertex_index(face.c, vertex_hierarchy)
             elevations_np[i] = face.average_elevation
 
     fig = plt.figure()
