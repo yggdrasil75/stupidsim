@@ -97,6 +97,7 @@
         "xutility": "cpp",
         "coroutine": "cpp",
         "resumable": "cpp",
-        "future": "cpp"
+        "future": "cpp",
+        "queue": "cpp"
     }
 }

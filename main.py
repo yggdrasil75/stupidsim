@@ -7,14 +7,15 @@ import icosphere
 from mpl_toolkits.mplot3d import Axes3D
 
 PLANET_RADIUS_KM = 6371.0
+SUBDIVISIONS = 3
+NUM_STEPS = 12
 cbar_obj = None  # Global colorbar object to update
 current_step = 0
 vertex_hierarchy = None
 
 
-def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation', 
-                            show_clouds=False, cloud_coverage=None,
-                            show_storms=False, active_storms=None):
+
+def visualize_world_spherical(vertices, faces, data, ax, data_type):
     global cbar_obj
     ax.clear()
     ax.set_zorder(1)
@@ -24,12 +25,25 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation',
         face_data = data  #data is already vertex elevations
         vmin = np.min(data)
         vmax = np.max(data)
+        print(f"Min Elevation: {vmin}, Max Elevation: {vmax}")
 		# Normalize data using the original data's vmin and vmax
         norm_data = (face_data - vmin) / (vmax - vmin)      
         colors = plt.cm.terrain(norm_data) #removed clipping as it caused issues with the terrain normalization
         cmap = 'terrain'
         title = 'Elevation'
         cbar_label = 'Elevation (km)'
+    elif data_type == 'Water':
+        # Use vertex data directly, not face averages
+        face_data = data  #data is already vertex elevations
+        vmin = np.min(data)
+        vmax = np.max(data)
+        print(f"Min fluid: {vmin}, Max fluid: {vmax}")
+		# Normalize data using the original data's vmin and vmax
+        norm_data = (face_data - vmin) / (vmax - vmin)      
+        colors = plt.cm.terrain(norm_data) #removed clipping as it caused issues with the terrain normalization
+        cmap = 'Blues'
+        title = 'Surface Water'
+        cbar_label = 'water'
     else:
         # Default case if data_type is not 'elevation'
         face_data = np.zeros(len(vertices))  # placeholder
@@ -71,15 +85,6 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type='elevation',
     ax.set_zticks([])
     ax.set_title(title)
 
-def get_vertex_index_old(vertex_to_find, vertex_indices_map):
-    """Finds the index of a vertex in vertices_np based on its data."""
-    vertex_data_to_find = np.array([vertex_to_find.x, vertex_to_find.y, vertex_to_find.z])
-    for original_vertex, index in vertex_indices_map.items():
-        original_vertex = np.array([original_vertex.x, original_vertex.y, original_vertex.z])
-        if np.allclose(vertex_data_to_find, original_vertex):
-            return index
-    return None  # Should not reach here if vertex_indices_map is consistent
-
 def build_hierarchical_vertex_map(vertices):
     """Build a 3-level dictionary: x → y → z → vertex index"""
     x_map = defaultdict(lambda: defaultdict(dict))
@@ -102,11 +107,11 @@ def get_vertex_index(vertex_to_find, x_map):
         return None
 
 if __name__ == "__main__":
-    subdivisions = 10
+    subdivisions = SUBDIVISIONS
     radius = PLANET_RADIUS_KM  # Use the global planet radius
-    num_steps = 2
+    num_steps = NUM_STEPS
 
-    world = icosphere.run_simulation(subdivisions=subdivisions, radius=radius, elevationRange=20000.0, steps=num_steps)
+    world = icosphere.run_simulation(subdivisions=subdivisions, elevationRange=20000.0, steps=num_steps)
     final_faces_cpp = world[-1].faces
 
 
@@ -116,44 +121,79 @@ if __name__ == "__main__":
 
     num_faces = len(final_faces_cpp)
     elevations_np = np.zeros(num_faces)
+    surfaceWater_np = np.zeros(num_faces)
     faces_np = np.zeros((num_faces, 3), dtype=int)
+    current_data_type='elevation'
+    figdata = np.zeros(num_faces)
+    for i, v in enumerate(world[-1].vertices):
+        vertices_np[i, :] = [v.x, v.y, v.z]
 
     def getWorldPoint(val):
-        global vertex_hierarchy
+        global vertex_hierarchy, figdata
         if vertex_hierarchy is None:
             vertex_hierarchy = build_hierarchical_vertex_map(world[val].vertex_indices)
-        for i, v in enumerate(world[val].vertices):
-            vertices_np[i, :] = [v.x, v.y, v.z]
         for i, face in enumerate(final_faces_cpp):
             faces_np[i, 0] = get_vertex_index(face.a, vertex_hierarchy)
             faces_np[i, 1] = get_vertex_index(face.b, vertex_hierarchy)
             faces_np[i, 2] = get_vertex_index(face.c, vertex_hierarchy)
             elevations_np[i] = face.average_elevation
+            surfaceWater_np[i] = face.surface_water
+            if current_data_type == 'elevation':
+                figdata = elevations_np
+            elif current_data_type == 'Water':
+                figdata = surfaceWater_np
+            #print(elevations_np[i])
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
 
+    # Create axes for the radio buttons
+    rax = plt.axes([0.05, 0.7, 0.15, 0.15])
+    radio = RadioButtons(rax, ('Elevation', 'Water'), active=0)
+    
+
     getWorldPoint(0)
-    visualize_world_spherical(vertices_np, faces_np, elevations_np, ax, data_type='elevation')
+    visualize_world_spherical(vertices_np, faces_np, figdata, ax, data_type=current_data_type)
 
     def update_view():
-        visualize_world_spherical(vertices_np, faces_np, elevations_np, ax, data_type='elevation')
+        visualize_world_spherical(vertices_np, faces_np, data=figdata, ax=ax, data_type=current_data_type)
         fig.canvas.draw_idle()
 
 
-    plt.tight_layout()
+    #plt.tight_layout()
     ax_slider = plt.axes([0.25, 0.1, 0.5, 0.03])
     step_slider = Slider(ax=ax_slider, label='Step', valmin=0, 
                          valmax=num_steps - 1, valinit=current_step, valstep=1)
+    
+    
+    def update_data_type(label):
+        global figdata, current_data_type
+        if label == 'Elevation':
+            current_data_type = 'elevation'
+            figdata = elevations_np
+        elif label == 'Water':
+            current_data_type = 'Water'
+            figdata = surfaceWater_np
+        
+        update_view()
+    radio.on_clicked(update_data_type)
+
     def update_step(val):
-        global current_step
+        global current_step, figdata
         current_step = int(step_slider.val)
         getWorldPoint(val)
-        #label = radio.value_selected
+        
+        # Use the current data type to determine which data to show
+        if current_data_type == 'elevation':
+            figdata = elevations_np
+        else:
+            figdata = surfaceWater_np
+            
         update_view()
+
     step_slider.on_changed(update_step)
 
 
-    plt.subplots_adjust(bottom=0.15) # Add space at the bottom for the slider
+    plt.subplots_adjust(bottom=0.15, left=0.2) # Add space at the bottom for the slider
 
     plt.show()

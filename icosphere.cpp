@@ -19,8 +19,10 @@ namespace py = pybind11;
 
 struct Vertex {
     double x, y, z, elevation;
-    Vertex(double x=0, double y=0, double z=0) : x(x), y(y), z(z), elevation(0.0) {}
-    Vertex(double x, double y, double z, double elevation) : x(x), y(y), z(z), elevation(elevation) {}
+    double surface_water;  // Water on the surface (rivers, lakes, etc.)
+    double groundwater;    // Water underground
+    Vertex(double x=0, double y=0, double z=0) : x(x), y(y), z(z), elevation(0.0), surface_water(0.0), groundwater(0.0) {}
+    Vertex(double x, double y, double z, double elevation) : x(x), y(y), z(z), elevation(elevation), surface_water(0.0), groundwater(0.0) {}
     Vertex operator+(const Vertex& other) const {
         return Vertex(x + other.x, y + other.y, z + other.z);
     }
@@ -53,19 +55,13 @@ struct Vertex {
     }
 };
 
-Vertex crossProduct(const Vertex& a, const Vertex& b) {
-    return Vertex(a.y * b.z - a.z * b.y,
-                  a.z * b.x - a.x * b.z,
-                  a.x * b.y - a.y * b.x);
-}
-
-double dotProduct(const Vertex& a, const Vertex& b) {
-    return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
 struct Face {
     Vertex a, b, c;
     double average_elevation;
+    double initAverage;
+    double surface_water;
+    double average_atmospheric_water;
+    double temperature;
 
     Face(Vertex a, Vertex b, Vertex c) : a(a), b(b), c(c), average_elevation(0.0) {}
     Face(Vertex a, Vertex b, Vertex c, double averageElevation) : a(a), b(b), c(c), average_elevation(averageElevation) {}
@@ -95,10 +91,22 @@ struct WorldState {
     std::vector<Vertex> vertices;
     std::vector<Face> faces;
     std::map<Vertex, size_t> vertexIndices;
+    double total_surface_water;
+    double total_atmospheric_water;
+    double radius;
 
-    WorldState() = default;
-    WorldState(const std::vector<Vertex>& v, const std::vector<Face>& f, const std::map<Vertex, size_t>& vi) : vertices(v), faces(f), vertexIndices(vi) {}
+    WorldState(std::vector<Vertex> vertices, std::vector<Face> faces, std::map<Vertex, size_t> vertexIndices, double radius) : vertices(vertices), faces(faces), vertexIndices(vertexIndices), radius(radius) {};
 };
+
+Vertex crossProduct(const Vertex& a, const Vertex& b) {
+    return Vertex(a.y * b.z - a.z * b.y,
+                  a.z * b.x - a.x * b.z,
+                  a.x * b.y - a.y * b.x);
+}
+
+double dotProduct(const Vertex& a, const Vertex& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
 
 namespace std {
     template<> struct hash<Vertex> {
@@ -271,51 +279,6 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>
     return {unique_vertices, unique_faces, vertex_indices}; // Return face indices
 }
 
-WorldState initializeWorld(size_t subdivisions = 3, double radius = 1.0, double elevationRange = 10000.0) {
-    auto [vertices, faces, vertexIndices] = generate_icosphere(subdivisions, radius);
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<> distrib(-elevationRange / 2.0, elevationRange / 2.0);
-    std::uniform_real_distribution<> offsetPercentage(-0.01, 0.01);
-
-    for (Vertex& vertex : vertices) {
-        vertex.elevation = distrib(gen);
-    }
-
-    for (Face& face : faces) {
-        // Directly access vertex elevations using face.a, face.b, face.c
-        double sumElevation = face.a.elevation + face.b.elevation + face.c.elevation;  
-        double vertexAverage = sumElevation / 3.0; // 3 vertices per face
-
-        double offset = offsetPercentage(gen) * elevationRange;
-        face.average_elevation = vertexAverage + offset;
-
-        face.average_elevation = std::clamp(face.average_elevation, -elevationRange / 2.0, elevationRange / 2.0);
-    }
-
-    return WorldState(vertices, faces, vertexIndices);
-}
-
-WorldState step(WorldState world) {
-    // In this basic step, the world state doesn't change.
-    // Erosion or other simulation logic would be implemented here in future steps.
-    return world;
-}
-
-std::vector<WorldState> run_simulation(size_t subdivisions=3, double radius=1.0, double elevationRange=10000.0, int steps = 15) {
-    WorldState world = initializeWorld(subdivisions, radius, elevationRange);
-    std::vector<WorldState> worldhistory;
-    WorldState current_world = world;
-    worldhistory.push_back(current_world); // Store initial state
-
-    for (int i = 0; i < steps; ++i) {
-        current_world = step(current_world);
-        worldhistory.push_back(current_world); // Store faces after each step
-    }
-    return worldhistory;
-}
-
 std::tuple<double, double> cartesianLatLon(Vertex vertex){
     double lat_rad = std::asin(vertex.z / std::sqrt(std::pow(vertex.x, 2) + std::pow(vertex.y, 2) + std::pow(vertex.z, 2)));
     double lat_deg = lat_rad * (180.0 / M_PI);
@@ -381,6 +344,21 @@ double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
     double compass_bearing = fmod(initial_bearing_deg + 360.0, 360.0);
 
     return compass_bearing;
+}
+
+std::vector<Face*> getAdjacentFaces(const std::vector<Face>& all_faces, const Face& face) {
+    std::vector<Face*> adjacent_faces;
+    for (const Face& f : all_faces) {
+        if (f == face) continue;
+        
+        // Check if faces share at least one vertex
+        if (f.a == face.a || f.a == face.b || f.a == face.c ||
+            f.b == face.a || f.b == face.b || f.b == face.c ||
+            f.c == face.a || f.c == face.b || f.c == face.c) {
+            adjacent_faces.push_back(const_cast<Face*>(&f));
+        }
+    }
+    return adjacent_faces;
 }
 
 std::vector<Vertex> findSphericalNeighborsThreaded(const std::vector<Vertex>& vertices, const std::vector<Face>& faces,
@@ -482,23 +460,178 @@ double calculateSlope(std::vector<Vertex> vertices, std::vector<Face> faces, int
     return std::acos(dotProdClipped);
 }
 
+WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 10000.0) {
+    auto [vertices, faces, vertexIndices] = generate_icosphere(subdivisions, elevationRange);
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<> elevationDistrib(-elevationRange / 2.0, elevationRange / 2.0);
+    std::uniform_real_distribution<> waterDistrib(0.0, 100.0); // Initial water amount
+    std::uniform_real_distribution<> tempDistrib(-20.0, 30.0); // Temperature in Celsius
+    std::uniform_real_distribution<> offsetPercentage(-0.01, 0.01);
+
+    WorldState world(vertices, faces, vertexIndices, elevationRange);
+
+    // Initialize vertices with elevation and water
+    for (Vertex& vertex : world.vertices) {
+        vertex.elevation = elevationDistrib(gen);
+        vertex.surface_water = waterDistrib(gen);
+        vertex.groundwater = waterDistrib(gen) * 0.1; // Less groundwater than surface water
+        world.total_surface_water += vertex.surface_water;
+    }
+
+    for (Face& face : world.faces) {
+        // Directly access vertex elevations using face.a, face.b, face.c
+        double sumElevation = face.a.elevation + face.b.elevation + face.c.elevation;  
+        double vertexAverage = sumElevation / 3.0; // 3 vertices per face
+        face.initAverage = vertexAverage;
+
+        double offset = offsetPercentage(gen) * elevationRange;
+        face.average_elevation = vertexAverage + offset;
+
+        face.average_elevation = std::clamp(face.average_elevation, -elevationRange / 2.0, elevationRange / 2.0);
+
+        // Atmospheric water (humidity, clouds)
+        face.average_atmospheric_water = waterDistrib(gen) * 0.5; // Less than surface water
+        world.total_atmospheric_water += face.average_atmospheric_water;
+
+        // Surface water average
+        face.surface_water = (face.a.surface_water + face.b.surface_water + face.c.surface_water) / 3.0;
+
+        // Temperature
+        face.temperature = tempDistrib(gen);
+    }
+
+    return world;
+}
+
+void simulateSurfaceWaterFlow(WorldState& world) {
+    // Simple water flow simulation based on elevation and existing water
+    for (size_t i = 0; i < world.vertices.size(); ++i) {
+        Vertex& vertex = world.vertices[i];
+        if (vertex.surface_water <= 0) continue;
+
+        // Find neighboring vertices
+        auto neighbors = findSphericalNeighborsThreaded(world.vertices, world.faces, i, 1000.0, world.radius);
+        
+        if (neighbors.empty()) continue;
+
+        // Find the lowest neighbor
+        Vertex* lowest_neighbor = nullptr;
+        double lowest_elevation = vertex.elevation;
+        
+        for (Vertex& neighbor : neighbors) {
+            double neighbor_elevation = neighbor.elevation + (neighbor.surface_water * 0.1); // Water increases effective elevation
+            if (neighbor_elevation < lowest_elevation) {
+                lowest_elevation = neighbor_elevation;
+                lowest_neighbor = &neighbor;
+            }
+        }
+
+        // Move some water to the lowest neighbor
+        if (lowest_neighbor) {
+            double flow_amount = std::min(vertex.surface_water * 0.1, 10.0); // Move up to 10% or 10 units
+            vertex.surface_water -= flow_amount;
+            lowest_neighbor->surface_water += flow_amount;
+            
+            // Update world totals (though they should remain the same)
+            world.total_surface_water -= flow_amount;
+            world.total_surface_water += flow_amount;
+        }
+    }
+}
+
+void simulateAtmosphericWater(WorldState& world) {
+    // Simple atmospheric water (clouds) simulation based on temperature and existing water
+    for (Face& face : world.faces) {
+        // Evaporation from surface water to atmosphere
+        double evaporation_rate = 0.01 * (1.0 + face.temperature / 30.0); // Higher temp = more evaporation
+        double total_evaporation = 0.0;
+        
+        // Evaporate from each vertex in the face
+        for (Vertex* vertex : {&face.a, &face.b, &face.c}) {
+            double evap_amount = std::min(vertex->surface_water * evaporation_rate, 1.0);
+            vertex->surface_water -= evap_amount;
+            face.average_atmospheric_water += evap_amount / 3.0;
+            total_evaporation += evap_amount;
+        }
+        
+        world.total_surface_water -= total_evaporation;
+        world.total_atmospheric_water += total_evaporation;
+
+        // Precipitation when atmospheric water is high
+        if (face.average_atmospheric_water > 50.0 && face.temperature < 20.0) {
+            double precipitation = face.average_atmospheric_water * 0.1;
+            face.average_atmospheric_water -= precipitation;
+            
+            // Distribute precipitation to vertices
+            double per_vertex = precipitation / 3.0;
+            face.a.surface_water += per_vertex;
+            face.b.surface_water += per_vertex;
+            face.c.surface_water += per_vertex;
+            
+            world.total_atmospheric_water -= precipitation;
+            world.total_surface_water += precipitation;
+        }
+
+        // Atmospheric water movement (simple diffusion)
+        for (Face* neighbor_face : getAdjacentFaces(world.faces, face)) {
+            if (neighbor_face->average_atmospheric_water < face.average_atmospheric_water) {
+                double transfer = (face.average_atmospheric_water - neighbor_face->average_atmospheric_water) * 0.05;
+                face.average_atmospheric_water -= transfer;
+                neighbor_face->average_atmospheric_water += transfer;
+            }
+        }
+    }
+}
+
+WorldState step(WorldState world) {
+    // Simulate water flow
+    simulateSurfaceWaterFlow(world);
+    
+    // Simulate atmospheric water
+    simulateAtmosphericWater(world);
+    
+    // Update face averages
+    for (Face& face : world.faces) {
+        double sumElevation = face.a.elevation + face.b.elevation + face.c.elevation;  
+        double vertexAverage = sumElevation / 3.0; // 3 vertices per face
+        face.average_elevation = face.average_elevation - face.initAverage + vertexAverage;
+        face.surface_water = (face.a.surface_water + face.b.surface_water + face.c.surface_water) / 3.0;
+    }
+    return world;
+}
+
+std::vector<WorldState> run_simulation(size_t subdivisions=3, double elevationRange=10000.0, int steps = 15) {
+    WorldState world = initializeWorld(subdivisions, elevationRange);
+    std::vector<WorldState> worldhistory;
+    worldhistory.push_back(world); // Store initial state
+
+    for (int i = 0; i < steps; ++i) {
+        world = step(world);
+        worldhistory.push_back(world);
+    }
+    return worldhistory;
+}
+
 PYBIND11_MODULE(icosphere, m) {
     m.doc() = "Icosphere generation and utility library";
 
     py::class_<WorldState>(m, "WorldState")
-        .def(py::init<>())
         .def_readwrite("vertices", &WorldState::vertices)
         .def_readwrite("faces", &WorldState::faces)
-        .def_readwrite("vertex_indices", &WorldState::vertexIndices);
+        .def_readwrite("vertex_indices", &WorldState::vertexIndices)
+        .def_readwrite("total_surface_water", &WorldState::total_surface_water)
+        .def_readwrite("total_atmospheric_water", &WorldState::total_atmospheric_water);
 
     m.def("initializeWorld", &initializeWorld, "Generate an basic world",
-          py::arg("subdivisions") = 3, py::arg("radius") = 1.0,
+          py::arg("subdivisions") = 3,
           py::arg("elevationRange") = 10000.0);
 
     m.def("step", &step, "Advance the world simulation by one step.", py::arg("world"));
 
     m.def("run_simulation", &run_simulation, "Run the world simulation for a given number of steps.",
-          py::arg("subdivisions"), py::arg("radius"), py::arg("elevationRange"), py::arg("steps"));
+          py::arg("subdivisions"), py::arg("elevationRange"), py::arg("steps"));
 
     m.def("cartesianLatLon", &cartesianLatLon,
         "Convert a Cartesian vertex to latitude and longitude.", py::arg("vertex"));
@@ -546,6 +679,9 @@ PYBIND11_MODULE(icosphere, m) {
         .def_readwrite("b", &Face::b)
         .def_readwrite("c", &Face::c)
         .def_readwrite("average_elevation", &Face::average_elevation)
+        .def_readwrite("surface_water", &Face::surface_water)
+        .def_readwrite("average_atmospheric_water", &Face::average_atmospheric_water)
+        .def_readwrite("temperature", &Face::temperature)
         .def("__repr__", [](const Face &f) {
             return "<icosphere.Face a=" + std::to_string(f.a.x) + "," + std::to_string(f.a.y) + "," + std::to_string(f.a.z) +
                    " b=" + std::to_string(f.b.x) + "," + std::to_string(f.b.y) + "," + std::to_string(f.b.z) +
