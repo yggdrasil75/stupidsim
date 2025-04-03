@@ -7,11 +7,10 @@ import icosphere
 from mpl_toolkits.mplot3d import Axes3D
 
 PLANET_RADIUS_KM = 6371.0
-SUBDIVISIONS = 3
+SUBDIVISIONS = 1
 NUM_STEPS = 12
-cbar_obj = None  # Global colorbar object to update
+cbar_obj = None  # colorbar is stupid. this fixes it.
 current_step = 0
-vertex_hierarchy = None
 
 
 
@@ -85,27 +84,6 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type):
     ax.set_zticks([])
     ax.set_title(title)
 
-def build_hierarchical_vertex_map(vertices):
-    """Build a 3-level dictionary: x → y → z → vertex index"""
-    x_map = defaultdict(lambda: defaultdict(dict))
-    
-    for vertex, index in vertices.items():
-        x, y, z = vertex.x, vertex.y, vertex.z
-        x_map[x][y][z] = index
-    
-    return x_map
-
-def get_vertex_index(vertex_to_find, x_map):
-    """Find vertex index using hierarchical lookup"""
-    x, y, z = vertex_to_find.x, vertex_to_find.y, vertex_to_find.z
-    
-    try:
-        y_map = x_map[x]
-        z_map = y_map[y]
-        return z_map[z]
-    except KeyError:
-        return None
-
 if __name__ == "__main__":
     subdivisions = SUBDIVISIONS
     radius = PLANET_RADIUS_KM  # Use the global planet radius
@@ -129,23 +107,21 @@ if __name__ == "__main__":
         vertices_np[i, :] = [v.x, v.y, v.z]
 
     def getWorldPoint(val):
-        global vertex_hierarchy, figdata
-        #if vertex_hierarchy is None:
-        #    vertex_hierarchy = build_hierarchical_vertex_map(world[val].vertex_indices)
+        global figdata
+        #indices = {index: vertex for vertex, index in world[val].vertex_indices.items()}  
+
+        #indices = world[val].vertex_indices
         for i, face in enumerate(final_faces_cpp):
-            faces_np[1, 0] = world.vertex_indices[face.a]
-            faces_np[1, 1] = world.vertex_indices[face.b]
-            faces_np[1, 2] = world.vertex_indices[face.c]
-            #faces_np[i, 0] = get_vertex_index(face.a, vertex_hierarchy)
-            #faces_np[i, 1] = get_vertex_index(face.b, vertex_hierarchy)
-            #faces_np[i, 2] = get_vertex_index(face.c, vertex_hierarchy)
+            #print(indices)
+            faces_np[i, 0] = face.a
+            faces_np[i, 1] = face.b
+            faces_np[i, 2] = face.c
             elevations_np[i] = face.average_elevation
             surfaceWater_np[i] = face.surface_water
             if current_data_type == 'elevation':
                 figdata = elevations_np
             elif current_data_type == 'Water':
                 figdata = surfaceWater_np
-            #print(elevations_np[i])
 
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')

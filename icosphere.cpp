@@ -455,7 +455,7 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
     std::uniform_real_distribution<> offsetPercentage(-0.01, 0.01);
     
     // Convert zettaliters to cubic meters (1 ZL = 1e18 m³)
-    const double totalWaterM3 = totalWaterZL * 1e18;
+    const long double totalWaterM3 = totalWaterZL * 1e18;
     
     WorldState world(vertices, faces, vertexIndices, elevationRange);
 
@@ -528,6 +528,7 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         
         // Temperature
         face.temperature = tempDistrib(gen);
+        std::cout << "face" << i << "is currently flooded with" << faceSurfaceWater << std::endl;
     }
 
     return world;
@@ -630,7 +631,7 @@ WorldState step(WorldState world) {
         double sumElevation = va.elevation + vb.elevation + vc.elevation;  
         double vertexAverage = sumElevation / 3.0; // 3 vertices per face
         face.average_elevation = face.average_elevation - face.initAverage + vertexAverage;
-        face.surface_water = (va.surface_water + vb.surface_water + vc.surface_water) / 3.0;
+        //face.surface_water = (va.surface_water + vb.surface_water + vc.surface_water) / 3.0;
     }
     return world;
 }
