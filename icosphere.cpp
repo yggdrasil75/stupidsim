@@ -60,47 +60,50 @@ double dotProduct(const Vertex& a, const Vertex& b) {
 }
 
 struct Face {
-    int a, b, c;
-    //Vertex a, b, c;
+    size_t a, b, c;  // Vertex indices
     double average_elevation;
     double initAverage;
     double surface_water;
     double average_atmospheric_water;
     double temperature;
 
-    //Face(Vertex a, Vertex b, Vertex c) : a(a), b(b), c(c), average_elevation(0.0) {}
-    Face(int a, int b, int c) : a(a), b(b), c(c), average_elevation(0.0) {}
-    //Face(Vertex a, Vertex b, Vertex c, double averageElevation) : a(a), b(b), c(c), average_elevation(averageElevation) {}
+    Face(size_t a, size_t b, size_t c) : a(a), b(b), c(c), average_elevation(0.0) {}
+    Face(size_t a, size_t b, size_t c, double averageElevation) : a(a), b(b), c(c), average_elevation(averageElevation) {}
 
     bool operator<(const Face& other) const {
-      if(a != other.a) return a < other.a;
-      if(b != other.b) return b < other.b;
-      return c < other.c;
+        if (a != other.a) return a < other.a;
+        if (b != other.b) return b < other.b;
+        return c < other.c;
     }
     bool operator==(const Face& other) const {
-        int these[3] = {a, b, c};
-        int those[3] = {other.a, other.b, other.c};
-        return 
-        return these[0] == those[0] &&
-            these[1] == those[1] &&
-            these[2] == those[2];
+        std::array<size_t, 3> this_vertices = {a, b, c};
+        std::array<size_t, 3> other_vertices = {other.a, other.b, other.c};
+        std::sort(this_vertices.begin(), this_vertices.end());
+        std::sort(other_vertices.begin(), other_vertices.end());
+
+        return this_vertices[0] == other_vertices[0] &&
+               this_vertices[1] == other_vertices[1] &&
+               this_vertices[2] == other_vertices[2];
     }
     bool operator!=(const Face& other) const {
         return !(*this == other);
     }
-    double area(WorldState world) const {
-        double dotproda = dotProduct(world.vertexIndices[face.a], world.vertexIndices[face.b]);
-        double dotprodb = dotProduct(world.vertexIndices[face.b], world.vertexIndices[face.c]);
-        double dotprodc = dotProduct(world.vertexIndices[face.c], world.vertexIndices[face.a]);
+    double area(const std::vector<Vertex>& vertices, double radius) const {
+        const Vertex& va = vertices[a];
+        const Vertex& vb = vertices[b];
+        const Vertex& vc = vertices[c];
+        
+        double dotproda = dotProduct(va, vb);
+        double dotprodb = dotProduct(vb, vc);
+        double dotprodc = dotProduct(vc, va);
 
         double s = (dotproda + dotprodb + dotprodc) / 2.0;
         double tan_half_E_squared = tan(s / 2.0) * tan((s - dotproda) / 2.0) * tan((s-dotprodb) / 2.0) * tan((s - dotprodc) / 2.0);
         double E = 4.0 * atan(sqrt(tan_half_E_squared));
-        return E * world.radius * world.radius;
+        return E * radius * radius;
     }
 };
 
-// Define a struct to hold the world state
 struct WorldState {
     std::vector<Vertex> vertices;
     std::vector<Face> faces;
@@ -130,11 +133,6 @@ namespace std {
     };
 }
 
-namespace {
-    std::unordered_map<int, std::vector<Vertex>> neighborCache;
-    std::mutex cacheMutex;
-}
-
 std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& vertices, std::vector<Face>& faces) {
     // Create a map from Vertex to its index in the vertices vector
     std::unordered_map<Vertex, uint32_t> vertex_to_index;
@@ -146,8 +144,8 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
         std::vector<Face> new_faces;
         new_faces.reserve(faces.size() * 4);
 
-        // Map from edge (pair of vertex indices) to new vertex
-        std::unordered_map<uint64_t, Vertex> edge_vertices;
+        // Map from edge (pair of vertex indices) to new vertex index
+        std::unordered_map<uint64_t, size_t> edge_vertices;
 
         for (const Face& face : faces) {
             const Vertex& a = vertices[face.a];
@@ -155,50 +153,54 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
             const Vertex& c = vertices[face.c];
 
             // Get or create midpoints for each edge
-            Vertex mid_ab, mid_bc, mid_ca;
+            size_t mid_ab, mid_bc, mid_ca;
 
             // Edge AB
-            uint64_t key_ab = (static_cast<uint64_t>(std::min(vertex_to_index[a], vertex_to_index[b])) << 32) | std::max(vertex_to_index[a], vertex_to_index[b]);
+            uint64_t key_ab = (static_cast<uint64_t>(std::min(face.a, face.b)) << 32 | std::max(face.a, face.b));
             auto it_ab = edge_vertices.find(key_ab);
             if (it_ab == edge_vertices.end()) {
-                mid_ab = (a + b) / 2.0;
-                mid_ab = mid_ab.normalized();
+                Vertex mid = (a + b) / 2.0;
+                mid = mid.normalized();
+                vertices.push_back(mid);
+                mid_ab = vertices.size() - 1;
                 edge_vertices[key_ab] = mid_ab;
-                vertices.push_back(mid_ab);
-                vertex_to_index[mid_ab] = vertices.size() - 1;
+                vertex_to_index[mid] = mid_ab;
             } else {
                 mid_ab = it_ab->second;
             }
 
             // Edge BC
-            uint64_t key_bc = (static_cast<uint64_t>(std::min(vertex_to_index[b], vertex_to_index[c])) << 32) | std::max(vertex_to_index[b], vertex_to_index[c]);
+            uint64_t key_bc = (static_cast<uint64_t>(std::min(face.b, face.c)) << 32 | std::max(face.b, face.c));
             auto it_bc = edge_vertices.find(key_bc);
             if (it_bc == edge_vertices.end()) {
-                mid_bc = (b + c) / 2.0;
-                mid_bc = mid_bc.normalized();
+                Vertex mid = (b + c) / 2.0;
+                mid = mid.normalized();
+                vertices.push_back(mid);
+                mid_bc = vertices.size() - 1;
                 edge_vertices[key_bc] = mid_bc;
-                vertices.push_back(mid_bc);
-                vertex_to_index[mid_bc] = vertices.size() - 1;
+                vertex_to_index[mid] = mid_bc;
             } else {
                 mid_bc = it_bc->second;
             }
 
             // Edge CA
-            uint64_t key_ca = (static_cast<uint64_t>(std::min(vertex_to_index[c], vertex_to_index[a])) << 32) | std::max(vertex_to_index[c], vertex_to_index[a]);
+            uint64_t key_ca = (static_cast<uint64_t>(std::min(face.c, face.a)) << 32 | std::max(face.c, face.a));
             auto it_ca = edge_vertices.find(key_ca);
             if (it_ca == edge_vertices.end()) {
-                mid_ca = (c + a) / 2.0;
-                mid_ca = mid_ca.normalized();
+                Vertex mid = (c + a) / 2.0;
+                mid = mid.normalized();
+                vertices.push_back(mid);
+                mid_ca = vertices.size() - 1;
                 edge_vertices[key_ca] = mid_ca;
-                vertices.push_back(mid_ca);
-                vertex_to_index[mid_ca] = vertices.size() - 1;
+                vertex_to_index[mid] = mid_ca;
             } else {
                 mid_ca = it_ca->second;
             }
-            new_faces.emplace_back(vertex_to_index[a], vertex_to_index[mid_ab], vertex_to_index[mid_ca]);
-            new_faces.emplace_back(vertex_to_index[mid_ab], vertex_to_index[b], vertex_to_index[mid_bc]);
-            new_faces.emplace_back(vertex_to_index[mid_ca], vertex_to_index[mid_bc], vertex_to_index[c]);
-            new_faces.emplace_back(vertex_to_index[mid_ab], vertex_to_index[mid_bc], vertex_to_index[mid_ca]);
+
+            new_faces.emplace_back(face.a, mid_ab, mid_ca);
+            new_faces.emplace_back(mid_ab, face.b, mid_bc);
+            new_faces.emplace_back(mid_ca, mid_bc, face.c);
+            new_faces.emplace_back(mid_ab, mid_bc, mid_ca);
         }
 
         faces = std::move(new_faces);
@@ -211,7 +213,6 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
     return faces;
 }
 
-// Modified generate_icosphere to return face indices
 std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>
     generate_icosphere(size_t subdivisions=3, double radius=1.0) {
     // Golden ratio
@@ -255,39 +256,20 @@ std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>
 
     faces = subdivide_icosphere(subdivisions, vertices, faces);
 
-    // Collect all unique vertices and create face indices
-    std::vector<Vertex> unique_vertices;
+    // Create vertex index map
     std::map<Vertex, size_t> vertex_indices;
-    std::vector<Face> unique_faces; // Store face indices
-
-    for (const Face& face : faces) {
-        std::array<uint32_t, 3> current_face_indices;
-        int index_count = 0;
-        for (const int& v : {face.a, face.b, face.c}) {
-            if (vertex_indices[v] == vertex_indices.end()) {
-                vertex_indices[v] = unique_vertices.size();
-                unique_vertices.push_back(v);
-            }
-            current_face_indices[index_count++] = vertex_indices[v];
-        }
-    }
-
-    for (const Face& face : faces){
-        unique_faces.emplace_back(
-            unique_vertices[face.a],
-            unique_vertices[face.b],
-            unique_vertices[face.c]
-        );
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        vertex_indices[vertices[i]] = i;
     }
 
     // Scale vertices by radius
-    for (Vertex& v : unique_vertices) {
+    for (Vertex& v : vertices) {
         v.x *= radius;
         v.y *= radius;
         v.z *= radius;
     }
 
-    return {unique_vertices, unique_faces, vertex_indices}; // Return face indices
+    return {vertices, faces, vertex_indices};
 }
 
 std::tuple<double, double> cartesianLatLon(Vertex vertex){
@@ -372,102 +354,95 @@ std::vector<Face*> getAdjacentFaces(const std::vector<Face>& all_faces, const Fa
     return adjacent_faces;
 }
 
-std::vector<Vertex> findSphericalNeighborsThreaded(const std::vector<Vertex>& vertices, const std::vector<Face>& faces, int vertexID, double maxDistanceKM, double radius) {
+std::vector<size_t> findSphericalNeighborsThreaded(const std::vector<Vertex>& vertices, 
+                                                 const std::vector<Face>& faces, 
+                                                 size_t vertexID, 
+                                                 double maxDistanceKM, 
+                                                 double radius) {
     const Vertex& center = vertices[vertexID];
-    std::vector<Vertex> all_neighbors_with_duplicates;
+    std::vector<size_t> neighbors;
+    std::unordered_set<size_t> visited;
+    std::vector<size_t> to_process;
 
-    std::vector<Vertex> process_face = [&](const Face& face) {
-        std::vector<Vertex> local_neighbors;
-        bool isInFace = (face.a == vertices[center]) || (face.b == vertices[center]) || (face.c == vertices[center]);
-
-        if (isInFace) {
-            if (face.a == vertices[center]) {
-                local_neighbors.push_back(face.b);
-                local_neighbors.push_back(face.c);
-            } else if (face.b == vertices[center]) {
-                local_neighbors.push_back(face.a);
-                local_neighbors.push_back(face.c);
-            } else {
-                local_neighbors.push_back(face.a);
-                local_neighbors.push_back(face.b);
+    // Start with direct neighbors
+    for (const Face& face : faces) {
+        if (face.a == vertexID || face.b == vertexID || face.c == vertexID) {
+            if (face.a != vertexID && !visited.count(face.a)) {
+                visited.insert(face.a);
+                to_process.push_back(face.a);
+            }
+            if (face.b != vertexID && !visited.count(face.b)) {
+                visited.insert(face.b);
+                to_process.push_back(face.b);
+            }
+            if (face.c != vertexID && !visited.count(face.c)) {
+                visited.insert(face.c);
+                to_process.push_back(face.c);
             }
         }
-        return local_neighbors;
-    };
-
-    size_t num_threads = std::thread::hardware_concurrency();
-    if (num_threads == 0) num_threads = 4; // Fallback if concurrency is not detectable
-    std::vector<std::future<std::vector<Vertex>>> futures;
-    size_t faces_per_thread = (faces.size() + num_threads - 1) / num_threads;
-
-    for (size_t i = 0; i < num_threads; ++i) {
-        size_t start_index = i * faces_per_thread;
-        size_t end_index = std::min(start_index + faces_per_thread, faces.size());
-        futures.push_back(std::async(std::launch::async, [&, start_index, end_index]() {
-            std::vector<Vertex> thread_neighbors;
-            for (size_t j = start_index; j < end_index; ++j) {
-                std::vector<Vertex> face_neighbors = process_face(faces[j]);
-                thread_neighbors.insert(thread_neighbors.end(), thread_neighbors.begin(), thread_neighbors.end());
-            }
-            return thread_neighbors;
-        }));
     }
 
-    for (auto& future : futures) {
-        std::vector<Vertex> thread_result = future.get();
-        all_neighbors_with_duplicates.insert(all_neighbors_with_duplicates.end(), thread_result.begin(), thread_result.end());
-    }
+    // Expand to neighbors within distance
+    while (!to_process.empty()) {
+        size_t current_id = to_process.back();
+        to_process.pop_back();
 
-
-    std::sort(all_neighbors_with_duplicates.begin(), all_neighbors_with_duplicates.end());
-    all_neighbors_with_duplicates.erase(std::unique(all_neighbors_with_duplicates.begin(), all_neighbors_with_duplicates.end()), all_neighbors_with_duplicates.end());
-
-    std::vector<Vertex> finalNeighbors;
-    for (const Vertex& v : all_neighbors_with_duplicates) {
-        double dist = sphericalDistanceCartesian(v, center, radius);
+        double dist = sphericalDistanceCartesian(vertices[current_id], center, radius);
         if (dist <= maxDistanceKM) {
-            finalNeighbors.push_back(v);
+            neighbors.push_back(current_id);
+
+            // Add this vertex's neighbors to processing queue
+            for (const Face& face : faces) {
+                if (face.a == current_id || face.b == current_id || face.c == current_id) {
+                    if (face.a != current_id && !visited.count(face.a)) {
+                        visited.insert(face.a);
+                        to_process.push_back(face.a);
+                    }
+                    if (face.b != current_id && !visited.count(face.b)) {
+                        visited.insert(face.b);
+                        to_process.push_back(face.b);
+                    }
+                    if (face.c != current_id && !visited.count(face.c)) {
+                        visited.insert(face.c);
+                        to_process.push_back(face.c);
+                    }
+                }
+            }
         }
     }
-    return finalNeighbors;
+
+    return neighbors;
 }
 
-double calculateSlope(std::vector<Vertex> vertices, std::vector<Face> faces, int vertexID, double radius){
-    std::vector<Vertex> neighbors = findSphericalNeighborsThreaded(vertices, faces, vertexID, 1000.0, radius); // radius is placeholder here, adjust if needed, max_distance_km=100
-    if (neighbors.empty()) {
-        return 0.0;
-    }
+double calculateSlope(const std::vector<Vertex>& vertices, const std::vector<Face>& faces, size_t vertexID, double radius) {
+    const Vertex& vertex = vertices[vertexID];
+    std::vector<Vertex> faceNormals;
 
-    Vertex vertex = vertices[vertexID];
-    std::vector<Vertex> faceNorms;
-
-    for (const auto& face : faces) {
-        bool is_part_of_face = false;
-        if (face.a == vertex || face.b == vertex || face.c == vertex) {
-            is_part_of_face = true;
-        }
-
-        if (is_part_of_face) {
-            Vertex v1 = face.b - face.a;
-            Vertex v2 = face.c - face.a;
+    // Find all faces containing this vertex
+    for (const Face& face : faces) {
+        if (face.a == vertexID || face.b == vertexID || face.c == vertexID) {
+            const Vertex& v1 = vertices[face.b] - vertices[face.a];
+            const Vertex& v2 = vertices[face.c] - vertices[face.a];
             Vertex normal = crossProduct(v1, v2).normalized();
-            faceNorms.push_back(normal);
+            faceNormals.push_back(normal);
         }
     }
 
-    if (faceNorms.empty()) return 0.0;
+    if (faceNormals.empty()) return 0.0;
 
+    // Calculate average normal
     Vertex averageNormal(0, 0, 0);
-    for (const auto& normal : faceNorms) {
+    for (const Vertex& normal : faceNormals) {
         averageNormal = averageNormal + normal;
     }
     averageNormal = averageNormal.normalized();
 
-    Vertex radV = vertex.normalized();
-    double dotProd = dotProduct(averageNormal, radV);
-    double dotProdClipped = std::clamp(dotProd, -1.0, 1.0);
+    // Calculate angle between average normal and radial vector
+    Vertex radial = vertex.normalized();
+    double dotProd = dotProduct(averageNormal, radial);
+    double angle = std::acos(std::clamp(dotProd, -1.0, 1.0));
 
-    return std::acos(dotProdClipped);
+    return angle * (180.0 / M_PI); // Convert to degrees
 }
 
 WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 10000.0, double totalWaterZL = 1386.0) {
@@ -487,7 +462,7 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
     // Calculate total surface area for water distribution
     double totalSurfaceArea = 0.0;
     for (const Face& face : world.faces) {
-        totalSurfaceArea += face.area(world.radius);
+        totalSurfaceArea += face.area(world.vertices, world.radius);
     }
 
     // Initialize vertices with elevation
@@ -508,28 +483,23 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
     
     for (size_t i = 0; i < world.faces.size(); ++i) {
         const Face& face = world.faces[i];
-        double avgElev = (face.a.elevation + face.b.elevation + face.c.elevation) / 3.0;
+        double avgElev = (world.vertices[face.a].elevation + 
+                         world.vertices[face.b].elevation + 
+                         world.vertices[face.c].elevation) / 3.0;
         
         // Lower elevations get more water weight
         faceWeights[i] = 1.0 / (1.0 + std::exp(avgElev / (elevationRange * 0.1)));
-        totalWeight += faceWeights[i] * face.area(world.radius);
+        totalWeight += faceWeights[i] * face.area(world.vertices, world.radius);
     }
     
     // Second pass to distribute water
     for (size_t i = 0; i < world.faces.size(); ++i) {
         Face& face = world.faces[i];
-        // Directly access vertex elevations using face.a, face.b, face.c
-        double sumElevation = face.a.elevation + face.b.elevation + face.c.elevation;  
-        double vertexAverage = sumElevation / 3.0; // 3 vertices per face
-        face.initAverage = vertexAverage;
-
+        face.initAverage = (world.vertices[face.a].elevation + world.vertices[face.b].elevation + world.vertices[face.c].elevation) / 3.0;
         double offset = offsetPercentage(gen) * elevationRange;
-        face.average_elevation = vertexAverage + offset;
-
+        face.average_elevation = face.initAverage + offset;
         face.average_elevation = std::clamp(face.average_elevation, -elevationRange / 2.0, elevationRange / 2.0);
-
-        
-        double faceArea = face.area(world.radius);
+        double faceArea = face.area(world.vertices, world.radius);
         
         // Calculate water amounts for this face
         double faceWaterFraction = (faceWeights[i] * faceArea) / totalWeight;
@@ -537,13 +507,13 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         double faceGroundwater = totalGroundwaterM3 * faceWaterFraction;
         
         // Distribute to vertices (simple even distribution)
-        face.a.surface_water += faceSurfaceWater / 3.0;
-        face.b.surface_water += faceSurfaceWater / 3.0;
-        face.c.surface_water += faceSurfaceWater / 3.0;
+        world.vertices[face.a].surface_water += faceSurfaceWater / 3.0;
+        world.vertices[face.b].surface_water += faceSurfaceWater / 3.0;
+        world.vertices[face.c].surface_water += faceSurfaceWater / 3.0;
         
-        face.a.groundwater += faceGroundwater / 3.0;
-        face.b.groundwater += faceGroundwater / 3.0;
-        face.c.groundwater += faceGroundwater / 3.0;
+        world.vertices[face.a].groundwater += faceGroundwater / 3.0;
+        world.vertices[face.b].groundwater += faceGroundwater / 3.0;
+        world.vertices[face.c].groundwater += faceGroundwater / 3.0;
         
         // Update world totals
         world.total_surface_water += faceSurfaceWater;
@@ -570,31 +540,28 @@ void simulateSurfaceWaterFlow(WorldState& world) {
         if (vertex.surface_water <= 0) continue;
 
         // Find neighboring vertices
-        auto neighbors = findSphericalNeighborsThreaded(world.vertices, world.faces, i, 1000.0, world.radius);
+        std::vector<size_t> neighbors = findSphericalNeighborsThreaded(world.vertices, world.faces, i, 1000.0, world.radius);
         
         if (neighbors.empty()) continue;
 
         // Find the lowest neighbor
-        Vertex* lowest_neighbor = nullptr;
+        size_t lowest_neighbor = i;
         double lowest_elevation = vertex.elevation;
         
-        for (Vertex& neighbor : neighbors) {
+        for (size_t neighborID : neighbors) {
+            Vertex& neighbor = world.vertices[neighborID];
             double neighbor_elevation = neighbor.elevation + (neighbor.surface_water * 0.1); // Water increases effective elevation
             if (neighbor_elevation < lowest_elevation) {
                 lowest_elevation = neighbor_elevation;
-                lowest_neighbor = &neighbor;
+                lowest_neighbor = neighborID;
             }
         }
 
         // Move some water to the lowest neighbor
-        if (lowest_neighbor) {
+        if (lowest_neighbor != i) {
             double flow_amount = std::min(vertex.surface_water * 0.1, 10.0); // Move up to 10% or 10 units
             vertex.surface_water -= flow_amount;
-            lowest_neighbor->surface_water += flow_amount;
-            
-            // Update world totals (though they should remain the same)
-            world.total_surface_water -= flow_amount;
-            world.total_surface_water += flow_amount;
+            world.vertices[lowest_neighbor].surface_water += flow_amount;
         }
     }
 }
@@ -602,12 +569,16 @@ void simulateSurfaceWaterFlow(WorldState& world) {
 void simulateAtmosphericWater(WorldState& world) {
     // Simple atmospheric water (clouds) simulation based on temperature and existing water
     for (Face& face : world.faces) {
+        Vertex& va = world.vertices[face.a];
+        Vertex& vb = world.vertices[face.b];
+        Vertex& vc = world.vertices[face.c];
+        
         // Evaporation from surface water to atmosphere
         double evaporation_rate = 0.01 * (1.0 + face.temperature / 30.0); // Higher temp = more evaporation
         double total_evaporation = 0.0;
         
         // Evaporate from each vertex in the face
-        for (Vertex* vertex : {&face.a, &face.b, &face.c}) {
+        for (Vertex* vertex : {&va, &vb, &vc}) {
             double evap_amount = std::min(vertex->surface_water * evaporation_rate, 1.0);
             vertex->surface_water -= evap_amount;
             face.average_atmospheric_water += evap_amount / 3.0;
@@ -624,9 +595,9 @@ void simulateAtmosphericWater(WorldState& world) {
             
             // Distribute precipitation to vertices
             double per_vertex = precipitation / 3.0;
-            face.a.surface_water += per_vertex;
-            face.b.surface_water += per_vertex;
-            face.c.surface_water += per_vertex;
+            va.surface_water += per_vertex;
+            vb.surface_water += per_vertex;
+            vc.surface_water += per_vertex;
             
             world.total_atmospheric_water -= precipitation;
             world.total_surface_water += precipitation;
@@ -652,10 +623,14 @@ WorldState step(WorldState world) {
     
     // Update face averages
     for (Face& face : world.faces) {
-        double sumElevation = face.a.elevation + face.b.elevation + face.c.elevation;  
+        Vertex& va = world.vertices[face.a];
+        Vertex& vb = world.vertices[face.b];
+        Vertex& vc = world.vertices[face.c];
+        
+        double sumElevation = va.elevation + vb.elevation + vc.elevation;  
         double vertexAverage = sumElevation / 3.0; // 3 vertices per face
         face.average_elevation = face.average_elevation - face.initAverage + vertexAverage;
-        face.surface_water = (face.a.surface_water + face.b.surface_water + face.c.surface_water) / 3.0;
+        face.surface_water = (va.surface_water + vb.surface_water + vc.surface_water) / 3.0;
     }
     return world;
 }
@@ -676,17 +651,23 @@ PYBIND11_MODULE(icosphere, m) {
     m.doc() = "Icosphere generation and utility library";
 
     py::class_<WorldState>(m, "WorldState")
-        .def(py::init<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>, double>())
         .def_readwrite("vertices", &WorldState::vertices)
         .def_readwrite("faces", &WorldState::faces)
         .def_readwrite("vertex_indices", &WorldState::vertexIndices)
         .def_readwrite("total_surface_water", &WorldState::total_surface_water)
         .def_readwrite("total_ground_water", &WorldState::total_ground_water)
-        .def_readwrite("total_atmospheric_water", &WorldState::total_atmospheric_water)
-        .def_readwrite("radius", &WorldState::radius);
+        .def_readwrite("total_atmospheric_water", &WorldState::total_atmospheric_water);
+
+    m.def("initializeWorld", &initializeWorld, "Generate an basic world",
+          py::arg("subdivisions") = 3,
+          py::arg("elevationRange") = 10000.0,
+          py::arg("totalWaterZL") = 1386.0);
 
     m.def("run_simulation", &run_simulation, "Run the world simulation for a given number of steps.",
-          py::arg("subdivisions"), py::arg("elevationRange"), py::arg("steps"), py::arg("totalWaterZL"));
+          py::arg("subdivisions") = 3,
+          py::arg("elevationRange") = 10000.0,
+          py::arg("steps") = 15,
+          py::arg("totalWaterZL") = 1386.0);
 
     py::class_<Vertex>(m, "Vertex")
         .def(py::init<double, double, double>())
@@ -699,9 +680,8 @@ PYBIND11_MODULE(icosphere, m) {
             ", elevation=" + std::to_string(v.elevation) + ">";
         });
 
-
     py::class_<Face>(m, "Face")
-        .def(py::init<Vertex, Vertex, Vertex>())
+        .def(py::init<size_t, size_t, size_t>())
         .def_readwrite("a", &Face::a)
         .def_readwrite("b", &Face::b)
         .def_readwrite("c", &Face::c)
@@ -710,9 +690,9 @@ PYBIND11_MODULE(icosphere, m) {
         .def_readwrite("average_atmospheric_water", &Face::average_atmospheric_water)
         .def_readwrite("temperature", &Face::temperature)
         .def("__repr__", [](const Face &f) {
-            return "<icosphere.Face a=" + std::to_string(f.a.x) + "," + std::to_string(f.a.y) + "," + std::to_string(f.a.z) +
-                   " b=" + std::to_string(f.b.x) + "," + std::to_string(f.b.y) + "," + std::to_string(f.b.z) +
-                   " c=" + std::to_string(f.c.x) + "," + std::to_string(f.c.y) + "," + std::to_string(f.c.z) +
+            return "<icosphere.Face a=" + std::to_string(f.a) + 
+                   " b=" + std::to_string(f.b) + 
+                   " c=" + std::to_string(f.c) + 
                    " average_elevation=" + std::to_string(f.average_elevation) + ">";
         });
 }

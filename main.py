@@ -130,12 +130,15 @@ if __name__ == "__main__":
 
     def getWorldPoint(val):
         global vertex_hierarchy, figdata
-        if vertex_hierarchy is None:
-            vertex_hierarchy = build_hierarchical_vertex_map(world[val].vertex_indices)
+        #if vertex_hierarchy is None:
+        #    vertex_hierarchy = build_hierarchical_vertex_map(world[val].vertex_indices)
         for i, face in enumerate(final_faces_cpp):
-            faces_np[i, 0] = get_vertex_index(face.a, vertex_hierarchy)
-            faces_np[i, 1] = get_vertex_index(face.b, vertex_hierarchy)
-            faces_np[i, 2] = get_vertex_index(face.c, vertex_hierarchy)
+            faces_np[1, 0] = world.vertex_indices[face.a]
+            faces_np[1, 1] = world.vertex_indices[face.b]
+            faces_np[1, 2] = world.vertex_indices[face.c]
+            #faces_np[i, 0] = get_vertex_index(face.a, vertex_hierarchy)
+            #faces_np[i, 1] = get_vertex_index(face.b, vertex_hierarchy)
+            #faces_np[i, 2] = get_vertex_index(face.c, vertex_hierarchy)
             elevations_np[i] = face.average_elevation
             surfaceWater_np[i] = face.surface_water
             if current_data_type == 'elevation':
