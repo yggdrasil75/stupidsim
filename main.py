@@ -111,7 +111,7 @@ if __name__ == "__main__":
     radius = PLANET_RADIUS_KM  # Use the global planet radius
     num_steps = NUM_STEPS
 
-    world = icosphere.run_simulation(subdivisions=subdivisions, elevationRange=20000.0, steps=num_steps)
+    world = icosphere.run_simulation(subdivisions=subdivisions, elevationRange=20000.0, steps=num_steps, totalWaterZL=1386.0)
     final_faces_cpp = world[-1].faces
 
 
