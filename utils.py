@@ -1,5 +1,8 @@
 
+from functools import lru_cache, wraps
 import math
+import threading
+import time
 import numpy as np
 
 from globals import ATMOSPHERIC_COMPOSITION, MOLECULAR_WEIGHTS, PLANET_RADIUS_KM
@@ -23,6 +26,8 @@ def calculate_mean_molecular_weight(humidity):
     
     return weighted_sum
 
+@timing_decorator
+@lru_cache(maxsize=None)
 def determine_surface_type(elevation, temperature, water_fraction):
     """Determine surface type for albedo calculation."""
     if water_fraction > 0.9:
@@ -39,7 +44,6 @@ def determine_surface_type(elevation, temperature, water_fraction):
         return 'desert'
     else:
         return 'grassland'
-    
 def calculate_slope(vertices, faces, vertex_idx):
     """Estimate terrain slope (radians) at a vertex using neighboring faces."""
     neighbors = findSphericalNeighbors(vertices, faces, vertex_idx, max_distance_km=100)
