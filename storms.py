@@ -8,8 +8,8 @@ from _icosphere import HaversineDistance, cartesianLatLon
 
 class StormSystem:
     def __init__(self, center_lat, center_lon, pressure_anomaly, radius_km=500, movement_speed_km_day=50):
-        self.center_lat = center_lat
-        self.center_lon = center_lon
+        self.center_lat: float = center_lat
+        self.center_lon: float = center_lon
         self.pressure_anomaly = pressure_anomaly  # Negative for cyclones, positive for anticyclones
         self.radius_km = radius_km
         self.movement_speed_km_day = movement_speed_km_day

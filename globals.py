@@ -167,3 +167,4 @@ CLOUD_ALBEDO_VALUES = {
 
 CLOUD_BASE_ALBEDO = 0.5  # Default cloud albedo
 MAX_CLOUD_COVERAGE = 1.0
+function_times = {}
