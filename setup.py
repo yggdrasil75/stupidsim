@@ -7,7 +7,7 @@ import platform
 if platform.system() == "Windows":
     extra_compile_args = ["/std:c++17"]
 else:
-    extra_compile_args = ["-std=c++17"]
+    extra_compile_args = ["-std=c++17"] #, "-pedantic", "-Wall", "-Wextra", "-fno-fast-math"]
 
 setup(
     name="icosphere",

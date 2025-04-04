@@ -56,6 +56,8 @@ struct Vertex {
 };
 
 double dotProduct(const Vertex& a, const Vertex& b) {
+    //assert(!std::isnan(a.x) && !std::isnan(a.y) && !std::isnan(a.z));
+    //assert(!std::isnan(b.x) && !std::isnan(b.y) && !std::isnan(b.z));
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
 
@@ -89,18 +91,22 @@ struct Face {
         return !(*this == other);
     }
     double area(const std::vector<Vertex>& vertices, double radius) const {
-        const Vertex& va = vertices[a];
-        const Vertex& vb = vertices[b];
-        const Vertex& vc = vertices[c];
-        
-        double dotproda = dotProduct(va, vb);
-        double dotprodb = dotProduct(vb, vc);
-        double dotprodc = dotProduct(vc, va);
+        return (radius * M_PI * 4.0) / vertices.size();
+        // const Vertex& va = vertices[a];
+        // const Vertex& vb = vertices[b];
+        // const Vertex& vc = vertices[c];
+    
+    
+        // double dotproda = dotProduct(va, vb);
+        // double dotprodb = dotProduct(vb, vc);
+        // double dotprodc = dotProduct(vc, va);
+        // std::cout << "a, b, c: " << va.x << ", " << va.y << ", " << va.z << ", " << vb.x << ", " << vb.y << ", " << vb.z << ", " << vc.x << ", " << vc.y << ", " << vc.z << " dot prods: " << dotproda << ", " << dotprodb << ", " << dotprodc << std::endl;
+        // double s = (dotproda + dotprodb + dotprodc) / 2.0;
+        // double tan_half_E_squared = tan(s / 2.0) * tan((s - dotproda) / 2.0) * tan((s-dotprodb) / 2.0) * tan((s - dotprodc) / 2.0);
+        // double E = 4.0 * atan(sqrt(tan_half_E_squared));
+        // std::cout << "s: " << s << " gibberish: " << tan_half_E_squared << " E: " << E << std::endl;
+        // return E * radius * radius;
 
-        double s = (dotproda + dotprodb + dotprodc) / 2.0;
-        double tan_half_E_squared = tan(s / 2.0) * tan((s - dotproda) / 2.0) * tan((s-dotprodb) / 2.0) * tan((s - dotprodc) / 2.0);
-        double E = 4.0 * atan(sqrt(tan_half_E_squared));
-        return E * radius * radius;
     }
 };
 
@@ -136,11 +142,11 @@ namespace std {
 std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& vertices, std::vector<Face>& faces) {
     // Create a map from Vertex to its index in the vertices vector
     std::unordered_map<Vertex, uint32_t> vertex_to_index;
-    for (uint32_t i = 0; i < vertices.size(); ++i) {
+    for (uint32_t i = 0; i < vertices.size(); i++) {
         vertex_to_index[vertices[i]] = i;
     }
 
-    for (size_t _ = 0; _ < subdivisions; ++_) {
+    for (size_t _ = 0; _ < subdivisions; _++) {
         std::vector<Face> new_faces;
         new_faces.reserve(faces.size() * 4);
 
@@ -492,6 +498,7 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         totalWeight += faceWeights[i] * face.area(world.vertices, world.radius);
     }
     
+    
     // Second pass to distribute water
     for (size_t i = 0; i < world.faces.size(); ++i) {
         Face& face = world.faces[i];
@@ -503,7 +510,9 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         
         // Calculate water amounts for this face
         double faceWaterFraction = (faceWeights[i] * faceArea) / totalWeight;
+        
         double faceSurfaceWater = totalSurfaceWaterM3 * faceWaterFraction;
+        std::cout << "face area is currently: " << faceArea << " or better still: " << face.area(world.vertices, world.radius) << std::endl;
         double faceGroundwater = totalGroundwaterM3 * faceWaterFraction;
         
         // Distribute to vertices (simple even distribution)
@@ -528,7 +537,7 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         
         // Temperature
         face.temperature = tempDistrib(gen);
-        std::cout << "face" << i << "is currently flooded with" << faceSurfaceWater << std::endl;
+        std::cout << "face " << i << " is currently flooded with " << faceSurfaceWater << std::endl;
     }
 
     return world;
