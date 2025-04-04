@@ -7,7 +7,7 @@ import icosphere
 from mpl_toolkits.mplot3d import Axes3D
 
 PLANET_RADIUS_KM = 6371.0
-SUBDIVISIONS = 1
+SUBDIVISIONS = 3
 NUM_STEPS = 12
 cbar_obj = None  # colorbar is stupid. this fixes it.
 current_step = 0
@@ -117,7 +117,7 @@ if __name__ == "__main__":
             faces_np[i, 1] = face.b
             faces_np[i, 2] = face.c
             elevations_np[i] = face.average_elevation
-            surfaceWater_np[i] = face.surface_water
+            surfaceWater_np[i] = face.surfaceWater
             if current_data_type == 'elevation':
                 figdata = elevations_np
             elif current_data_type == 'Water':

@@ -19,10 +19,10 @@ namespace py = pybind11;
 
 struct Vertex {
     double x, y, z, elevation;
-    double surface_water;  // Water on the surface (rivers, lakes, etc.)
+    double surfaceWater;  // Water on the surface (rivers, lakes, etc.)
     double groundwater;    // Water underground
-    Vertex(double x=0, double y=0, double z=0) : x(x), y(y), z(z), elevation(0.0), surface_water(0.0), groundwater(0.0) {}
-    Vertex(double x, double y, double z, double elevation) : x(x), y(y), z(z), elevation(elevation), surface_water(0.0), groundwater(0.0) {}
+    Vertex(double x=0, double y=0, double z=0) : x(x), y(y), z(z), elevation(0.0), surfaceWater(0.0), groundwater(0.0) {}
+    Vertex(double x, double y, double z, double elevation) : x(x), y(y), z(z), elevation(elevation), surfaceWater(0.0), groundwater(0.0) {}
     Vertex operator+(const Vertex& other) const {
         return Vertex(x + other.x, y + other.y, z + other.z);
     }
@@ -65,7 +65,8 @@ struct Face {
     size_t a, b, c;  // Vertex indices
     double average_elevation;
     double initAverage;
-    double surface_water;
+    double surfaceWater;
+    double groundWater;
     double average_atmospheric_water;
     double temperature;
 
@@ -476,12 +477,13 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         vertex.elevation = elevationDistrib(gen);
     }
 
-    // Distribute water - using a 70/30 split between surface water and groundwater
-    const double surfaceWaterFraction = 0.7;
-    const double groundwaterFraction = 0.3;
+    const double surfaceWaterFraction = 0.9725;
+    const double groundwaterFraction = 0.027;
+    const double atmosphericWaterFraction = 0.0005;
     
     const double totalSurfaceWaterM3 = totalWaterM3 * surfaceWaterFraction;
     const double totalGroundwaterM3 = totalWaterM3 * groundwaterFraction;
+    const double totalAtmosphericwaterM3 = totalWaterM3 * atmosphericWaterFraction;
     
     // First pass to calculate elevation-based water distribution weights
     std::vector<double> faceWeights(world.faces.size());
@@ -512,13 +514,13 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         double faceWaterFraction = (faceWeights[i] * faceArea) / totalWeight;
         
         double faceSurfaceWater = totalSurfaceWaterM3 * faceWaterFraction;
-        std::cout << "face area is currently: " << faceArea << " or better still: " << face.area(world.vertices, world.radius) << std::endl;
+        //std::cout << "face area is currently: " << faceArea << " or better still: " << face.area(world.vertices, world.radius) << std::endl;
         double faceGroundwater = totalGroundwaterM3 * faceWaterFraction;
         
         // Distribute to vertices (simple even distribution)
-        world.vertices[face.a].surface_water += faceSurfaceWater / 3.0;
-        world.vertices[face.b].surface_water += faceSurfaceWater / 3.0;
-        world.vertices[face.c].surface_water += faceSurfaceWater / 3.0;
+        world.vertices[face.a].surfaceWater += faceSurfaceWater / 3.0;
+        world.vertices[face.b].surfaceWater += faceSurfaceWater / 3.0;
+        world.vertices[face.c].surfaceWater += faceSurfaceWater / 3.0;
         
         world.vertices[face.a].groundwater += faceGroundwater / 3.0;
         world.vertices[face.b].groundwater += faceGroundwater / 3.0;
@@ -528,7 +530,8 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         world.total_surface_water += faceSurfaceWater;
         
         // Set face averages
-        face.surface_water = faceSurfaceWater;
+        face.surfaceWater = faceSurfaceWater;
+        face.groundWater = faceGroundwater;
         
         
         // Initialize atmospheric water (small fraction of surface water)
@@ -537,7 +540,7 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         
         // Temperature
         face.temperature = tempDistrib(gen);
-        std::cout << "face " << i << " is currently flooded with " << faceSurfaceWater << std::endl;
+        //std::cout << "face " << i << " is currently flooded with " << faceSurfaceWater << std::endl;
     }
 
     return world;
@@ -547,7 +550,7 @@ void simulateSurfaceWaterFlow(WorldState& world) {
     // Simple water flow simulation based on elevation and existing water
     for (size_t i = 0; i < world.vertices.size(); ++i) {
         Vertex& vertex = world.vertices[i];
-        if (vertex.surface_water <= 0) continue;
+        if (vertex.surfaceWater <= 0) continue;
 
         // Find neighboring vertices
         std::vector<size_t> neighbors = findSphericalNeighborsThreaded(world.vertices, world.faces, i, 1000.0, world.radius);
@@ -560,7 +563,7 @@ void simulateSurfaceWaterFlow(WorldState& world) {
         
         for (size_t neighborID : neighbors) {
             Vertex& neighbor = world.vertices[neighborID];
-            double neighbor_elevation = neighbor.elevation + (neighbor.surface_water * 0.1); // Water increases effective elevation
+            double neighbor_elevation = neighbor.elevation + (neighbor.surfaceWater * 0.1); // Water increases effective elevation
             if (neighbor_elevation < lowest_elevation) {
                 lowest_elevation = neighbor_elevation;
                 lowest_neighbor = neighborID;
@@ -569,9 +572,9 @@ void simulateSurfaceWaterFlow(WorldState& world) {
 
         // Move some water to the lowest neighbor
         if (lowest_neighbor != i) {
-            double flow_amount = std::min(vertex.surface_water * 0.1, 10.0); // Move up to 10% or 10 units
-            vertex.surface_water -= flow_amount;
-            world.vertices[lowest_neighbor].surface_water += flow_amount;
+            double flow_amount = std::min(vertex.surfaceWater * 0.1, 10.0); // Move up to 10% or 10 units
+            vertex.surfaceWater -= flow_amount;
+            world.vertices[lowest_neighbor].surfaceWater += flow_amount;
         }
     }
 }
@@ -589,8 +592,8 @@ void simulateAtmosphericWater(WorldState& world) {
         
         // Evaporate from each vertex in the face
         for (Vertex* vertex : {&va, &vb, &vc}) {
-            double evap_amount = std::min(vertex->surface_water * evaporation_rate, 1.0);
-            vertex->surface_water -= evap_amount;
+            double evap_amount = std::min(vertex->surfaceWater * evaporation_rate, 1.0);
+            vertex->surfaceWater -= evap_amount;
             face.average_atmospheric_water += evap_amount / 3.0;
             total_evaporation += evap_amount;
         }
@@ -605,9 +608,9 @@ void simulateAtmosphericWater(WorldState& world) {
             
             // Distribute precipitation to vertices
             double per_vertex = precipitation / 3.0;
-            va.surface_water += per_vertex;
-            vb.surface_water += per_vertex;
-            vc.surface_water += per_vertex;
+            va.surfaceWater += per_vertex;
+            vb.surfaceWater += per_vertex;
+            vc.surfaceWater += per_vertex;
             
             world.total_atmospheric_water -= precipitation;
             world.total_surface_water += precipitation;
@@ -640,7 +643,7 @@ WorldState step(WorldState world) {
         double sumElevation = va.elevation + vb.elevation + vc.elevation;  
         double vertexAverage = sumElevation / 3.0; // 3 vertices per face
         face.average_elevation = face.average_elevation - face.initAverage + vertexAverage;
-        //face.surface_water = (va.surface_water + vb.surface_water + vc.surface_water) / 3.0;
+        //face.surfaceWater = (va.surfaceWater + vb.surfaceWater + vc.surfaceWater) / 3.0;
     }
     return world;
 }
@@ -696,7 +699,7 @@ PYBIND11_MODULE(icosphere, m) {
         .def_readwrite("b", &Face::b)
         .def_readwrite("c", &Face::c)
         .def_readwrite("average_elevation", &Face::average_elevation)
-        .def_readwrite("surface_water", &Face::surface_water)
+        .def_readwrite("surfaceWater", &Face::surfaceWater)
         .def_readwrite("average_atmospheric_water", &Face::average_atmospheric_water)
         .def_readwrite("temperature", &Face::temperature)
         .def("__repr__", [](const Face &f) {
