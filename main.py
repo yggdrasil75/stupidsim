@@ -9,7 +9,7 @@ from mpl_toolkits.mplot3d import Axes3D
 
 PLANET_RADIUS_KM = 6371.0
 SUBDIVISIONS = 3
-NUM_STEPS = 100
+NUM_STEPS = 1000
 cbar_obj = None  # colorbar is stupid. this fixes it.
 current_step = 0
 
@@ -91,7 +91,7 @@ if __name__ == "__main__":
     num_steps = NUM_STEPS
 
     world = icosphere.run_simulation(subdivisions=subdivisions, elevationRange=20000.0, 
-                                     steps=num_steps, totalWaterZL=1386.0, timestepSeconds=3600000.0)
+                                     steps=num_steps, totalWaterZL=1386.0, timestepSeconds=3600.0)
     final_faces_cpp = world[-1].faces
 
 

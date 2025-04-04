@@ -121,6 +121,11 @@ struct Face {
     }
 };
 
+// struct Plate {
+//     std::vector<size_t> vertices;
+    
+// }
+
 struct WorldState {
     std::vector<Vertex> vertices;
     std::vector<Face> faces;
