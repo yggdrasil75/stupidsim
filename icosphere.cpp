@@ -53,6 +53,14 @@ struct Vertex {
     bool operator!=(const Vertex& other) const {
         return !(*this == other);
     }
+    double dot(const Vertex& other) const {
+        return x * other.x + y * other.y + z * other.z;
+    }
+    Vertex cross(const Vertex& other){
+        return Vertex(y * other.z - z * other.y,
+                      z * other.x - x * other.z,
+                      x * other.y - y * other.x);
+    }
 };
 
 double dotProduct(const Vertex& a, const Vertex& b) {
@@ -69,8 +77,10 @@ struct Face {
     double groundWater;
     double average_atmospheric_water;
     double temperature;
+    double friction;
 
-    Face(size_t a, size_t b, size_t c) : a(a), b(b), c(c), average_elevation(0.0) {}
+    Face(size_t a, size_t b, size_t c) : a(a), b(b), c(c), average_elevation(0.0), initAverage(0.0), 
+        surfaceWater(0.0), groundWater(0.0), average_atmospheric_water(0.0), temperature(0.0), friction(0.0) {}
     Face(size_t a, size_t b, size_t c, double averageElevation) : a(a), b(b), c(c), average_elevation(averageElevation) {}
 
     bool operator<(const Face& other) const {
@@ -119,6 +129,18 @@ struct WorldState {
     double total_ground_water;
     double total_atmospheric_water;
     double radius;
+    double timestepSeconds;
+    double gravity;
+
+    double timestepHour(){
+        return timestepSeconds / 3600.0;
+    }
+    double timestepDay(){
+        return timestepSeconds / 86400.0;
+    }
+    double timestepYear(){
+        return timestepSeconds / 31556952.0;
+    }
 
     WorldState(std::vector<Vertex> vertices, std::vector<Face> faces, std::map<Vertex, size_t> vertexIndices, double radius) : vertices(vertices), faces(faces), vertexIndices(vertexIndices), radius(radius) {};
 };
@@ -218,6 +240,130 @@ std::vector<Face> subdivide_icosphere(size_t subdivisions, std::vector<Vertex>& 
     }
 
     return faces;
+}
+
+std::vector<Face> getCrossedFaces(const WorldState& world, size_t startIdx, size_t endIdx) {
+    std::vector<Face> crossedFaces;
+    
+    // Get the start and end vertices
+    const Vertex& start = world.vertices[startIdx];
+    const Vertex& end = world.vertices[endIdx];
+    
+    // Early exit if start and end are the same
+    if (startIdx == endIdx) return crossedFaces;
+    
+    // Create the geodesic direction vector
+    Vertex direction = end - start;
+    
+    // Track current position and face
+    size_t currentFaceIdx = SIZE_MAX;
+    Vertex currentPos = start;
+    
+    // Find the initial face (one that contains both startIdx and is crossed by the direction)
+    for (size_t i = 0; i < world.faces.size(); ++i) {
+        const Face& face = world.faces[i];
+        
+        // Check if face contains the start vertex
+        if (face.a != startIdx && face.b != startIdx && face.c != startIdx) continue;
+        
+        // Get the other two vertices of the face
+        size_t v1 = (face.a == startIdx) ? face.b : face.a;
+        size_t v2 = (face.c == startIdx) ? face.b : face.c;
+        if (v1 == startIdx) v1 = face.c;
+        
+        const Vertex& vert1 = world.vertices[v1];
+        const Vertex& vert2 = world.vertices[v2];
+        
+        // Check if direction points between these two vertices
+        Vertex edge1 = vert1 - start;
+        Vertex edge2 = vert2 - start;
+        
+        Vertex cross1 = edge1.normalized().cross(direction.normalized());
+        Vertex cross2 = direction.normalized().cross(edge2.normalized());
+        
+        if (cross1.dot(cross2) > 0) {
+            currentFaceIdx = i;
+            crossedFaces.push_back(face);
+            break;
+        }
+    }
+    
+    if (currentFaceIdx == SIZE_MAX) return crossedFaces; // No initial face found
+    
+    // Traverse through faces until we reach the end vertex
+    while (true) {
+        const Face& currentFace = world.faces[currentFaceIdx];
+        
+        // Check if we've reached the end vertex
+        if (currentFace.a == endIdx || currentFace.b == endIdx || currentFace.c == endIdx) {
+            break;
+        }
+        
+        // Find the edge we cross
+        size_t nextFaceIdx = SIZE_MAX;
+        
+        // For each edge of the current face, check if the geodesic crosses it
+        std::array<std::pair<size_t, size_t>, 3> edges = {{
+            {currentFace.a, currentFace.b},
+            {currentFace.b, currentFace.c},
+            {currentFace.c, currentFace.a}
+        }};
+        
+        for (const auto& edge : edges) {
+            // Skip edges that include the start vertex (we already handled the initial face)
+            if (edge.first == startIdx || edge.second == startIdx) continue;
+            
+            const Vertex& v1 = world.vertices[edge.first];
+            const Vertex& v2 = world.vertices[edge.second];
+            
+            // Calculate intersection between geodesic and edge
+            Vertex edgeVec = v2 - v1;
+            Vertex normal = direction.cross(edgeVec);
+            
+            if (normal.length() < 1e-10) continue; // parallel, no intersection
+            
+            // Find adjacent face sharing this edge
+            for (size_t i = 0; i < world.faces.size(); ++i) {
+                if (i == currentFaceIdx) continue;
+                
+                const Face& candidate = world.faces[i];
+                bool sharesEdge = false;
+                
+                // Check if candidate shares this edge
+                if ((candidate.a == edge.first || candidate.b == edge.first || candidate.c == edge.first) &&
+                    (candidate.a == edge.second || candidate.b == edge.second || candidate.c == edge.second)) {
+                    sharesEdge = true;
+                }
+                
+                if (sharesEdge) {
+                    // Check if direction points into this face
+                    size_t thirdVertex = (candidate.a != edge.first && candidate.a != edge.second) ? candidate.a :
+                                       (candidate.b != edge.first && candidate.b != edge.second) ? candidate.b :
+                                       candidate.c;
+                    
+                    const Vertex& thirdVert = world.vertices[thirdVertex];
+                    Vertex faceNormal = (v2 - v1).cross(thirdVert - v1);
+                    
+                    if (direction.dot(faceNormal) > 0) {
+                        nextFaceIdx = i;
+                        break;
+                    }
+                }
+            }
+            
+            if (nextFaceIdx != SIZE_MAX) break;
+        }
+        
+        if (nextFaceIdx == SIZE_MAX || nextFaceIdx == currentFaceIdx) {
+            break; // No next face found or stuck in loop
+        }
+        
+        // Add the new face to our list and continue
+        crossedFaces.push_back(world.faces[nextFaceIdx]);
+        currentFaceIdx = nextFaceIdx;
+    }
+    
+    return crossedFaces;
 }
 
 std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, size_t>>
@@ -361,18 +507,14 @@ std::vector<Face*> getAdjacentFaces(const std::vector<Face>& all_faces, const Fa
     return adjacent_faces;
 }
 
-std::vector<size_t> findSphericalNeighborsThreaded(const std::vector<Vertex>& vertices, 
-                                                 const std::vector<Face>& faces, 
-                                                 size_t vertexID, 
-                                                 double maxDistanceKM, 
-                                                 double radius) {
-    const Vertex& center = vertices[vertexID];
+std::vector<size_t> findSphericalNeighborsThreaded(WorldState world, size_t vertexID, double maxDistanceKM) {
+    const Vertex& center = world.vertices[vertexID];
     std::vector<size_t> neighbors;
     std::unordered_set<size_t> visited;
     std::vector<size_t> to_process;
 
     // Start with direct neighbors
-    for (const Face& face : faces) {
+    for (const Face& face : world.faces) {
         if (face.a == vertexID || face.b == vertexID || face.c == vertexID) {
             if (face.a != vertexID && !visited.count(face.a)) {
                 visited.insert(face.a);
@@ -394,12 +536,12 @@ std::vector<size_t> findSphericalNeighborsThreaded(const std::vector<Vertex>& ve
         size_t current_id = to_process.back();
         to_process.pop_back();
 
-        double dist = sphericalDistanceCartesian(vertices[current_id], center, radius);
+        double dist = sphericalDistanceCartesian(world.vertices[current_id], center, world.radius);
         if (dist <= maxDistanceKM) {
             neighbors.push_back(current_id);
 
             // Add this vertex's neighbors to processing queue
-            for (const Face& face : faces) {
+            for (const Face& face : world.faces) {
                 if (face.a == current_id || face.b == current_id || face.c == current_id) {
                     if (face.a != current_id && !visited.count(face.a)) {
                         visited.insert(face.a);
@@ -419,6 +561,37 @@ std::vector<size_t> findSphericalNeighborsThreaded(const std::vector<Vertex>& ve
     }
 
     return neighbors;
+}
+
+std::vector<Face> findSphericalNeighborFacesThreaded(WorldState world, Face face, double maxDistanceKM) {
+    //const Vertex& center = vertices[vertexID];
+    std::vector<Vertex> vertices = world.vertices;
+    const Vertex& center = Vertex((vertices[face.a].x + vertices[face.b].x + vertices[face.c].x) / 3.0, 
+                                    (vertices[face.a].y + vertices[face.b].y + vertices[face.c].y) / 3.0, 
+                                    (vertices[face.a].z + vertices[face.b].z + vertices[face.c].z) / 3.0);
+    std::vector<Face> neighbor_faces;
+
+    for (size_t i = 0; i < world.faces.size(); ++i) {
+        const Face& cFace = world.faces[i];
+        
+        // Get all three vertices of the face
+        const Vertex& v1 = vertices[cFace.a];
+        const Vertex& v2 = vertices[cFace.b];
+        const Vertex& v3 = vertices[cFace.c];
+
+        // Calculate distance from center to each vertex
+        double d1 = sphericalDistanceCartesian(v1, center, world.radius);
+        double d2 = sphericalDistanceCartesian(v2, center, world.radius);
+        double d3 = sphericalDistanceCartesian(v3, center, world.radius);
+
+        // Check if any vertex is within max distance
+        if (d1 <= maxDistanceKM || d2 <= maxDistanceKM || d3 <= maxDistanceKM) {
+            neighbor_faces.push_back(cFace);
+            continue;
+        }
+    }
+
+    return neighbor_faces;
 }
 
 double calculateSlope(const std::vector<Vertex>& vertices, const std::vector<Face>& faces, size_t vertexID, double radius) {
@@ -460,6 +633,7 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
     std::uniform_real_distribution<> elevationDistrib(-elevationRange / 2.0, elevationRange / 2.0);
     std::uniform_real_distribution<> tempDistrib(-20.0, 30.0); // Temperature in Celsius
     std::uniform_real_distribution<> offsetPercentage(-0.01, 0.01);
+    std::uniform_real_distribution<> frictioncoefficientoffset(0.0, 0.1);
     
     // Convert zettaliters to cubic meters (1 ZL = 1e18 m³)
     const long double totalWaterM3 = totalWaterZL * 1e18;
@@ -540,42 +714,65 @@ WorldState initializeWorld(size_t subdivisions = 3, double elevationRange = 1000
         
         // Temperature
         face.temperature = tempDistrib(gen);
+        // TODO: replace later with something to calculate a realistic friction. ie: ratio of 3 types of rock
+        face.friction = frictioncoefficientoffset(gen); 
         //std::cout << "face " << i << " is currently flooded with " << faceSurfaceWater << std::endl;
     }
-
+    world.gravity = 9.81;
     return world;
 }
 
 void simulateSurfaceWaterFlow(WorldState& world) {
-    // Simple water flow simulation based on elevation and existing water
     for (size_t i = 0; i < world.vertices.size(); ++i) {
         Vertex& vertex = world.vertices[i];
         if (vertex.surfaceWater <= 0) continue;
 
         // Find neighboring vertices
-        std::vector<size_t> neighbors = findSphericalNeighborsThreaded(world.vertices, world.faces, i, 1000.0, world.radius);
+        std::vector<size_t> neighbors = findSphericalNeighborsThreaded(world, i, 2000.0);
         
         if (neighbors.empty()) continue;
-
+        double outflow = 0.0;
+        std::vector<std::pair<size_t, double>> potentialFlows;
         // Find the lowest neighbor
-        size_t lowest_neighbor = i;
-        double lowest_elevation = vertex.elevation;
+        // size_t lowest_neighbor = i;
+        // double lowest_elevation = vertex.elevation + (vertex.surfaceWater * 0.1);
         
         for (size_t neighborID : neighbors) {
             Vertex& neighbor = world.vertices[neighborID];
-            double neighbor_elevation = neighbor.elevation + (neighbor.surfaceWater * 0.1); // Water increases effective elevation
-            if (neighbor_elevation < lowest_elevation) {
-                lowest_elevation = neighbor_elevation;
-                lowest_neighbor = neighborID;
+            std::vector<Face> crossed = getCrossedFaces(world, i, neighborID);
+            double crossedfriction = 0.0;
+            for (Face crossedface : crossed){
+                crossedfriction += crossedface.friction;
             }
+            double facefrictions = crossedfriction / crossed.size();
+            double sourceHead = vertex.elevation + (vertex.surfaceWater * 0.001);
+            double targetHead = neighbor.elevation + (neighbor.surfaceWater * 0.001);
+            if (sourceHead <= targetHead) continue;
+            double distance = sphericalDistanceCartesian(vertex, neighbor, world.radius);
+            double slope = (sourceHead - targetHead) / distance;
+            double flow = (1.0/facefrictions) * sqrt(slope) * (vertex.surfaceWater * 0.001);
+            double flowAmount = flow * world.timestepHour() * 1000.0;
+            potentialFlows.emplace_back(neighborID, flowAmount);
+            outflow += flowAmount;
         }
 
-        // Move some water to the lowest neighbor
-        if (lowest_neighbor != i) {
-            double flow_amount = std::min(vertex.surfaceWater * 0.1, 10.0); // Move up to 10% or 10 units
-            vertex.surfaceWater -= flow_amount;
-            world.vertices[lowest_neighbor].surfaceWater += flow_amount;
+        double maxOut = vertex.surfaceWater * 0.5;
+        if (outflow > maxOut) {
+            double scaleFactor = maxOut / outflow;
+            for (std::pair<size_t, double>& flow : potentialFlows) {
+                flow.second *= scaleFactor;
+            }
+            outflow = maxOut;
         }
+        
+        for (const std::pair<size_t, double>& flow : potentialFlows) {
+            double actual = std::min(flow.second, vertex.surfaceWater);
+            vertex.surfaceWater -= actual;
+            world.vertices[flow.first].surfaceWater += actual;
+        }
+    }
+    for (Face& face : world.faces){
+        face.surfaceWater = (world.vertices[face.a].surfaceWater + world.vertices[face.b].surfaceWater + world.vertices[face.c].surfaceWater) / 3.0;
     }
 }
 
@@ -648,14 +845,17 @@ WorldState step(WorldState world) {
     return world;
 }
 
-std::vector<WorldState> run_simulation(size_t subdivisions=3, double elevationRange=10000.0, int steps = 15, double totalWaterZL = 1386.0) {
+std::vector<WorldState> run_simulation(size_t subdivisions=3, double elevationRange=10000.0, 
+                    int steps = 15, double totalWaterZL = 1386.0, double timestepSeconds = 3600.0) {
     WorldState world = initializeWorld(subdivisions, elevationRange, totalWaterZL);
+    world.timestepSeconds = timestepSeconds;
     std::vector<WorldState> worldhistory;
     worldhistory.push_back(world); // Store initial state
 
     for (int i = 0; i < steps; ++i) {
         world = step(world);
         worldhistory.push_back(world);
+        std::cout << "Simulating step " << i << "/" << steps << std::endl;
     }
     return worldhistory;
 }
@@ -680,7 +880,8 @@ PYBIND11_MODULE(icosphere, m) {
           py::arg("subdivisions") = 3,
           py::arg("elevationRange") = 10000.0,
           py::arg("steps") = 15,
-          py::arg("totalWaterZL") = 1386.0);
+          py::arg("totalWaterZL") = 1386.0,
+          py::arg("timestepSeconds") = 3600.0);
 
     py::class_<Vertex>(m, "Vertex")
         .def(py::init<double, double, double>())

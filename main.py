@@ -8,7 +8,7 @@ from mpl_toolkits.mplot3d import Axes3D
 
 PLANET_RADIUS_KM = 6371.0
 SUBDIVISIONS = 3
-NUM_STEPS = 12
+NUM_STEPS = 100
 cbar_obj = None  # colorbar is stupid. this fixes it.
 current_step = 0
 
@@ -24,7 +24,7 @@ def visualize_world_spherical(vertices, faces, data, ax, data_type):
         face_data = data  #data is already vertex elevations
         vmin = np.min(data)
         vmax = np.max(data)
-        print(f"Min Elevation: {vmin}, Max Elevation: {vmax}")
+        #print(f"Min Elevation: {vmin}, Max Elevation: {vmax}")
 		# Normalize data using the original data's vmin and vmax
         norm_data = (face_data - vmin) / (vmax - vmin)      
         colors = plt.cm.terrain(norm_data) #removed clipping as it caused issues with the terrain normalization
@@ -89,7 +89,8 @@ if __name__ == "__main__":
     radius = PLANET_RADIUS_KM  # Use the global planet radius
     num_steps = NUM_STEPS
 
-    world = icosphere.run_simulation(subdivisions=subdivisions, elevationRange=20000.0, steps=num_steps, totalWaterZL=1386.0)
+    world = icosphere.run_simulation(subdivisions=subdivisions, elevationRange=20000.0, 
+                                     steps=num_steps, totalWaterZL=1386.0, timestepSeconds=3600000.0)
     final_faces_cpp = world[-1].faces
 
 
