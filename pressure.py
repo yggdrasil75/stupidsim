@@ -1,7 +1,8 @@
 from random import random
 import numpy as np
 from globals import ATMOSPHERIC_COMPOSITION, ATMOSPHERIC_LAYERS, AXIAL_TILT_DEGREES, CORIOLIS_FACTOR, FERREL_CELL_WIDTH, GAS_CONSTANT, GAS_CONSTANTS, GRAVITY, HADLEY_CELL_WIDTH, POLAR_CELL_WIDTH, SEA_LEVEL_PRESSURE_HPA
-from utils import calculate_mean_molecular_weight, cartesian_to_lat_lon, find_spherical_neighbors, haversine_distance
+from utils import calculate_mean_molecular_weight, findSphericalNeighbors
+from _icosphere import HaversineDistance, cartesianLatLon
 
 
 def calculate_seasonal_pressure_variation(lat, day_of_year):
@@ -210,7 +211,7 @@ def update_pressure_systems(vertices, faces, elevations, temperatures, day_of_ye
     pressures = np.zeros(len(vertices))
     
     for i, vertex in enumerate(vertices):
-        lat, lon = cartesian_to_lat_lon(*vertex)
+        lat, lon = cartesianLatLon(vertex)
         elevation = elevations[i]
         temperature = temperatures[i]
         
@@ -232,8 +233,8 @@ def update_pressure_systems(vertices, faces, elevations, temperatures, day_of_ye
         storm_effect = 0
         for storm in active_storms:
             for i, vertex in enumerate(vertices):
-                lat, lon = cartesian_to_lat_lon(*vertex)
-                distance = haversine_distance(storm.center_lat, storm.center_lon, lat, lon)
+                lat, lon = cartesianLatLon(vertex)
+                distance = HaversineDistance(storm.center_lat, storm.center_lon, lat, lon)
                 
                 if distance < storm.radius_km * 2:  # Wider influence area
                     # Create proper pressure gradient toward storm center
@@ -255,7 +256,7 @@ def update_pressure_systems(vertices, faces, elevations, temperatures, day_of_ye
     # Apply smoothing to create more coherent pressure systems
     smoothed_pressures = np.zeros_like(pressures)
     for i in range(len(vertices)):
-        neighbors = find_spherical_neighbors(vertices, faces, i, 1000)
+        neighbors = findSphericalNeighbors(vertices, faces, i, 1000)
         neighbor_pressures = [pressures[j] for j in neighbors]
         smoothed_pressures[i] = np.mean([pressures[i]] + neighbor_pressures)
     
