@@ -13,8 +13,6 @@ NUM_STEPS = 100
 cbar_obj = None  # colorbar is stupid. this fixes it.
 current_step = 0
 
-
-
 def visualize_world_spherical(vertices, faces, data, ax, data_type):
     global cbar_obj
     ax.clear()

@@ -159,10 +159,11 @@ struct Face {
     }
 };
 // struct Plate {
-//     std::vector<uint64_t> vertices;
-    
+//     std::vector<uint64_t> vertices;    
 // }
 
+
+// move vertex values (elevation, water, groundwater, etc) to worldstate. 
 struct WorldState {
     std::vector<Vertex> vertices;
     std::vector<Face> faces;
@@ -484,7 +485,7 @@ std::vector<Face> getCrossedFaces(const WorldState& world, uint64_t startIdx, ui
 }
 
 std::tuple<std::vector<Vertex>, std::vector<Face>, std::map<Vertex, uint64_t>>
-    generate_icosphere(uint64_t subdivisions=3, double radius=1.0) {
+    generate_icosphere(uint8_t subdivisions=3, double radius=1.0) {
     // Golden ratio
     const double t = (1.0 + std::sqrt(5.0)) / 2.0;
 
@@ -790,7 +791,7 @@ double calculateSlope(const std::vector<Vertex>& vertices, const std::vector<Fac
     return angle * (180.0 / M_PI); // Convert to degrees
 }
 
-WorldState initializeWorld(uint64_t subdivisions = 3, double elevationRange = 10000.0, double totalWaterZL = 1386.0) {
+WorldState initializeWorld(uint8_t subdivisions = 3, double elevationRange = 10000.0, double totalWaterZL = 1386.0) {
     auto [vertices, faces, vertexIndices] = generate_icosphere(subdivisions, elevationRange);
 
     std::random_device rd;
@@ -906,7 +907,7 @@ void simulateSurfaceWaterFlow(WorldState& world) {
                 Vertex& vertex = world.vertices[i];
                 if (vertex.surfaceWater <= 0) continue;
 
-                std::vector<uint64_t> neighbors = findSphericalNeighborsThreaded(world, i, 2000.0);
+                std::vector<uint64_t> neighbors = findSphericalNeighborsThreaded(world, i, 1000.0);
                 if (neighbors.empty()) continue;
 
                 std::vector<std::pair<uint64_t, double>> potentialFlows;
@@ -1056,7 +1057,7 @@ WorldState step(WorldState world) {
     return world;
 }
 
-std::vector<WorldState> run_simulation(uint64_t subdivisions=3, double elevationRange=10000.0, 
+std::vector<WorldState> run_simulation(uint8_t subdivisions=3, double elevationRange=10000.0, 
                     int steps = 15, double totalWaterZL = 1386.0, double timestepSeconds = 3600.0) {
     WorldState world = initializeWorld(subdivisions, elevationRange, totalWaterZL);
     world.timestepSeconds = timestepSeconds;
