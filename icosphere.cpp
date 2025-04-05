@@ -6,11 +6,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
-#include <thread>
-#include <future>
 #include <numeric>
 #include <random>
+#include <future>
 #include <float.h>
+#include <queue>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -22,6 +22,7 @@ struct Vertex {
     double x, y, z, elevation;
     double surfaceWater;  // Water on the surface (rivers, lakes, etc.)
     double groundwater;    // Water underground
+    std::multimap<double, uint64_t> neighborCache;
     Vertex(double x=0, double y=0, double z=0) : x(x), y(y), z(z), elevation(0.0), surfaceWater(0.0), groundwater(0.0) {}
     Vertex(double x, double y, double z, double elevation) : x(x), y(y), z(z), elevation(elevation), surfaceWater(0.0), groundwater(0.0) {}
     Vertex operator+(const Vertex& other) const {
@@ -45,23 +46,6 @@ struct Vertex {
         double hx = x;
         double hy = y;
         double hz = z;
-        if (abs(x) <= epsilon) {
-            hx = 0.0;
-        }
-        if (abs(y) <= epsilon) { 
-            hy = 0.0;
-        }
-        if (abs(z) <= epsilon) { 
-            hz = 0.0;
-        }
-        if (abs(len) <= epsilon){
-            if (len > 0.0) {
-                len = 0.000001;
-            }
-            if (len < 0.0) {
-                len = -0.000001;
-            }
-        }
         hx = hx / len;
         hy = hy / len;
         hz = hz / len;
@@ -96,6 +80,25 @@ struct Vertex {
                       z * other.x - x * other.z,
                       x * other.y - y * other.x);
     }
+    bool hasCache(double distance) const { 
+        return neighborCache.find(distance) != neighborCache.end();
+    }
+    std::vector<uint64_t> getNeighbors(double distance) const {
+        std::vector<uint64_t> result;
+        auto it = neighborCache.begin();
+        while (it != neighborCache.end() && it->first <= distance) {
+            result.push_back(it->second);
+            ++it;
+        }
+        return result;
+    }
+    void storeDistance(uint64_t neighborID, double distance) {
+        neighborCache.emplace(distance, neighborID);
+    }
+    void clearNeighbors() {
+        neighborCache.clear();
+    }
+
 };
 
 double dotProduct(const Vertex& a, const Vertex& b) {
@@ -628,60 +631,100 @@ std::vector<Face*> getAdjacentFaces(const std::vector<Face>& all_faces, const Fa
     return adjacent_faces;
 }
 
+void precomputeDistances(WorldState& world) {
+    for (Vertex& vertex : world.vertices){
+        vertex.clearNeighbors();
+    }
+    for (const auto& [vertex1, id1] : world.vertexIndices) {
+        for (const auto& [vertex2, id2] : world.vertexIndices) {
+            if (id1 != id2) {
+                double dist = sphericalDistanceCartesian(vertex1, vertex2, world.radius);
+                world.vertices[id1].storeDistance(id2, dist);
+            }
+        }
+    }
+}
+
 std::vector<uint64_t> findSphericalNeighborsThreaded(WorldState world, uint64_t vertexID, double maxDistanceKM) {
-    const Vertex& center = world.vertices[vertexID];
-    std::vector<uint64_t> neighbors;
-    std::unordered_set<uint64_t> visited;
-    std::vector<uint64_t> to_process;
 
-    // Start with direct neighbors
-    for (const Face& face : world.faces) {
-        if (face.a == vertexID || face.b == vertexID || face.c == vertexID) {
-            if (face.a != vertexID && !visited.count(face.a)) {
-                visited.insert(face.a);
-                to_process.push_back(face.a);
-            }
-            if (face.b != vertexID && !visited.count(face.b)) {
-                visited.insert(face.b);
-                to_process.push_back(face.b);
-            }
-            if (face.c != vertexID && !visited.count(face.c)) {
-                visited.insert(face.c);
-                to_process.push_back(face.c);
-            }
-        }
-    }
+    return world.vertices[vertexID].getNeighbors(maxDistanceKM);
 
-    // Expand to neighbors within distance
-    while (!to_process.empty()) {
-        uint64_t current_id = to_process.back();
-        to_process.pop_back();
 
-        double dist = sphericalDistanceCartesian(world.vertices[current_id], center, world.radius);
-        if (dist <= maxDistanceKM) {
-            neighbors.push_back(current_id);
+    // const Vertex& center = world.vertices[vertexID];
+    // std::vector<uint64_t> neighbors;
+    // std::mutex neighbors_mutex;
+    // std::unordered_set<uint64_t> visited;
+    // std::queue<uint64_t> to_process;
+    // bool keep_processing{true};
 
-            // Add this vertex's neighbors to processing queue
-            for (const Face& face : world.faces) {
-                if (face.a == current_id || face.b == current_id || face.c == current_id) {
-                    if (face.a != current_id && !visited.count(face.a)) {
-                        visited.insert(face.a);
-                        to_process.push_back(face.a);
-                    }
-                    if (face.b != current_id && !visited.count(face.b)) {
-                        visited.insert(face.b);
-                        to_process.push_back(face.b);
-                    }
-                    if (face.c != current_id && !visited.count(face.c)) {
-                        visited.insert(face.c);
-                        to_process.push_back(face.c);
-                    }
-                }
-            }
-        }
-    }
+    // // Start with direct neighbors
+    // for (const Face& face : world.faces) {
+    //     if (face.a == vertexID || face.b == vertexID || face.c == vertexID) {
+    //         if (face.a != vertexID && !visited.count(face.a)) {
+    //             visited.insert(face.a);
+    //             to_process.push(face.a);
+    //         }
+    //         if (face.b != vertexID && !visited.count(face.b)) {
+    //             visited.insert(face.b);
+    //             to_process.push(face.b);
+    //         }
+    //         if (face.c != vertexID && !visited.count(face.c)) {
+    //             visited.insert(face.c);
+    //             to_process.push(face.c);
+    //         }
+    //     }
+    // }
 
-    return neighbors;
+    // auto worker = [&]() {
+    //     while (keep_processing) {
+    //         uint64_t current_id;
+    //         {
+    //             std::lock_guard<std::mutex> lock(neighbors_mutex);
+    //             if (to_process.empty()) {
+    //                 return;
+    //             }
+    //             current_id = to_process.front();
+    //             to_process.pop();
+    //         }
+
+    //         double dist = sphericalDistanceCartesian(world.vertices[current_id], center, world.radius);
+    //         if (dist <= maxDistanceKM) {
+    //             std::lock_guard<std::mutex> lock(neighbors_mutex);
+    //             neighbors.push_back(current_id);
+
+    //             // Add neighbors to queue
+    //             for (const Face& face : world.faces) {
+    //                 if (face.a == current_id || face.b == current_id || face.c == current_id) {
+    //                     if (face.a != current_id && visited.insert(face.a).second) {
+    //                         to_process.push(face.a);
+    //                     }
+    //                     if (face.b != current_id && visited.insert(face.b).second) {
+    //                         to_process.push(face.b);
+    //                     }
+    //                     if (face.c != current_id && visited.insert(face.c).second) {
+    //                         to_process.push(face.c);
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    // };
+
+    // // Determine number of threads
+    // unsigned num_threads = std::thread::hardware_concurrency();
+    // if (num_threads == 0) num_threads = 2; // fallback
+
+    // // Launch worker threads
+    // std::vector<std::future<void>> futures;
+    // for (unsigned i = 0; i < num_threads; ++i) {
+    //     futures.emplace_back(std::async(std::launch::async, worker));
+    // }
+
+    // // Wait for all threads to complete
+    // for (auto& future : futures) {
+    //     future.get();
+    // }
+    // return neighbors;
 }
 
 std::vector<Face> findSphericalNeighborFacesThreaded(WorldState world, Face face, double maxDistanceKM) {
@@ -845,56 +888,102 @@ WorldState initializeWorld(uint64_t subdivisions = 3, double elevationRange = 10
 }
 
 void simulateSurfaceWaterFlow(WorldState& world) {
-    for (uint64_t i = 0; i < world.vertices.size(); ++i) {
+    const size_t numVertices = world.vertices.size();
+    std::vector<std::future<void>> futures;
+    const size_t numThreads = std::thread::hardware_concurrency();
+    const size_t chunkSize = (numVertices + numThreads - 1) / numThreads;
+
+    // First pass: calculate potential flows in parallel
+    std::vector<std::vector<std::pair<uint64_t, double>>> allPotentialFlows(numVertices);
+    std::vector<double> outflows(numVertices, 0.0);
+
+    for (size_t chunk = 0; chunk < numThreads; ++chunk) {
+        const size_t start = chunk * chunkSize;
+        const size_t end = std::min(start + chunkSize, numVertices);
+        
+        futures.emplace_back(std::async(std::launch::async, [&, start, end]() {
+            for (uint64_t i = start; i < end; ++i) {
+                Vertex& vertex = world.vertices[i];
+                if (vertex.surfaceWater <= 0) continue;
+
+                std::vector<uint64_t> neighbors = findSphericalNeighborsThreaded(world, i, 2000.0);
+                if (neighbors.empty()) continue;
+
+                std::vector<std::pair<uint64_t, double>> potentialFlows;
+                double outflow = 0.0;
+
+                for (uint64_t neighborID : neighbors) {
+                    Vertex& neighbor = world.vertices[neighborID];
+                    std::vector<Face> crossed = getCrossedFaces(world, i, neighborID);
+                    double crossedfriction = 0.0;
+                    for (Face crossedface : crossed) {
+                        crossedfriction += crossedface.friction;
+                    }
+                    double facefrictions = crossedfriction / crossed.size();
+                    double sourceHead = vertex.elevation + (vertex.surfaceWater * 0.001);
+                    double targetHead = neighbor.elevation + (neighbor.surfaceWater * 0.001);
+                    if (sourceHead <= targetHead) continue;
+                    
+                    double distance = sphericalDistanceCartesian(vertex, neighbor, world.radius);
+                    double slope = (sourceHead - targetHead) / distance;
+                    double flow = (1.0/facefrictions) * sqrt(slope) * (vertex.surfaceWater * 0.001);
+                    double flowAmount = flow * world.timestepHour() * 1000.0;
+                    potentialFlows.emplace_back(neighborID, flowAmount);
+                    outflow += flowAmount;
+                }
+
+                double maxOut = vertex.surfaceWater * 0.5;
+                if (outflow > maxOut) {
+                    double scaleFactor = maxOut / outflow;
+                    for (std::pair<uint64_t, double>& flow : potentialFlows) {
+                        flow.second *= scaleFactor;
+                    }
+                    outflow = maxOut;
+                }
+
+                allPotentialFlows[i] = std::move(potentialFlows);
+                outflows[i] = outflow;
+            }
+        }));
+    }
+
+    // Wait for all threads to finish first pass
+    for (auto& future : futures) {
+        future.get();
+    }
+    futures.clear();
+
+    // Second pass: apply flows (needs to be serial)
+    for (uint64_t i = 0; i < numVertices; ++i) {
         Vertex& vertex = world.vertices[i];
-        if (vertex.surfaceWater <= 0) continue;
-
-        // Find neighboring vertices
-        std::vector<uint64_t> neighbors = findSphericalNeighborsThreaded(world, i, 2000.0);
-        
-        if (neighbors.empty()) continue;
-        double outflow = 0.0;
-        std::vector<std::pair<uint64_t, double>> potentialFlows;
-        // Find the lowest neighbor
-        // uint64_t lowest_neighbor = i;
-        // double lowest_elevation = vertex.elevation + (vertex.surfaceWater * 0.1);
-        
-        for (uint64_t neighborID : neighbors) {
-            Vertex& neighbor = world.vertices[neighborID];
-            std::vector<Face> crossed = getCrossedFaces(world, i, neighborID);
-            double crossedfriction = 0.0;
-            for (Face crossedface : crossed){
-                crossedfriction += crossedface.friction;
-            }
-            double facefrictions = crossedfriction / crossed.size();
-            double sourceHead = vertex.elevation + (vertex.surfaceWater * 0.001);
-            double targetHead = neighbor.elevation + (neighbor.surfaceWater * 0.001);
-            if (sourceHead <= targetHead) continue;
-            double distance = sphericalDistanceCartesian(vertex, neighbor, world.radius);
-            double slope = (sourceHead - targetHead) / distance;
-            double flow = (1.0/facefrictions) * sqrt(slope) * (vertex.surfaceWater * 0.001);
-            double flowAmount = flow * world.timestepHour() * 1000.0;
-            potentialFlows.emplace_back(neighborID, flowAmount);
-            outflow += flowAmount;
-        }
-
-        double maxOut = vertex.surfaceWater * 0.5;
-        if (outflow > maxOut) {
-            double scaleFactor = maxOut / outflow;
-            for (std::pair<uint64_t, double>& flow : potentialFlows) {
-                flow.second *= scaleFactor;
-            }
-            outflow = maxOut;
-        }
-        
-        for (const std::pair<uint64_t, double>& flow : potentialFlows) {
+        for (const std::pair<uint64_t, double>& flow : allPotentialFlows[i]) {
             double actual = std::min(flow.second, vertex.surfaceWater);
             vertex.surfaceWater -= actual;
             world.vertices[flow.first].surfaceWater += actual;
         }
     }
-    for (Face& face : world.faces){
-        face.surfaceWater = (world.vertices[face.a].surfaceWater + world.vertices[face.b].surfaceWater + world.vertices[face.c].surfaceWater) / 3.0;
+
+    // Parallel update of face surface water
+    const size_t numFaces = world.faces.size();
+    const size_t faceChunkSize = (numFaces + numThreads - 1) / numThreads;
+
+    for (size_t chunk = 0; chunk < numThreads; ++chunk) {
+        const size_t start = chunk * faceChunkSize;
+        const size_t end = std::min(start + faceChunkSize, numFaces);
+        
+        futures.emplace_back(std::async(std::launch::async, [&, start, end]() {
+            for (size_t i = start; i < end; ++i) {
+                Face& face = world.faces[i];
+                face.surfaceWater = (world.vertices[face.a].surfaceWater + 
+                                    world.vertices[face.b].surfaceWater + 
+                                    world.vertices[face.c].surfaceWater) / 3.0;
+            }
+        }));
+    }
+
+    // Wait for all face updates to complete
+    for (auto& future : futures) {
+        future.get();
     }
 }
 
@@ -973,12 +1062,13 @@ std::vector<WorldState> run_simulation(uint64_t subdivisions=3, double elevation
     world.timestepSeconds = timestepSeconds;
     std::vector<WorldState> worldhistory;
     worldhistory.push_back(world); // Store initial state
-
+    precomputeDistances(world);
     for (int i = 0; i < steps; ++i) {
+        std::cout << "Simulating step " << i << "/" << steps << std::endl;
         world = step(world);
         worldhistory.push_back(world);
-        std::cout << "Simulating step " << i << "/" << steps << std::endl;
     }
+    std::cout << "Simulating step " << steps << "/" << steps << std::endl;
     return worldhistory;
 }
 
