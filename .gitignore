@@ -180,3 +180,6 @@ cython_debug/
 spherical_simulation_save.pkl
 spherical_simulation_save.pkl
 main.bin
+.vscode/
+.vscode/c_cpp_properties.json
+.vscode/settings.json

@@ -9,7 +9,7 @@ from mpl_toolkits.mplot3d import Axes3D
 
 PLANET_RADIUS_KM = 6371.0
 SUBDIVISIONS = 3
-NUM_STEPS = 1000
+NUM_STEPS = 100
 cbar_obj = None  # colorbar is stupid. this fixes it.
 current_step = 0
 

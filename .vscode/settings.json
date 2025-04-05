@@ -98,6 +98,8 @@
         "coroutine": "cpp",
         "resumable": "cpp",
         "future": "cpp",
-        "queue": "cpp"
+        "queue": "cpp",
+        "__hash_table": "cpp",
+        "__string": "cpp"
     }
 }
