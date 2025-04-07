@@ -22,7 +22,6 @@ class Vertex:
 
 	def normalize(self):
 		norm = np.linalg.norm(self.pos)
-		# Increase epsilon slightly for robustness
 		if abs(norm) > 1e-10:
 			self.pos /= norm
 			self.x, self.y, self.z = self.pos
@@ -38,21 +37,13 @@ class Vertex:
 		return Vertex(cross_pos[0], cross_pos[1], cross_pos[2])
 
 	def __hash__(self):
-        # Use rounding before hashing for float stability
-		# Adjust precision as needed
 		rounded_pos = tuple(np.round(self.pos, 8))
 		return hash(rounded_pos)
-		# Old hash was sensitive to tiny floating point differences
-		# hx = struct.unpack('I', struct.pack('f', self.x))[0]
-		# hy = struct.unpack('I', struct.pack('f', self.y))[0]
-		# hz = struct.unpack('I', struct.pack('f', self.z))[0]
-		# return hx ^ (hy << 1) ^ (hz << 2)
 
 	def __eq__(self, other):
 		if not isinstance(other, Vertex):
 			return False
-		# Use a slightly larger tolerance if needed, depends on calculations
-		return np.allclose(self.pos, other.pos, atol=1e-8) # Slightly increased tolerance
+		return np.allclose(self.pos, other.pos, atol=1e-10)
 
 	def __repr__(self):
 		return f"Vertex({self.x:.4f}, {self.y:.4f}, {self.z:.4f})"
@@ -90,22 +81,16 @@ class Face:
 
 		norm = np.linalg.norm(face_normal)
 		if abs(norm) < 1e-10:
-			# Degenerate case: Fallback to centroid direction
 			centroid = self.centroid(world).pos
 			norm_c = np.linalg.norm(centroid)
 			if norm_c > 1e-9:
-				return centroid / norm_c # Use direction from origin to centroid
+				return centroid / norm_c
 			else:
-				# Extremely degenerate case (e.g., all vertices at origin?)
-				return np.array([0.0, 0.0, 1.0]) # Or some default
+				return np.array([0.0, 0.0, 1.0])
 
 		face_normal /= norm
-
-		# Ensure normal points outward (dot product with vertex position should be positive)
-		# Use centroid which is more robust for non-planar faces than just v0
 		if np.dot(face_normal, self.centroid(world).pos) < 0:
 			face_normal *= -1.0
-
 		return face_normal
 
 	def centroid(self, world: 'worldState') -> Vertex:
@@ -114,7 +99,6 @@ class Face:
 		if not verts:
 			return Vertex(0,0,0)
 		center_pos = np.mean([v.pos for v in verts], axis=0)
-		# Normalizing the centroid projects it onto the sphere surface near the face center
 		return Vertex(*center_pos).normalize()
 
 	# _validate_face and _segments_intersect remain the same
@@ -130,13 +114,13 @@ class Face:
 			normal = np.cross(points[1] - points[0], points[2] - points[0])
 			norm_val = np.linalg.norm(normal)
 			if norm_val < 1e-9: # Handle collinear points
-			    # Try different points if first 3 are collinear
-			    if n > 3:
-			        normal = np.cross(points[2] - points[1], points[3] - points[1])
-			        norm_val = np.linalg.norm(normal)
-			        if norm_val < 1e-9: # Still collinear, maybe problematic face
-			             # print(f"Warning: Could not determine normal for face validation {self.vertices}")
-			             return # Skip validation for potentially degenerate face
+				# Try different points if first 3 are collinear
+				if n > 3:
+					normal = np.cross(points[2] - points[1], points[3] - points[1])
+					norm_val = np.linalg.norm(normal)
+					if norm_val < 1e-9: # Still collinear, maybe problematic face
+							# print(f"Warning: Could not determine normal for face validation {self.vertices}")
+							return # Skip validation for potentially degenerate face
 			normal /= norm_val
 
 			dominant_axis = np.argmax(np.abs(normal))
@@ -151,20 +135,14 @@ class Face:
 						continue
 					a1, a2 = projected[i], projected[(i + 1) % n]
 					b1, b2 = projected[j], projected[(j + 1) % n]
-					
-					# Check intersection only if segments are not collinear and bounding boxes overlap
 					if self._segments_intersect(a1, a2, b1, b2):
-					    # Optional: Add more detail about which vertices/edges intersected
 						raise ValueError(f"Face {self.vertices} has self-intersecting edges between edge {i}-{ (i + 1) % n} and {j}-{(j + 1) % n}")
 
 	def _segments_intersect(self, p1, p2, p3, p4):
-		"""Check if line segment 'p1p2' intersects line segment 'p3p4'."""
 		def orientation(p, q, r):
-			val = (q[1] - p[1]) * (r[0] - q[0]) - \
-				  (q[0] - p[0]) * (r[1] - q[1])
-			if abs(val) < 1e-7: return 0  # Collinear
-			return 1 if val > 0 else 2  # Clockwise or Counterclockwise
-
+			val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
+			if abs(val) < 1e-7: return 0
+			return 1 if val > 0 else 2
 		def on_segment(p, q, r):
 			return (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
 					q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1]))
@@ -176,22 +154,17 @@ class Face:
 
 		# General case
 		if o1 != o2 and o3 != o4:
-			# Check if intersection point is *not* an endpoint
-			# Avoid flagging adjacent edges sharing a vertex as intersecting
 			eps = 1e-9
 			if np.linalg.norm(np.array(p1)-np.array(p3)) < eps or \
 			   np.linalg.norm(np.array(p1)-np.array(p4)) < eps or \
 			   np.linalg.norm(np.array(p2)-np.array(p3)) < eps or \
 			   np.linalg.norm(np.array(p2)-np.array(p4)) < eps:
-				return False # Shared endpoint
+				return False
 			return True
-
-		# Special Cases (Collinear) - Intersect only if they overlap
 		if o1 == 0 and on_segment(p1, p3, p2): return True
 		if o2 == 0 and on_segment(p1, p4, p2): return True
 		if o3 == 0 and on_segment(p3, p1, p4): return True
 		if o4 == 0 and on_segment(p3, p2, p4): return True
-
 		return False
 
 	def area(self, world):
@@ -202,7 +175,7 @@ class Face:
 		verts_pos = [world.vertices[idx].pos for idx in self.vertices]
 
 		# Girard's theorem for spherical polygons
-		angle_sum = 0
+		angle_sum = 0.0
 		for i in range(n):
 			p0 = verts_pos[(i - 1 + n) % n] # Previous vertex
 			p1 = verts_pos[i]               # Current vertex
@@ -244,7 +217,6 @@ class Face:
 
 		return area_unit_sphere * world.radius**2
 
-
 	def __repr__(self):
 		return f"Face{self.vertices}"
 
@@ -271,63 +243,43 @@ class worldState:
 
 		# Cache for subdivision: key=sorted tuple(v_idx1, v_idx2), value=midpoint_idx
 		self._subdivision_cache: Dict[Tuple[int, int], int] = {}
-		# Optional: Cache for unique vertices during creation/subdivision
-		# key=tuple(rounded coords), value=vertex_idx
 		self._vertex_pos_cache: Dict[Tuple[float, ...], int] = {}
 
-	# timeStep methods remain the same...
+	# timeStep methods remain the same
 	def timeStepHour(self) -> float: return float(self.timestepSeconds) / 3600.0
 	def timeStepDay(self): return float(self.timestepSeconds) / 86400.0
 	def timeStepYear(self): return float(self.timestepSeconds) / 31556952.0
 
 	def _add_vertex(self, vertex: Vertex) -> int:
-		"""
-		Adds a vertex if it's not already present (using position-based cache),
-		returns index. Normalizes the vertex before adding.
-		"""
 		norm_vertex = vertex.normalize()
-		# Use rounded position tuple as key for caching/lookup
-		key = tuple(np.round(norm_vertex.pos, 8)) # Adjust precision if needed
-
+		key = tuple(np.round(norm_vertex.pos, 8))
 		if key in self._vertex_pos_cache:
 			return self._vertex_pos_cache[key]
 		else:
 			idx = len(self.vertices)
 			self.vertices.append(norm_vertex)
 			self._vertex_pos_cache[key] = idx
-			# Also update the __eq__ based lookup if needed, but cache is faster
 			return idx
 
 	def _get_or_create_midpoint(self, v1_idx: int, v2_idx: int) -> int:
-		"""Gets existing or creates a new normalized midpoint vertex."""
-		# Ensure consistent key order
 		key = tuple(sorted((v1_idx, v2_idx)))
 		if key in self._subdivision_cache:
 			return self._subdivision_cache[key]
-
 		v1 = self.vertices[v1_idx]
 		v2 = self.vertices[v2_idx]
-
-		# Calculate midpoint - normalization happens in _add_vertex
 		mid_pos = (v1.pos + v2.pos) / 2.0
 		midpoint_vertex = Vertex(mid_pos[0], mid_pos[1], mid_pos[2])
-
-		# Add vertex (handles normalization and prevents duplicates via _vertex_pos_cache)
 		mid_idx = self._add_vertex(midpoint_vertex)
-
 		self._subdivision_cache[key] = mid_idx
 		return mid_idx
 
 	def _normalize_all_vertices(self):
-		"""Normalizes all vertices and rebuilds position cache."""
 		self._vertex_pos_cache.clear()
 		for i, v in enumerate(self.vertices):
 			v.normalize()
 			key = tuple(np.round(v.pos, 8))
-			# Handle potential duplicates after normalization if they weren't caught before
 			if key in self._vertex_pos_cache:
 				print(f"Warning: Duplicate vertex found after normalization: Index {i} same as {self._vertex_pos_cache[key]}")
-				# This indicates an issue earlier, potentially in vertex creation/merging logic
 			self._vertex_pos_cache[key] = i
 
 	# --- Base Mesh Generators ---
@@ -335,13 +287,10 @@ class worldState:
 	def icosphereBase(self):
 		self.vertices = []
 		self.faces = []
-		self._vertex_pos_cache = {} # Clear caches
+		self._vertex_pos_cache = {}
 		self._subdivision_cache = {}
-
-		# Add base icosahedron vertices using _add_vertex to populate cache
 		raw_verts = self._get_icosahedron_vertices()
 		ico_indices = [self._add_vertex(v) for v in raw_verts]
-		# Ensure base vertices were added correctly
 		if len(self.vertices) != 12:
 		     print(f"Warning: Expected 12 base vertices for icosahedron, got {len(self.vertices)}")
 
@@ -391,11 +340,10 @@ class worldState:
 				# Need to recreate the face if reversal is needed: self.faces[i] = Face(*f.vertices[::-1])
 
 		self.subdivide()
-		# self._normalize_all_vertices() # Optional check
+		self._normalize_all_vertices() # Optional check
 		return self
 
 	def _get_icosahedron_vertices(self) -> List[Vertex]:
-		# Vertices remain the same, normalization handled by _add_vertex
 		return [
 			Vertex(-1, PHI, 0), Vertex(1, PHI, 0), Vertex(-1, -PHI, 0), Vertex(1, -PHI, 0),
 			Vertex(0, -1, PHI), Vertex(0, 1, PHI), Vertex(0, -1, -PHI), Vertex(0, 1, -PHI),
@@ -403,8 +351,6 @@ class worldState:
 		]
 
 	def _get_icosahedron_faces_indices(self) -> List[Tuple[int, int, int]]:
-		"""Returns the 20 triangular faces of a standard icosahedron using vertex indices 0-11."""
-		# Raw indices, assume vertices 0-11 correspond to _get_icosahedron_vertices
 		return [
 			(0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
 			(1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
@@ -413,17 +359,12 @@ class worldState:
 		]
 
 	def truncatedIcosahedronBase(self):
-		"""Generates a sphere-like shape based on a truncated icosahedron (soccer ball)."""
 		self.vertices = []
 		self.faces = []
 		self._vertex_pos_cache = {}
 		self._subdivision_cache = {}
-
 		icosa_verts_raw = self._get_icosahedron_vertices()
 		icosa_faces_indices = self._get_icosahedron_faces_indices()
-
-		# Add icosahedron vertices to our world using _add_vertex
-		# Need to store the mapping if _add_vertex merges any (shouldn't happen here)
 		icosa_vertex_map = {i: self._add_vertex(v) for i, v in enumerate(icosa_verts_raw)}
 		# Check if map is identity 0->0, 1->1 etc.
 		if any(k != v for k, v in icosa_vertex_map.items()):
@@ -436,14 +377,11 @@ class worldState:
 		# Key: tuple(sorted(original_v_idx1, original_v_idx2)), Value: (new_v_idx_near_v1, new_v_idx_near_v2)
 		edge_vertex_map: Dict[Tuple[int, int], Tuple[int, int]] = {}
 		processed_edges = set()
-
-		# 1. Generate vertices by trisection of icosahedron edges
 		for face_indices in icosa_faces_indices:
 			for i in range(3):
 				orig_idx1 = face_indices[i]
 				orig_idx2 = face_indices[(i + 1) % 3]
 				edge_key = tuple(sorted((orig_idx1, orig_idx2)))
-
 				if edge_key not in processed_edges:
 					processed_edges.add(edge_key)
 					# Get the actual Vertex objects using mapped indices
@@ -470,9 +408,6 @@ class worldState:
 					else: # v2 corresponds to the smaller original index
 						edge_vertex_map[edge_key] = (idx23, idx13)
 
-
-		# Helper using the edge_vertex_map
-		# Takes ORIGINAL icosahedron indices, returns NEW world index
 		def get_vertex_third(v_start_orig_idx, v_end_orig_idx):
 			edge_key = tuple(sorted((v_start_orig_idx, v_end_orig_idx)))
 			idx_near_low, idx_near_high = edge_vertex_map[edge_key]
@@ -524,7 +459,7 @@ class worldState:
 			angles = []
 			for i, t_vec in enumerate(tangent_vectors):
 				norm_t = np.linalg.norm(t_vec)
-				if norm_t < 1e-9: angle = 0.0 # Should not happen for distinct neighbors
+				if norm_t < 1e-9: angle = 0.0
 				else:
 					t_vec /= norm_t
 					cos_theta = np.clip(np.dot(ref_vec, t_vec), -1.0, 1.0)
@@ -534,18 +469,14 @@ class worldState:
 						angle = 2 * np.pi - angle
 				# Store angle and the ORIGINAL neighbor index
 				angles.append((angle, unique_neighbors[i]))
-
-			# Sort neighbors by angle
 			angles.sort()
 			ordered_neighbors_orig_indices = [neighbor_orig_idx for angle, neighbor_orig_idx in angles]
 			icosa_vertex_ordered_neighbors[orig_v_idx] = ordered_neighbors_orig_indices
 
 
-		# Create Pentagons (around original icosahedron vertices)
 		added_pentagons_centers = set()
 		for orig_v_idx in range(len(icosa_verts_raw)):
 			if orig_v_idx in added_pentagons_centers: continue
-
 			ordered_neighbors = icosa_vertex_ordered_neighbors.get(orig_v_idx)
 			if not ordered_neighbors or len(ordered_neighbors) != 5:
 				print(f"Error: Could not get 5 ordered neighbors for original vertex {orig_v_idx}")
@@ -603,65 +534,136 @@ class worldState:
 
 		return self
 
-
+	# --- MODIFIED SUBDIVIDE METHOD ---
 	def subdivide(self):
 		"""
-		Subdivides each face of the mesh. Triangles->4 triangles. N-gons->N triangles + 1 N-gon.
+		Subdivides faces of the mesh based on detail level.
+		Only subdivides faces whose area is >= 50% of the largest face's area
+		at each subdivision level to promote more uniform face sizes.
 		"""
 		if self.details <= 0: return
 
-		for _ in range(self.details):
-			new_faces = []
-			self._subdivision_cache = {} # Clear cache for each subdivision level
+		print(f"Starting subdivision process (details={self.details})")
 
-			current_faces = self.faces[:] # Iterate over a copy
-			self.faces = [] # Reset faces for the new level
+		for level in range(self.details):
+			print(f" Subdividing Level {level + 1}/{self.details}...")
+			current_faces = self.faces[:] # Copy faces from previous level
+			if not current_faces:
+				print("  No faces to subdivide.")
+				break # Stop if there are no faces
 
-			for face in current_faces:
-				vert_indices = face.vertices
-				n = len(vert_indices)
-
-				# 1. Get or create midpoints for all edges of the face
-				midpoint_indices = []
+			# 1. Calculate areas of all current faces
+			face_areas = []
+			valid_faces_indices = [] # Keep track of indices of faces with calculable area
+			print(f"  Calculating areas for {len(current_faces)} faces...")
+			for i, face in enumerate(current_faces):
 				try:
-					for i in range(n):
-						v1_idx = vert_indices[i]
-						v2_idx = vert_indices[(i + 1) % n]
-						# Ensure indices are valid before getting midpoint
-						if v1_idx >= len(self.vertices) or v2_idx >= len(self.vertices):
-							raise IndexError(f"Vertex index out of bounds in subdivide. V1: {v1_idx}, V2: {v2_idx}, Max Index: {len(self.vertices)-1}, Face: {face.vertices}")
-						mid_idx = self._get_or_create_midpoint(v1_idx, v2_idx)
-						midpoint_indices.append(mid_idx)
-				except IndexError as e:
-					print(f"Error during midpoint creation for face {face.vertices}: {e}")
-					# Decide how to handle: skip face, stop, etc.
-					continue # Skip this face for subdivision
+					area = face.area(self)
+					if not np.isfinite(area) or area < 0:
+					    print(f"  Warning: Invalid area ({area}) calculated for face {face.vertices}. Skipping.")
+					    face_areas.append(-1.0) # Mark as invalid/skip
+					else:
+					    face_areas.append(area)
+					    valid_faces_indices.append(i)
+				except Exception as e:
+					print(f"  Error calculating area for face {face.vertices}: {e}. Skipping this face.")
+					face_areas.append(-1.0) # Mark as invalid/skip
 
+			# Filter out areas of skipped faces before finding max
+			valid_areas = [face_areas[i] for i in valid_faces_indices]
 
-				# 2. Create new faces based on n
-				if n == 3:
-					# Standard triangle subdivision -> 4 triangles
-					v0, v1, v2 = vert_indices
-					m01, m12, m20 = midpoint_indices
-					new_faces.append(Face(v0, m01, m20))
-					new_faces.append(Face(v1, m12, m01))
-					new_faces.append(Face(v2, m20, m12))
-					new_faces.append(Face(m01, m12, m20)) # Center triangle
-				elif n > 3:
-					# N-gon subdivision -> n triangles + 1 central n-gon
-					# Central n-gon uses the midpoint indices in order
-					new_faces.append(Face(*midpoint_indices))
+			if not valid_areas:
+				print("  No valid face areas calculated. Stopping subdivision.")
+				break
 
-					# Create n triangles connecting original vertices to adjacent midpoints
-					for i in range(n):
-						v_curr = vert_indices[i]
-						m_next = midpoint_indices[i] # Midpoint of (v_curr, v_next)
-						m_prev = midpoint_indices[(i - 1 + n) % n] # Midpoint of (v_prev, v_curr)
-						new_faces.append(Face(v_curr, m_next, m_prev))
-				# else: n < 3 is invalid and handled by Face constructor
+			# 2. Determine max area and threshold
+			max_area = max(valid_areas) if valid_areas else 0
+			# Add epsilon to max_area check to handle cases where all areas are tiny/zero
+			if max_area < 1e-12:
+				print("  Max face area is near zero. No subdivision will occur this level.")
+				# Keep existing faces and stop further subdivision for this world
+				# Or decide if you want to subdivide everything if max_area is effectively zero
+				# For now, we stop subdividing if faces are negligible.
+				self.details = level # Adjust detail level to reflect performed subdivisions
+				break
 
-			self.faces.extend(new_faces) # Add newly created faces for this level
-		# Normalization happens implicitly via _get_or_create_midpoint -> _add_vertex
+			area_threshold = 0.5 * max_area
+			print(f"  Max face area: {max_area:.4e}, Threshold for subdivision: {area_threshold:.4e}")
+
+			# 3. Process faces: Subdivide large ones, keep small ones
+			new_faces_next_level = []
+			self._subdivision_cache = {} # Reset cache for this level
+			faces_subdivided = 0
+			faces_kept = 0
+
+			print("  Processing faces for subdivision/keeping...")
+			for i, face in enumerate(current_faces):
+				# Use the pre-calculated area. Skip if marked invalid (-1.0).
+				current_area = face_areas[i]
+				if current_area < 0:
+				    continue # Skip faces that had area calculation errors
+
+				# Check if face should be subdivided
+				if current_area >= area_threshold:
+					# --- Subdivide this face ---
+					faces_subdivided += 1
+					vert_indices = face.vertices
+					n = len(vert_indices)
+					midpoint_indices = []
+					try:
+						for j in range(n):
+							v1_idx = vert_indices[j]
+							v2_idx = vert_indices[(j + 1) % n]
+							if v1_idx >= len(self.vertices) or v2_idx >= len(self.vertices):
+								raise IndexError(f"Vertex index out of bounds. V1:{v1_idx}, V2:{v2_idx}, Max:{len(self.vertices)-1}")
+							mid_idx = self._get_or_create_midpoint(v1_idx, v2_idx)
+							midpoint_indices.append(mid_idx)
+					except IndexError as e:
+						print(f"  Error getting midpoints for face {face.vertices}: {e}. Skipping subdivision for this face.")
+						new_faces_next_level.append(face) # Keep the original face if subdivision fails
+						faces_subdivided -= 1
+						faces_kept += 1
+						continue
+					except Exception as e:
+						print(f"  Unexpected error during midpoint creation for face {face.vertices}: {e}. Skipping subdivision.")
+						new_faces_next_level.append(face)
+						faces_subdivided -= 1
+						faces_kept += 1
+						continue
+
+					# Create new smaller faces based on n
+					if n == 3:
+						v0, v1, v2 = vert_indices
+						m01, m12, m20 = midpoint_indices
+						new_faces_next_level.append(Face(v0, m01, m20))
+						new_faces_next_level.append(Face(v1, m12, m01))
+						new_faces_next_level.append(Face(v2, m20, m12))
+						new_faces_next_level.append(Face(m01, m12, m20)) # Center triangle
+					elif n > 3:
+						# Central n-gon uses the midpoint indices
+						new_faces_next_level.append(Face(*midpoint_indices))
+						# N triangles around the edges
+						for j in range(n):
+							v_curr = vert_indices[j]
+							m_next = midpoint_indices[j]
+							m_prev = midpoint_indices[(j - 1 + n) % n]
+							new_faces_next_level.append(Face(v_curr, m_next, m_prev))
+					# else: n < 3 already handled by Face constructor / area calculation skip
+
+				else:
+					# --- Keep this face (it's too small) ---
+					faces_kept += 1
+					new_faces_next_level.append(face)
+
+			# Update the world's faces for the next iteration or final result
+			self.faces = new_faces_next_level
+			print(f"  Level {level + 1} complete. Faces subdivided: {faces_subdivided}, Faces kept: {faces_kept}. Total faces: {len(self.faces)}")
+
+		print(f"Subdivision finished. Final face count: {len(self.faces)}")
+		# Final normalization isn't strictly necessary if _add_vertex works correctly,
+		# but can be a safety measure after many operations.
+		# print(" Normalizing all vertices post-subdivision...")
+		# self._normalize_all_vertices()
 
 
 	def duplicateLayers(self):
