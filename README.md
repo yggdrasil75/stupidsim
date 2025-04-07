@@ -1,16 +1,20 @@
 C++ version install instructions:
-```git clone https://github.com/yggdrasil75/stupidsim
+```
+git clone https://github.com/yggdrasil75/stupidsim
 cd stupdidsim
-python -m venv venv```
+python -m venv venv
+```
 
 ON WINDOWS:
 `venv\scripts\activate`
 ON LINUX:
 `source venv/bin/activate`
 
-```python setup.py build_ext --inplace
-python main.py```
-
+on both:
+```
+python setup.py build_ext --inplace
+python main.py
+```
 yet another rewrite. still only a couple weeks in so need to finalize the goals before a month to avoid making this too unstable for anyone else to even bother looking at.
 Current goals:
 Create a reasonably realistic starting point using general world gen techniques to generate a basic world.
