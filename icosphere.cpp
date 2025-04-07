@@ -266,63 +266,12 @@ std::vector<Face> subdivide_icosphere(uint64_t subdivisions, std::vector<Vertex>
             const Vertex& b = vertices[face.b];
             const Vertex& c = vertices[face.c];
 
-            // Get or create midpoints for each edge
-            //uint64_t mid_ab, mid_bc, mid_ca;
-
-            // Edge AB
             uint64_t mid_ab = get_or_create_midpoint(face.a, face.b);
 
-            // uint64_t key_ab = (static_cast<uint64_t>(std::min(face.a, face.b)) << 32 | std::max(face.a, face.b));
-            // auto it_ab = edge_vertices.find(key_ab);
-            // if (it_ab == edge_vertices.end()) {
-            //     Vertex mid = (a + b) / 2.0;
-            //     //std::cout << "started: " << mid << std::endl;
-            //     mid = mid.normalized();
-            //     //std::cout << "going: " << mid << std::endl;
-            //     vertices.push_back(mid);
-            //     mid_ab = vertices.size() - 1;
-            //     edge_vertices[key_ab] = mid_ab;
-            //     vertex_to_index[mid] = mid_ab;
-            // } else {
-            //     mid_ab = it_ab->second;
-            // }
-
-
-            // Edge BC
             uint64_t mid_bc = get_or_create_midpoint(face.b, face.c);
 
-            // uint64_t key_bc = (static_cast<uint64_t>(std::min(face.b, face.c)) << 32 | std::max(face.b, face.c));
-            // auto it_bc = edge_vertices.find(key_bc);
-            // if (it_bc == edge_vertices.end()) {
-            //     Vertex mid = (b + c) / 2.0;
-            //     //std::cout << "started: " << mid << std::endl;
-            //     mid = mid.normalized();
-            //     //std::cout << "going: " << mid << std::endl;
-            //     vertices.push_back(mid);
-            //     mid_bc = vertices.size() - 1;
-            //     edge_vertices[key_bc] = mid_bc;
-            //     vertex_to_index[mid] = mid_bc;
-            // } else {
-            //     mid_bc = it_bc->second;
-            // }
-
-            // Edge CA
             uint64_t mid_ca = get_or_create_midpoint(face.c, face.a);
 
-            // uint64_t key_ca = (static_cast<uint64_t>(std::min(face.c, face.a)) << 32 | std::max(face.c, face.a));
-            // auto it_ca = edge_vertices.find(key_ca);
-            // if (it_ca == edge_vertices.end()) {
-            //     Vertex mid = (c + a) / 2.0;
-            //     //std::cout << "started: " << mid << std::endl;
-            //     mid = mid.normalized();
-            //     //std::cout << "going: " << mid << std::endl;
-            //     vertices.push_back(mid);
-            //     mid_ca = vertices.size() - 1;
-            //     edge_vertices[key_ca] = mid_ca;
-            //     vertex_to_index[mid] = mid_ca;
-            // } else {
-            //     mid_ca = it_ca->second;
-            // }
 
             new_faces.emplace_back(face.a, mid_ab, mid_ca);
             new_faces.emplace_back(mid_ab, face.b, mid_bc);
@@ -336,10 +285,6 @@ std::vector<Face> subdivide_icosphere(uint64_t subdivisions, std::vector<Vertex>
             v = v.normalized();
         }
     }
-
-    // After all subdivisions are done, validate the vertices
-
-    // Check for extreme values and duplicates
     for (size_t i = 0; i < vertices.size(); ++i) {
         const Vertex& v = vertices[i];
         
@@ -348,13 +293,6 @@ std::vector<Face> subdivide_icosphere(uint64_t subdivisions, std::vector<Vertex>
             std::isinf(v.x) || std::isinf(v.y) || std::isinf(v.z)) {
             throw std::runtime_error("Vertex contains NaN or infinite values");
         }
-        // // Check for duplicates with other vertices
-        // for (size_t j = i + 1; j < vertices.size(); ++j) {
-        //     const Vertex& other = vertices[j];
-        //     if (v == other) {
-        //         throw std::runtime_error("Duplicate vertices found");
-        //     }
-        // }
     }
 
     return faces;

@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+#why dont these work?
+settings.json
+.vscode/
+.vscode/settings.json
+
 # C extensions
 *.so
 
@@ -182,4 +187,6 @@ spherical_simulation_save.pkl
 main.bin
 .vscode/
 .vscode/c_cpp_properties.json
+.vscode/settings.json
+.vscode/settings.json
 .vscode/settings.json
