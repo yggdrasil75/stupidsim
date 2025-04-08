@@ -1,17 +1,16 @@
 import struct
 from typing import Dict, List, Tuple
 from matplotlib import pyplot as plt
-# Import necessary for solid 3D polygons
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.widgets import RadioButtons, Slider
 import numpy as np
 from collections import defaultdict
-import matplotlib.cm as cm # Import colormaps
-import matplotlib.colors as colors # Import color normalization
+import matplotlib.cm as cm 
+import matplotlib.colors as colors
 
 PHI = (1.0 + np.sqrt(5.0)) / 2.0
 cmap = cm.get_cmap('RdYlGn_r')
-norm = colors.Normalize(vmin=-1.0, vmax=1.0) # Map Z-normal range [-1, 1] to [0, 1]
+norm = colors.Normalize(vmin=-1.0, vmax=1.0)
 
 class Vertex:
 	def __init__(self, x, y, z):
@@ -25,8 +24,6 @@ class Vertex:
 		if abs(norm) > 1e-10:
 			self.pos /= norm
 			self.x, self.y, self.z = self.pos
-		# else: # Optional: handle zero vector case if it occurs
-			# print("Warning: Zero vector encountered during normalization.")
 		return self
 
 	def dotProd(self, other):
@@ -61,15 +58,15 @@ class Face:
 		except IndexError as e:
 			max_idx = max(self.vertices) if self.vertices else -1
 			print(f"Error: Vertex index out of bounds in face {self.vertices}. Max index: {max_idx}, Num vertices: {len(world.vertices)}. Error: {e}")
-			raise # Re-raise the exception
+			raise
 
 	def normal(self, world: 'worldState') -> np.ndarray:
 		"""Calculates the approximate normal vector of the face (pointing outwards)."""
 		verts = self.get_vertices(world)
 		if len(verts) < 3:
-			return np.array([0.0, 0.0, 0.0]) # Cannot compute normal
+			return np.array([0.0, 0.0, 0.0]) 
 
-		# Use Newell's method for robustness with non-planar faces on the sphere
+		
 		face_normal = np.zeros(3, dtype=np.float64)
 		num_verts = len(verts)
 		for i in range(num_verts):
@@ -101,7 +98,6 @@ class Face:
 		center_pos = np.mean([v.pos for v in verts], axis=0)
 		return Vertex(*center_pos).normalize()
 
-	# _validate_face and _segments_intersect remain the same
 	def _validate_face(self, world):
 		"""Ensure the face is simple (non-intersecting edges)"""
 		n = len(self.vertices)
@@ -113,14 +109,10 @@ class Face:
 			
 			normal = np.cross(points[1] - points[0], points[2] - points[0])
 			norm_val = np.linalg.norm(normal)
-			if norm_val < 1e-9: # Handle collinear points
-				# Try different points if first 3 are collinear
+			if norm_val < 1e-9:
 				if n > 3:
 					normal = np.cross(points[2] - points[1], points[3] - points[1])
 					norm_val = np.linalg.norm(normal)
-					if norm_val < 1e-9: # Still collinear, maybe problematic face
-							# print(f"Warning: Could not determine normal for face validation {self.vertices}")
-							return # Skip validation for potentially degenerate face
 			normal /= norm_val
 
 			dominant_axis = np.argmax(np.abs(normal))
@@ -152,7 +144,6 @@ class Face:
 		o3 = orientation(p3, p4, p1)
 		o4 = orientation(p3, p4, p2)
 
-		# General case
 		if o1 != o2 and o3 != o4:
 			eps = 1e-9
 			if np.linalg.norm(np.array(p1)-np.array(p3)) < eps or \
@@ -174,19 +165,15 @@ class Face:
 
 		verts_pos = [world.vertices[idx].pos for idx in self.vertices]
 
-		# Girard's theorem for spherical polygons
 		angle_sum = 0.0
 		for i in range(n):
-			p0 = verts_pos[(i - 1 + n) % n] # Previous vertex
-			p1 = verts_pos[i]               # Current vertex
-			p2 = verts_pos[(i + 1) % n]     # Next vertex
+			p0 = verts_pos[(i - 1 + n) % n] 
+			p1 = verts_pos[i]
+			p2 = verts_pos[(i + 1) % n]
 
-			# Vectors from current vertex p1 to neighbors on the sphere surface
 			v1 = p0 - p1
 			v2 = p2 - p1
 
-            # Project vectors onto the tangent plane at p1
-            # Normal at p1 is p1 itself (for unit sphere)
 			tangent_v1 = v1 - np.dot(v1, p1) * p1
 			tangent_v2 = v2 - np.dot(v2, p1) * p1
 
@@ -194,25 +181,18 @@ class Face:
 			norm_tv2 = np.linalg.norm(tangent_v2)
 
 			if norm_tv1 < 1e-10 or norm_tv2 < 1e-10:
-				# Handle degenerate cases (e.g., duplicate vertices)
-				# print(f"Warning: Degenerate angle calculation in face {self.vertices} at vertex {i}")
-				angle = np.pi # Assume straight line if vectors are tiny/zero
+				angle = np.pi
 			else:
 				cos_angle = np.dot(tangent_v1, tangent_v2) / (norm_tv1 * norm_tv2)
 				angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
 
 			angle_sum += angle
 
-		# Spherical excess: Area = Sum of angles - (n - 2) * pi (for unit sphere)
 		area_unit_sphere = angle_sum - (n - 2) * np.pi
-		# Check for small negative areas due to floating point errors
 		if area_unit_sphere < 0 and abs(area_unit_sphere) < 1e-7:
-		     area_unit_sphere = 0.0
+				area_unit_sphere = 0.0
 		elif area_unit_sphere < 0:
-		    # This might indicate a winding order issue or complex self-intersection not caught
-		    # print(f"Warning: Negative spherical excess ({area_unit_sphere:.4e}) for face {self.vertices}. Angle sum: {angle_sum/np.pi:.3f}*pi")
-		    # For robustness, return 0 or abs value, but investigate the cause
-		    area_unit_sphere = abs(area_unit_sphere)
+			area_unit_sphere = abs(area_unit_sphere)
 
 
 		return area_unit_sphere * world.radius**2
@@ -222,7 +202,7 @@ class Face:
 
 class Plate:
 	def __init__(self):
-		self.vertices: List[int] = [] #list of vertex indices in plate
+		self.vertices: List[int] = [] 
 		pass
 
 	def move(self, oldvert: List[int], newvert: List[int]):
@@ -245,10 +225,9 @@ class worldState:
 		self._subdivision_cache: Dict[Tuple[int, int], int] = {}
 		self._vertex_pos_cache: Dict[Tuple[float, ...], int] = {}
 
-	# timeStep methods remain the same
 	def timeStepHour(self) -> float: return float(self.timestepSeconds) / 3600.0
-	def timeStepDay(self): return float(self.timestepSeconds) / 86400.0
-	def timeStepYear(self): return float(self.timestepSeconds) / 31556952.0
+	def timeStepDay(self) -> float: return float(self.timestepSeconds) / 86400.0
+	def timeStepYear(self) -> float: return float(self.timestepSeconds) / 31556952.0
 
 	def _add_vertex(self, vertex: Vertex) -> int:
 		norm_vertex = vertex.normalize()
@@ -282,32 +261,56 @@ class worldState:
 				print(f"Warning: Duplicate vertex found after normalization: Index {i} same as {self._vertex_pos_cache[key]}")
 			self._vertex_pos_cache[key] = i
 
-	# --- Base Mesh Generators ---
 
 	def icosphereBase(self):
 		self.vertices = []
 		self.faces = []
 		self._vertex_pos_cache = {}
 		self._subdivision_cache = {}
-		raw_verts = self._get_icosahedron_vertices()
-		ico_indices = [self._add_vertex(v) for v in raw_verts]
-		if len(self.vertices) != 12:
-		     print(f"Warning: Expected 12 base vertices for icosahedron, got {len(self.vertices)}")
-
-		# Use the indices returned by _add_vertex (should be 0-11 if cache was empty)
-		self.faces = [
-			Face(ico_indices[0], ico_indices[11], ico_indices[5]), Face(ico_indices[0], ico_indices[5], ico_indices[1]), Face(ico_indices[0], ico_indices[1], ico_indices[7]),
-			Face(ico_indices[0], ico_indices[7], ico_indices[10]), Face(ico_indices[0], ico_indices[10], ico_indices[11]), Face(ico_indices[1], ico_indices[5], ico_indices[9]),
-			Face(ico_indices[5], ico_indices[11], ico_indices[4]), Face(ico_indices[11], ico_indices[10], ico_indices[2]), Face(ico_indices[10], ico_indices[7], ico_indices[6]),
-			Face(ico_indices[7], ico_indices[1], ico_indices[8]), Face(ico_indices[3], ico_indices[9], ico_indices[4]), Face(ico_indices[3], ico_indices[4], ico_indices[2]),
-			Face(ico_indices[3], ico_indices[2], ico_indices[6]), Face(ico_indices[3], ico_indices[6], ico_indices[8]), Face(ico_indices[3], ico_indices[8], ico_indices[9]),
-			Face(ico_indices[4], ico_indices[9], ico_indices[5]), Face(ico_indices[2], ico_indices[4], ico_indices[11]), Face(ico_indices[6], ico_indices[2], ico_indices[10]),
-			Face(ico_indices[8], ico_indices[6], ico_indices[7]), Face(ico_indices[9], ico_indices[8], ico_indices[1])
+		
+		vertices = [
+			Vertex(-1, PHI, 0),
+			Vertex(1, PHI, 0),
+			Vertex(-1, -PHI, 0),
+			Vertex(1, -PHI, 0),
+			Vertex(0, -1, PHI),
+			Vertex(0, 1, PHI),
+			Vertex(0, -1, -PHI),
+			Vertex(0, 1, -PHI),
+			Vertex(PHI, 0, -1),
+			Vertex(PHI, 0, 1),
+			Vertex(-PHI, 0, -1),
+			Vertex(-PHI, 0, 1)
 		]
-
-		self.subdivide() # Subdivide based on self.details
-		# Final normalization check (should be redundant if _add_vertex works)
-		# self._normalize_all_vertices() # Optional check
+		
+		for v in vertices:
+			v.normalize()
+		
+		faces = [
+			Face(0, 11, 5),
+			Face(0, 5, 1),
+			Face(0, 1, 7),
+			Face(0, 7, 10),
+			Face(0, 10, 11),
+			Face(1, 5, 9),
+			Face(5, 11, 4),
+			Face(11, 10, 2),
+			Face(10, 7, 6),
+			Face(7, 1, 8),
+			Face(3, 9, 4),
+			Face(3, 4, 2),
+			Face(3, 2, 6),
+			Face(3, 6, 8),
+			Face(3, 8, 9),
+			Face(4, 9, 5),
+			Face(2, 4, 11),
+			Face(6, 2, 10),
+			Face(8, 6, 7),
+			Face(9, 8, 1)
+		]
+		self.vertices = vertices
+		self.faces = faces
+		self.subdivide() 
 		return self
 
 	def cubeBase(self):
@@ -316,55 +319,38 @@ class worldState:
 		self._vertex_pos_cache = {}
 		self._subdivision_cache = {}
 
-		# Add base cube vertices
 		raw_verts = [Vertex(x, y, z) for x in [-1, 1] for y in [-1, 1] for z in [-1, 1]]
-		cube_indices = [self._add_vertex(v) for v in raw_verts] # Normalizes and adds to cache
+		cube_indices = [self._add_vertex(v) for v in raw_verts] 
 
-		# Define faces using the indices returned by _add_vertex (0-7)
-		# Check winding order for outward normals after normalization
 		self.faces = [
-			Face(cube_indices[0], cube_indices[2], cube_indices[6], cube_indices[4]), # Left (-X) - Corrected order? Check normal
-			Face(cube_indices[1], cube_indices[3], cube_indices[7], cube_indices[5]), # Right (+X)
-			Face(cube_indices[0], cube_indices[1], cube_indices[5], cube_indices[4]), # Bottom (-Y)
-			Face(cube_indices[2], cube_indices[3], cube_indices[7], cube_indices[6]), # Top (+Y)
-			Face(cube_indices[0], cube_indices[1], cube_indices[3], cube_indices[2]), # Back (-Z)
-			Face(cube_indices[4], cube_indices[5], cube_indices[7], cube_indices[6])  # Front (+Z)
+			Face(cube_indices[0], cube_indices[2], cube_indices[6], cube_indices[4]), 
+			Face(cube_indices[1], cube_indices[3], cube_indices[7], cube_indices[5]), 
+			Face(cube_indices[0], cube_indices[1], cube_indices[5], cube_indices[4]), 
+			Face(cube_indices[2], cube_indices[3], cube_indices[7], cube_indices[6]), 
+			Face(cube_indices[0], cube_indices[1], cube_indices[3], cube_indices[2]), 
+			Face(cube_indices[4], cube_indices[5], cube_indices[7], cube_indices[6])  
 		]
-		# Winding order check (optional but good):
-		# for i, f in enumerate(self.faces):
-		# 	n = f.normal(self)
-		# 	c = f.centroid(self).pos
-		# 	if np.dot(n, c) < 0:
-		# 		print(f"Warning: Cube Face {i} {f.vertices} normal might be inward.")
-				# Reverse face: f.vertices = f.vertices[::-1] # Doesn't work as tuples immutable
-				# Need to recreate the face if reversal is needed: self.faces[i] = Face(*f.vertices[::-1])
 
 		self.subdivide()
-		self._normalize_all_vertices() # Optional check
+		self._normalize_all_vertices()
 		return self
-
-	def _get_icosahedron_vertices(self) -> List[Vertex]:
-		return [
-			Vertex(-1, PHI, 0), Vertex(1, PHI, 0), Vertex(-1, -PHI, 0), Vertex(1, -PHI, 0),
-			Vertex(0, -1, PHI), Vertex(0, 1, PHI), Vertex(0, -1, -PHI), Vertex(0, 1, -PHI),
-			Vertex(PHI, 0, -1), Vertex(PHI, 0, 1), Vertex(-PHI, 0, -1), Vertex(-PHI, 0, 1)
-		]
-
-	def _get_icosahedron_faces_indices(self) -> List[Tuple[int, int, int]]:
-		return [
-			(0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
-			(1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
-			(3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9),
-			(4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1)
-		]
 
 	def truncatedIcosahedronBase(self):
 		self.vertices = []
 		self.faces = []
 		self._vertex_pos_cache = {}
 		self._subdivision_cache = {}
-		icosa_verts_raw = self._get_icosahedron_vertices()
-		icosa_faces_indices = self._get_icosahedron_faces_indices()
+		icosa_verts_raw = [
+			Vertex(-1, PHI, 0), Vertex(1, PHI, 0), Vertex(-1, -PHI, 0), Vertex(1, -PHI, 0),
+			Vertex(0, -1, PHI), Vertex(0, 1, PHI), Vertex(0, -1, -PHI), Vertex(0, 1, -PHI),
+			Vertex(PHI, 0, -1), Vertex(PHI, 0, 1), Vertex(-PHI, 0, -1), Vertex(-PHI, 0, 1)
+		]
+		icosa_faces_indices = [
+			(0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
+			(1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
+			(3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9),
+			(4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1)
+		]
 		icosa_vertex_map = {i: self._add_vertex(v) for i, v in enumerate(icosa_verts_raw)}
 		# Check if map is identity 0->0, 1->1 etc.
 		if any(k != v for k, v in icosa_vertex_map.items()):
@@ -534,78 +520,62 @@ class worldState:
 
 		return self
 
-	# --- MODIFIED SUBDIVIDE METHOD ---
 	def subdivide(self):
-		"""
-		Subdivides faces of the mesh based on detail level.
-		Only subdivides faces whose area is >= 50% of the largest face's area
-		at each subdivision level to promote more uniform face sizes.
-		"""
+		"""Subdivides faces of the mesh based on detail level."""
 		if self.details <= 0: return
 
 		print(f"Starting subdivision process (details={self.details})")
 
 		for level in range(self.details):
 			print(f" Subdividing Level {level + 1}/{self.details}...")
-			current_faces = self.faces[:] # Copy faces from previous level
+			current_faces = self.faces[:]
 			if not current_faces:
 				print("  No faces to subdivide.")
-				break # Stop if there are no faces
+				break
 
-			# 1. Calculate areas of all current faces
 			face_areas = []
-			valid_faces_indices = [] # Keep track of indices of faces with calculable area
+			valid_faces_indices = [] 
 			print(f"  Calculating areas for {len(current_faces)} faces...")
 			for i, face in enumerate(current_faces):
 				try:
 					area = face.area(self)
 					if not np.isfinite(area) or area < 0:
-					    print(f"  Warning: Invalid area ({area}) calculated for face {face.vertices}. Skipping.")
-					    face_areas.append(-1.0) # Mark as invalid/skip
+						print(f"  Warning: Invalid area ({area}) calculated for face {face.vertices}. Skipping.")
+						face_areas.append(-1.0)
 					else:
-					    face_areas.append(area)
-					    valid_faces_indices.append(i)
+						face_areas.append(area)
+						valid_faces_indices.append(i)
 				except Exception as e:
 					print(f"  Error calculating area for face {face.vertices}: {e}. Skipping this face.")
-					face_areas.append(-1.0) # Mark as invalid/skip
+					face_areas.append(-1.0) 
 
-			# Filter out areas of skipped faces before finding max
 			valid_areas = [face_areas[i] for i in valid_faces_indices]
 
 			if not valid_areas:
 				print("  No valid face areas calculated. Stopping subdivision.")
 				break
 
-			# 2. Determine max area and threshold
 			max_area = max(valid_areas) if valid_areas else 0
-			# Add epsilon to max_area check to handle cases where all areas are tiny/zero
 			if max_area < 1e-12:
 				print("  Max face area is near zero. No subdivision will occur this level.")
-				# Keep existing faces and stop further subdivision for this world
-				# Or decide if you want to subdivide everything if max_area is effectively zero
-				# For now, we stop subdividing if faces are negligible.
-				self.details = level # Adjust detail level to reflect performed subdivisions
+				self.details = level
 				break
 
 			area_threshold = 0.5 * max_area
 			print(f"  Max face area: {max_area:.4e}, Threshold for subdivision: {area_threshold:.4e}")
 
-			# 3. Process faces: Subdivide large ones, keep small ones
 			new_faces_next_level = []
-			self._subdivision_cache = {} # Reset cache for this level
+			self._subdivision_cache = {}
 			faces_subdivided = 0
 			faces_kept = 0
 
 			print("  Processing faces for subdivision/keeping...")
 			for i, face in enumerate(current_faces):
-				# Use the pre-calculated area. Skip if marked invalid (-1.0).
 				current_area = face_areas[i]
 				if current_area < 0:
-				    continue # Skip faces that had area calculation errors
+					continue 
 
-				# Check if face should be subdivided
 				if current_area >= area_threshold:
-					# --- Subdivide this face ---
 					faces_subdivided += 1
 					vert_indices = face.vertices
 					n = len(vert_indices)
@@ -620,7 +590,7 @@ class worldState:
 							midpoint_indices.append(mid_idx)
 					except IndexError as e:
 						print(f"  Error getting midpoints for face {face.vertices}: {e}. Skipping subdivision for this face.")
-						new_faces_next_level.append(face) # Keep the original face if subdivision fails
+						new_faces_next_level.append(face) 
 						faces_subdivided -= 1
 						faces_kept += 1
 						continue
@@ -631,74 +601,62 @@ class worldState:
 						faces_kept += 1
 						continue
 
-					# Create new smaller faces based on n
 					if n == 3:
 						v0, v1, v2 = vert_indices
 						m01, m12, m20 = midpoint_indices
 						new_faces_next_level.append(Face(v0, m01, m20))
 						new_faces_next_level.append(Face(v1, m12, m01))
 						new_faces_next_level.append(Face(v2, m20, m12))
-						new_faces_next_level.append(Face(m01, m12, m20)) # Center triangle
+						new_faces_next_level.append(Face(m01, m12, m20)) 
+						for nf in new_faces_next_level[-4:]: 
+							try:
+								nf._validate_face(self) 
+							except ValueError as ve:
+								print(f"  Validation failed for new face {nf.vertices} during subdivision: {ve}")
+
 					elif n > 3:
-						# Central n-gon uses the midpoint indices
-						new_faces_next_level.append(Face(*midpoint_indices))
-						# N triangles around the edges
+						center_face = Face(*midpoint_indices)
+						new_faces_next_level.append(center_face)
+						try:
+							center_face._validate_face(self)
+						except ValueError as ve:
+							print(f"  Validation failed for new center face {center_face.vertices} during subdivision (n-gon): {ve}")
+
 						for j in range(n):
 							v_curr = vert_indices[j]
 							m_next = midpoint_indices[j]
 							m_prev = midpoint_indices[(j - 1 + n) % n]
-							new_faces_next_level.append(Face(v_curr, m_next, m_prev))
-					# else: n < 3 already handled by Face constructor / area calculation skip
+							edge_triangle = Face(v_curr, m_next, m_prev)
+							new_faces_next_level.append(edge_triangle)
+							try:
+								edge_triangle._validate_face(self)
+							except ValueError as ve:
+								print(f"  Validation failed for new edge triangle {edge_triangle.vertices} during subdivision: {ve}")
 
 				else:
-					# --- Keep this face (it's too small) ---
 					faces_kept += 1
 					new_faces_next_level.append(face)
 
-			# Update the world's faces for the next iteration or final result
 			self.faces = new_faces_next_level
 			print(f"  Level {level + 1} complete. Faces subdivided: {faces_subdivided}, Faces kept: {faces_kept}. Total faces: {len(self.faces)}")
 
 		print(f"Subdivision finished. Final face count: {len(self.faces)}")
-		# Final normalization isn't strictly necessary if _add_vertex works correctly,
-		# but can be a safety measure after many operations.
-		# print(" Normalizing all vertices post-subdivision...")
-		# self._normalize_all_vertices()
-
 
 	def duplicateLayers(self):
-		# This function likely doesn't make sense after the spherical projection
-		# and subdivision methods, as it assumes a base layer and scales it linearly.
-		# It would create disconnected layers not conforming to the sphere.
-		# Keeping it commented out or removing it might be best for spherical meshes.
-		print("Warning: duplicateLayers is generally not suitable for spherical meshes generated by subdivision.")
 		pass
-		# if self.details < 1:
-		# 	return
-		# ... (rest of the original duplicateLayers code) ...
 
 	def validateStructure(self):
-		# Validation might be complex and slow for highly subdivided meshes.
-		# The _validate_face check during generation/subdivision is often more targeted.
-		# Skipping full structural validation here for performance unless specifically needed.
-		print("Skipping full structure validation.")
 		pass
-		# ... (rest of the original validateStructure code) ...
 
 
-# --- Visualization ---
-
-# Define a colormap (Green to Red) and normalization for face coloring based on Z-normal
-# RdYlGn_r reverses Red-Yellow-Green to Green-Yellow-Red
 def VisualizeWorld(world: worldState, title: str = "World Mesh"):
-	fig = plt.figure(figsize=(12, 10)) # Slightly larger figure
+	fig = plt.figure(figsize=(12, 10))
 	ax = fig.add_subplot(111, projection='3d')
 
 	face_polys = []
 	face_colors = []
 	edge_lines = []
 
-	# Process faces to collect polygons, colors, and edge lines
 	if world.faces:
 		print(f"Visualizing {len(world.faces)} faces...")
 		count = 0
@@ -706,11 +664,9 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh"):
 			count += 1
 			if count % 1000 == 0 : print(f" Processing face {count}/{len(world.faces)}")
 			try:
-				# Get vertex coordinates for the polygon
 				verts_idx = list(face.vertices)
 				face_verts_pos_poly = [world.vertices[i].pos for i in verts_idx]
 
-				# Calculate face normal and its Z component for color
 				face_normal = face.normal(world)
 				z_normal = face_normal[2]
 				f_color = cmap(norm(z_normal))
@@ -718,7 +674,6 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh"):
 				face_polys.append(face_verts_pos_poly)
 				face_colors.append(f_color)
 
-				# Get vertex coordinates for edge lines (close the loop)
 				verts_idx_lines = list(face.vertices) + [face.vertices[0]]
 				face_verts_pos_lines = [world.vertices[i].pos for i in verts_idx_lines]
 				edge_lines.append(face_verts_pos_lines)
@@ -732,45 +687,38 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh"):
 	else:
 		print("No faces to plot.")
 
-    # Add solid faces to the plot
 	if face_polys:
 		print("Adding face collection...")
-		poly_collection = Poly3DCollection(face_polys, alpha=0.75, facecolors=face_colors, edgecolors='none') # No auto edges
+		poly_collection = Poly3DCollection(face_polys, alpha=0.75, facecolors=face_colors, edgecolors='none')
 		ax.add_collection3d(poly_collection)
 		print("Faces added.")
 
-	# Plot edges in black
 	if edge_lines:
 		print("Adding edge lines...")
 		for line_verts in edge_lines:
 			xs, ys, zs = zip(*line_verts)
-			ax.plot(xs, ys, zs, color='black', alpha=0.4, linewidth=0.6) # Thinner, slightly transparent black lines
+			ax.plot(xs, ys, zs, color='black', alpha=0.4, linewidth=0.6)
 		print("Edges added.")
 
-	# Plot vertices in white
 	if world.vertices:
 		print("Adding vertices...")
 		x, y, z = zip(*(v.pos for v in world.vertices))
-		# White dots with a subtle black edge for contrast
 		ax.scatter(x, y, z, color='white', s=8, alpha=0.9, edgecolors='black', linewidths=0.5, depthshade=False)
 		print("Vertices added.")
 
-	# --- Enforce Spherical Aspect Ratio ---
-	ax.set_box_aspect([1, 1, 1]) # Essential for correct sphere appearance
+	ax.set_box_aspect([1, 1, 1]) 
 	limit = world.radius * 1.1
 	ax.set_xlim(-limit, limit)
 	ax.set_ylim(-limit, limit)
 	ax.set_zlim(-limit, limit)
-	# -------------------------------------
 
 	ax.set_xlabel('X')
 	ax.set_ylabel('Y')
 	ax.set_zlabel('Z')
 	ax.set_title(f'{title} (Level: {world.details}, Verts: {len(world.vertices)}, Faces: {len(world.faces)})')
 
-	# Add a colorbar
 	scalar_mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
-	scalar_mappable.set_array([]) # Need an array for colorbar
+	scalar_mappable.set_array([]) 
 	cbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.6, aspect=20, label='Face Normal Z (Green: +1, Red: -1)')
 
 	print("Finalizing plot...")
@@ -778,17 +726,16 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh"):
 	plt.show()
 
 def main():
-	# Set radius to 1.0 for all examples for consistent visualization
 	common_radius = 1.0
 
 	# # --- Icosphere Example ---
 	# print("Generating Icosphere...")
-	# world_ico = worldState()
-	# world_ico.radius = common_radius
-	# world_ico.details = 2 # Detail level
-	# world_ico.icosphereBase()
-	# print(f"Icosphere Vertices: {len(world_ico.vertices)}, Faces: {len(world_ico.faces)}")
-	# VisualizeWorld(world_ico, "Icosphere")
+	world_ico = worldState()
+	world_ico.radius = common_radius
+	world_ico.details = 2 # Detail level
+	world_ico.icosphereBase()
+	print(f"Icosphere Vertices: {len(world_ico.vertices)}, Faces: {len(world_ico.faces)}")
+	VisualizeWorld(world_ico, "Icosphere")
 
 
 	# # --- Cube Sphere Example ---
@@ -802,27 +749,27 @@ def main():
 
 
 	# --- Truncated Icosahedron Example ---
-	print("\nGenerating Truncated Icosahedron Sphere...")
-	world_trunc = worldState()
-	world_trunc.radius = common_radius
-	world_trunc.details = 3 # Start with lower detail for faster generation/viz
-	world_trunc.truncatedIcosahedronBase()
-	print(f"Trunc. Ico. Vertices: {len(world_trunc.vertices)}, Faces: {len(world_trunc.faces)}")
-	face_types = defaultdict(int)
-	total_area = 0
-	for f in world_trunc.faces:
-		face_types[len(f.vertices)] += 1
-		try:
-			total_area += f.area(world_trunc) # Calculate area
-		except Exception as e:
-			print(f"Error calculating area for face {f.vertices}: {e}")
+	# print("\nGenerating Truncated Icosahedron Sphere...")
+	# world_trunc = worldState()
+	# world_trunc.radius = common_radius
+	# world_trunc.details = 3 # Start with lower detail for faster generation/viz
+	# world_trunc.truncatedIcosahedronBase()
+	# print(f"Trunc. Ico. Vertices: {len(world_trunc.vertices)}, Faces: {len(world_trunc.faces)}")
+	# face_types = defaultdict(int)
+	# total_area = 0
+	# for f in world_trunc.faces:
+	# 	face_types[len(f.vertices)] += 1
+	# 	try:
+	# 		total_area += f.area(world_trunc) # Calculate area
+	# 	except Exception as e:
+	# 		print(f"Error calculating area for face {f.vertices}: {e}")
 
-	print(f"Face types after subdivision: {dict(face_types)}")
-	expected_area = 4 * np.pi * world_trunc.radius**2
-	print(f"Total calculated face area: {total_area:.5f}")
-	print(f"Expected sphere area:       {expected_area:.5f}")
-	print(f"Area difference: {abs(total_area - expected_area):.5f}")
-	VisualizeWorld(world_trunc, "Truncated Icosahedron Sphere")
+	# print(f"Face types after subdivision: {dict(face_types)}")
+	# expected_area = 4 * np.pi * world_trunc.radius**2
+	# print(f"Total calculated face area: {total_area:.5f}")
+	# print(f"Expected sphere area:       {expected_area:.5f}")
+	# print(f"Area difference: {abs(total_area - expected_area):.5f}")
+	# VisualizeWorld(world_trunc, "Truncated Icosahedron Sphere")
 
 
 if __name__ == "__main__":
