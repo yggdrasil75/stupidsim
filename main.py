@@ -1,6 +1,7 @@
 import struct
 from typing import Dict, List, Tuple, Set, Optional
 from matplotlib import pyplot as plt
+from matplotlib import colormaps
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.widgets import RadioButtons, Slider
 import numpy as np
@@ -60,23 +61,20 @@ class Face:
 
 	def normal(self, world: 'worldState') -> np.ndarray:
 		verts = self.get_vertices(world)
-		face_normal = np.zeros(3, dtype=np.float64)
-		num_verts = len(verts)
-		for i in range(num_verts):
-			v_curr = verts[i].pos
-			v_next = verts[(i + 1) % num_verts].pos
-			face_normal[0] += (v_curr[1] - v_next[1]) * (v_curr[2] + v_next[2])
-			face_normal[1] += (v_curr[2] - v_next[2]) * (v_curr[0] + v_next[0])
-			face_normal[2] += (v_curr[0] - v_next[0]) * (v_curr[1] + v_next[1])
+
+		p0 = verts[0].pos
+		p1 = verts[1].pos
+		p2 = verts[2].pos
+
+		edge1 = p1 - p0
+		edge2 = p2 - p0
+		face_normal = np.cross(edge1, edge2)
 
 		norm = np.linalg.norm(face_normal)
-		if abs(norm) < 1e-10:
-			centroid = self.centroid(world).pos
-			norm_c = np.linalg.norm(centroid)
-			return centroid / norm_c
 
 		face_normal /= norm
-		if np.dot(face_normal, self.centroid(world).pos) < 0:
+
+		if np.dot(face_normal, p0) < 0:
 			face_normal *= -1.0
 		return face_normal
 
@@ -86,44 +84,52 @@ class Face:
 		center_pos = np.mean([v.pos for v in verts], axis=0)
 		return Vertex(*center_pos).normalize()
 
-	def area(self, world):
-		n = len(self.vertices)
-		if n < 3:
-			raise ValueError(f"Cannot calculate area for face with {n} vertices: {self.vertices}")
-
+	def area(self, world: 'worldState') -> float:
+		"""Calculates the area of the spherical triangle using L'Huilier's Theorem."""
+		# Assumes vertices are normalized (on unit sphere)
 		verts_pos = [world.vertices[idx].pos for idx in self.vertices]
+		if len(verts_pos) != 3:
+			raise ValueError(f"Face {self.vertices} is not a triangle!")
 
-		angle_sum = 0.0
-		for i in range(n):
-			p0 = verts_pos[(i - 1 + n) % n]
-			p1 = verts_pos[i]
-			p2 = verts_pos[(i + 1) % n]
+		p0, p1, p2 = verts_pos
 
-			v1 = p0 - p1
-			v2 = p2 - p1
+		# Calculate the lengths of the sides (as angles on the unit sphere)
+		# Use clip to avoid domain errors in acos due to floating point inaccuracies
+		a = np.arccos(np.clip(np.dot(p1, p2)))
+		b = np.arccos(np.clip(np.dot(p0, p2)))
+		c = np.arccos(np.clip(np.dot(p0, p1)))
 
-			tangent_v1 = v1 - np.dot(v1, p1) * p1
-			tangent_v2 = v2 - np.dot(v2, p1) * p1
+		# Calculate the semi-perimeter
+		s = (a + b + c) / 2.0
 
-			norm_tv1 = np.linalg.norm(tangent_v1)
-			norm_tv2 = np.linalg.norm(tangent_v2)
+		# Calculate the spherical excess (area on unit sphere) using L'Huilier's Theorem
+		# Check for degenerate cases where s might be equal to a, b, or c
+		tan_E_over_4_sq = np.tan(s / 2.0) * \
+						  np.tan(np.clip((s - a)/2.0, 0, np.pi/2)) * \
+						  np.tan(np.clip((s - b)/2.0, 0, np.pi/2)) * \
+						  np.tan(np.clip((s - c)/2.0, 0, np.pi/2))
 
-			if norm_tv1 < 1e-10 or norm_tv2 < 1e-10:
-				angle = np.pi
+		# Handle potential negative values due to floating point errors before sqrt
+		if tan_E_over_4_sq < 0:
+			if abs(tan_E_over_4_sq) < 1e-12: # Allow small negative values near zero
+				tan_E_over_4_sq = 0.0
 			else:
-				cos_angle = np.dot(tangent_v1, tangent_v2) / (norm_tv1 * norm_tv2)
-				angle = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+				# This might indicate a more significant issue (e.g., invalid triangle)
+				# For now, let's return 0 area for robustness, but could warn
+				return 0.0
 
-			angle_sum += angle
 
-		area_unit_sphere = angle_sum - (n - 2) * np.pi
-		if area_unit_sphere < 0 and abs(area_unit_sphere) < 1e-7:
+		# The spherical excess E is the area on the unit sphere
+		area_unit_sphere = 4.0 * np.arctan(np.sqrt(tan_E_over_4_sq))
+		# Check for negative area due to potential floating point issues
+		if area_unit_sphere < 0 and abs(area_unit_sphere) < 1e-9:
 				area_unit_sphere = 0.0
 		elif area_unit_sphere < 0:
-			area_unit_sphere = abs(area_unit_sphere)
+			# If significantly negative, indicates an issue, but return 0 for robustness
+			area_unit_sphere = 0.0
 
-
-		return area_unit_sphere * world.radius**2
+		# Scale area by the square of the world radius
+		return area_unit_sphere * (world.radius**2)
 
 	def __repr__(self):
 		return f"Face{self.vertices}"
@@ -200,11 +206,17 @@ class worldState:
 		"""Builds an adjacency list for vertices based on faces."""
 		self.adjacency_list.clear()
 		for face in self.faces:
-			for v_idx in face.vertices:
-				for neighbor_idx in face.vertices:
-					if v_idx != neighbor_idx:
-						if neighbor_idx not in self.adjacency_list[v_idx]:
-							self.adjacency_list[v_idx].append(neighbor_idx)
+			# Assumes face.vertices is a tuple of 3 indices (v0, v1, v2)
+			v0, v1, v2 = face.vertices
+			# Add edges (v0,v1), (v1,v2), (v2,v0)
+			if v1 not in self.adjacency_list[v0]: self.adjacency_list[v0].append(v1)
+			if v0 not in self.adjacency_list[v1]: self.adjacency_list[v1].append(v0)
+
+			if v2 not in self.adjacency_list[v1]: self.adjacency_list[v1].append(v2)
+			if v1 not in self.adjacency_list[v2]: self.adjacency_list[v2].append(v1)
+
+			if v0 not in self.adjacency_list[v2]: self.adjacency_list[v2].append(v0)
+			if v2 not in self.adjacency_list[v0]: self.adjacency_list[v0].append(v2)
 
 	def icosphereBase(self):
 		self.vertices = []
@@ -307,19 +319,12 @@ class worldState:
 				# Find distance to the *closest* vertex already in the plate
 				min_distance_sq = float('inf')
 				for plate_v_pos in plate_vertex_positions:
-					# Use squared Euclidean distance for efficiency (avoids sqrt)
-					# Or use angular distance (dot product) - more relevant on sphere
 					dot_prod = np.dot(exp_pos, plate_v_pos)
-					# Clamp dot product for safety with acos
 					angle = np.arccos(np.clip(dot_prod, -1.0, 1.0))
-					# distance = angle # Use angle as distance measure
-					# Use 1 - dot_prod (chord length proxy) or angle directly
-					# Smaller angle (closer dot_prod to 1) means closer
 					distance_metric = 1.0 - dot_prod # Smaller value is closer
 					min_distance_sq = min(min_distance_sq, distance_metric)
 
 				# Score inversely proportional to distance (closer is better)
-				# Add small epsilon to avoid division by zero
 				proximity_scores.append(1.0 / (min_distance_sq + 1e-9))
 
 			# Normalize scores to get probabilities
@@ -329,12 +334,7 @@ class worldState:
 				# Ensure probabilities sum to 1 (handle potential float errors)
 				probabilities /= probabilities.sum()
 			else:
-				# Fallback: Equal probability if scores are zero or no candidates
-				if len(expansion_candidates) > 0:
-					probabilities = np.ones(len(expansion_candidates)) / len(expansion_candidates)
-				else:
-					# This case shouldn't be reached if possible_expansion_vertices was checked
-					continue # Skip if somehow candidates disappeared
+				probabilities = np.ones(len(expansion_candidates)) / len(expansion_candidates)
 
 			# Choose the next vertex based on calculated probabilities
 			try:
@@ -344,7 +344,6 @@ class worldState:
 				else:
 					next_vertex_index = np.random.choice(expansion_candidates, p=probabilities)
 			except ValueError as e:
-				print("failure")
 				next_vertex_index = random.choice(expansion_candidates)
 
 			# Assign the chosen vertex to the current plate
@@ -385,7 +384,6 @@ class worldState:
 				for vertex_index in plate.vertices:
 					is_border = False
 					if vertex_index not in self.adjacency_list: continue # Skip if no neighbors known
-
 					num_neighbors_same_plate = 0
 					num_neighbors_total = 0
 					for neighbor_index in self.adjacency_list[vertex_index]:
@@ -396,10 +394,7 @@ class worldState:
 						else:
 							is_border = True # It has at least one neighbor from another plate
 
-					# Criteria for recycling: on the border AND maybe has few same-plate neighbors?
-					# Simple: just reassign border vertices.
-					# More complex: reassign if ratio num_same / num_total is low?
-					if is_border: # Recycle all border vertices in this pass
+					if is_border and (num_neighbors_same_plate < num_neighbors_total / 3):
 						border_vertices_this_plate.append(vertex_index)
 
 				vertices_to_reassign.extend(border_vertices_this_plate)
@@ -407,33 +402,34 @@ class worldState:
 			if not vertices_to_reassign:
 				break
 
-			recycled_total += len(vertices_to_reassign)
-			random.shuffle(vertices_to_reassign) # Process in random order
+			unique_vertices_to_reassign = list(set(vertices_to_reassign)) # Ensure uniqueness
+			recycled_total += len(unique_vertices_to_reassign)
+			random.shuffle(unique_vertices_to_reassign) # Process in random order
 
 			reassigned_count = 0
-			for vertex_index in vertices_to_reassign:
+			for vertex_index in unique_vertices_to_reassign:
 				current_plate_id = self.vertex_to_plate_id.get(vertex_index, -1)
 				if current_plate_id == -1: continue # Should already be assigned
 
 				# Find neighboring plates and count neighbors belonging to each
 				neighboring_plate_counts = defaultdict(int)
-				if vertex_index in self.adjacency_list:
-					vertex_pos = self.vertices[vertex_index].pos
-					for neighbor_idx in self.adjacency_list[vertex_index]:
-						neighbor_plate_id = self.vertex_to_plate_id.get(neighbor_idx, -1)
-						if neighbor_plate_id != -1:
-							neighboring_plate_counts[neighbor_plate_id] += 1
-				else: continue # Skip if no neighbors known
+				if vertex_index not in self.adjacency_list: continue # Skip if no neighbors
+
+				vertex_pos = self.vertices[vertex_index].pos
+				neighbor_plate_scores = defaultdict(float)
+				for neighbor_idx in self.adjacency_list[vertex_index]:
+					neighbor_plate_id = self.vertex_to_plate_id.get(neighbor_idx, -1)
+					if neighbor_plate_id != -1:
+						neighboring_plate_counts[neighbor_plate_id] += 1
+						# Add score based on proximity (dot product)
+						neighbor_pos = self.vertices[neighbor_idx].pos
+						dot_prod = np.dot(vertex_pos, neighbor_pos)
+						neighbor_plate_scores[neighbor_plate_id] += (1.0 + dot_prod) # Score higher for closer neighbors
 
 				if not neighboring_plate_counts:
-					# Vertex has no assigned neighbors, keep its current plate
-					continue
+					continue # Vertex has no assigned neighbors
 
-				# --- Vote / Proximity Reassignment ---
-				# Option 1: Simple Majority Vote
-				# best_plate_id = max(neighboring_plate_counts, key=neighboring_plate_counts.get)
-
-				# Option 2: Weighted Vote by Proximity (similar to growth phase)
+				# Weighted Vote by Proximity and Count
 				best_plate_id = -1
 				best_score = -1.0
 				possible_plates = list(neighboring_plate_counts.keys())
@@ -452,221 +448,123 @@ class worldState:
 					# Normalize by the number of neighbors from that plate? Or just sum scores? Sum seems ok.
 					scores[target_plate_id] = plate_score * neighboring_plate_counts[target_plate_id] # Weight by count too
 
-				if scores:
-					best_plate_id = max(scores, key=scores.get)
-				else:
-					# Fallback if scoring fails
-					best_plate_id = random.choice(possible_plates) if possible_plates else current_plate_id
-
-
+				best_plate_id = max(scores, key=scores.get)
 				# Reassign if the best neighboring plate is different from the current one
 				if best_plate_id != -1 and best_plate_id != current_plate_id:
-					# Remove from old plate
-					if vertex_index in plates[current_plate_id].vertices:
+					# Check if the old plate exists and vertex is in it
+					if 0 <= current_plate_id < len(plates) and vertex_index in plates[current_plate_id].vertices:
 						plates[current_plate_id].vertices.remove(vertex_index)
-					# Add to new plate
-					plates[best_plate_id].add_vertex(vertex_index)
-					self.vertex_to_plate_id[vertex_index] = best_plate_id
-					reassigned_count += 1
+					# Check if the new plate exists before adding
+					if 0 <= best_plate_id < len(plates):
+						plates[best_plate_id].add_vertex(vertex_index)
+						self.vertex_to_plate_id[vertex_index] = best_plate_id
+						reassigned_count += 1
+					else:
+						# This case indicates an error (best_plate_id invalid)
+						# Put the vertex back into its original plate if possible
+						if 0 <= current_plate_id < len(plates):
+							plates[current_plate_id].add_vertex(vertex_index) # Add back
+							self.vertex_to_plate_id[vertex_index] = current_plate_id # Ensure map is correct
 
 
+			# print(f"  Reassigned {reassigned_count} vertices in pass {recycle_iter + 1}.")
+
+
+		# Final cleanup and validation
 		final_v_count = 0
+		assigned_verts_check = set()
 		for i, p in enumerate(plates):
 			p.vertices = sorted(list(set(p.vertices))) # Ensure unique and sorted
 			# Verify mapping consistency
 			for v_idx in p.vertices:
 				if self.vertex_to_plate_id.get(v_idx) != i:
+					# print(f"WARN: Correcting map for vertex {v_idx} (was {self.vertex_to_plate_id.get(v_idx)}, should be {i})")
 					self.vertex_to_plate_id[v_idx] = i
+				assigned_verts_check.add(v_idx)
 			final_v_count += len(p.vertices)
 
 		self.plates = plates
 		return plates
 
 	def subdivide(self):
-		"""Subdivides faces of the mesh based on detail level."""
+		"""Subdivides faces of the mesh"""
 		if self.details <= 0: return
 
-		for level in range(self.details):
-			current_faces = self.faces[:]
-			if not current_faces:
-				break
-
-			face_areas = []
-			valid_faces_indices = []
-			for i, face in enumerate(current_faces):
-				try:
-					area = face.area(self)
-					if not np.isfinite(area) or area < 0:
-						face_areas.append(-1.0)
-					else:
-						face_areas.append(area)
-						valid_faces_indices.append(i)
-				except Exception as e:
-					face_areas.append(-1.0)
-
-			valid_areas = [face_areas[i] for i in valid_faces_indices]
-
-			if not valid_areas:
-				break
-
-			max_area = max(valid_areas) if valid_areas else 0
-			if max_area < 1e-12:
-				self.details = level
-				break
-
-			area_threshold = 0.5 * max_area
-
+		for _ in range(self.details):
 			new_faces_next_level = []
-			self._subdivision_cache = {}
-			faces_subdivided = 0
-			faces_kept = 0
+			self._subdivision_cache = {} # Clear cache for each level
 
-			for i, face in enumerate(current_faces):
-				current_area = face_areas[i]
-				if current_area < 0:
+			current_faces = self.faces[:] # Copy current faces
+			if not current_faces: break # Stop if no faces exist
+
+			for face in current_faces:
+				# Assumes face is always a triangle Face(v0, v1, v2)
+				v0_idx, v1_idx, v2_idx = face.vertices
+
+				# Get or create midpoints for the three edges
+				try:
+					m01_idx = self._get_or_create_midpoint(v0_idx, v1_idx)
+					m12_idx = self._get_or_create_midpoint(v1_idx, v2_idx)
+					m20_idx = self._get_or_create_midpoint(v2_idx, v0_idx)
+				except IndexError as e:
+					print(f"  Error getting vertices for midpoint creation in face {face.vertices}: {e}. Skipping subdivision for this face.")
+					new_faces_next_level.append(face) # Keep original face if error
+					continue
+				except Exception as e:
+					print(f"  Unexpected error during midpoint creation for face {face.vertices}: {e}. Skipping subdivision.")
+					new_faces_next_level.append(face)
 					continue
 
-				if current_area >= area_threshold:
-					faces_subdivided += 1
-					vert_indices = face.vertices
-					n = len(vert_indices)
-					midpoint_indices = []
-					try:
-						for j in range(n):
-							v1_idx = vert_indices[j]
-							v2_idx = vert_indices[(j + 1) % n]
-							if v1_idx >= len(self.vertices) or v2_idx >= len(self.vertices):
-								raise IndexError(f"Vertex index out of bounds. V1:{v1_idx}, V2:{v2_idx}, Max:{len(self.vertices)-1}")
-							mid_idx = self._get_or_create_midpoint(v1_idx, v2_idx)
-							midpoint_indices.append(mid_idx)
-					except IndexError as e:
-						print(f"  Error getting midpoints for face {face.vertices}: {e}. Skipping subdivision for this face.")
-						new_faces_next_level.append(face)
-						faces_subdivided -= 1
-						faces_kept += 1
-						continue
-					except Exception as e:
-						print(f"  Unexpected error during midpoint creation for face {face.vertices}: {e}. Skipping subdivision.")
-						new_faces_next_level.append(face)
-						faces_subdivided -= 1
-						faces_kept += 1
-						continue
+				# Create the four new triangular faces
+				new_faces_next_level.append(Face(v0_idx, m01_idx, m20_idx))
+				new_faces_next_level.append(Face(v1_idx, m12_idx, m01_idx))
+				new_faces_next_level.append(Face(v2_idx, m20_idx, m12_idx))
+				new_faces_next_level.append(Face(m01_idx, m12_idx, m20_idx)) # Center face
 
-					if n == 3:
-						v0, v1, v2 = vert_indices
-						m01, m12, m20 = midpoint_indices
-						new_faces_next_level.append(Face(v0, m01, m20))
-						new_faces_next_level.append(Face(v1, m12, m01))
-						new_faces_next_level.append(Face(v2, m20, m12))
-						new_faces_next_level.append(Face(m01, m12, m20))
+			self.faces = new_faces_next_level # Update faces list for the next level
 
-				else:
-					faces_kept += 1
-					new_faces_next_level.append(face)
-
-			self.faces = new_faces_next_level
+		# print(f"Subdivision complete. Vertices: {len(self.vertices)}, Faces: {len(self.faces)}")
 
 	def duplicateLayers(self):
 		pass
 
-	def validateStructure(self, check_intersection=False):
-		"""Performs checks on the mesh structure."""
-		valid = True
-		num_vertices = len(self.vertices)
-		num_faces = len(self.faces)
-
-		nan_inf_verts = 0
-		non_unit_verts = 0
-		for i, v in enumerate(self.vertices):
-			if np.any(np.isnan(v.pos)) or np.any(np.isinf(v.pos)):
-				nan_inf_verts += 1
-				valid = False
-			norm_sq = np.dot(v.pos, v.pos)
-			if abs(norm_sq - 1.0) > 1e-7: # Check if norm is close to 1
-				non_unit_verts += 1
-				valid = False
-		if (nan_inf_verts > 0) or (non_unit_verts > 0):
-			print(f"  Found {nan_inf_verts} vertices with NaN/Inf and {non_unit_verts} needing to be normalized")
-
-		intersecting_faces = 0
-
-		for i, face in enumerate(self.faces):
-			face_valid = True
-			# Check for self-intersection (optional, can be slow)
-			if face_valid and check_intersection and len(face.vertices) > 3:
-				try:
-					face._validate_face(self) # This internal method checks intersection
-				except (ValueError, IndexError) as e:
-					print(f"  Error: Face {i} {face.vertices} failed validation: {e}")
-					intersecting_faces += 1 # Count intersection or other validation errors from _validate_face
-					valid = False
-				except Exception as e:
-					print(f"  Error: Unexpected error validating face {i} {face.vertices}: {e}")
-					intersecting_faces += 1
-					valid = False
-
-
-		if intersecting_faces > 0: print(f"  Found {intersecting_faces} faces failing validation (e.g., self-intersection).")
-
-		adj_list_ok = True
-		if not self.adjacency_list and num_vertices > 0:
-			adj_list_ok = False
-			valid = False
-		elif self.adjacency_list:
-			# Basic check: ensure all keys and values are valid vertex indices
-			max_adj_idx = -1
-			for k, neighbors in self.adjacency_list.items():
-				max_adj_idx = max(max_adj_idx, k)
-				if k >= num_vertices or k < 0:
-					print(f"  Error: Invalid key {k} in adjacency list.")
-					adj_list_ok = False
-					valid = False
-				for neighbor in neighbors:
-					max_adj_idx = max(max_adj_idx, neighbor)
-					if neighbor >= num_vertices or neighbor < 0:
-						print(f"  Error: Invalid neighbor index {neighbor} for key {k} in adjacency list.")
-						adj_list_ok = False
-						valid = False
-					# Check symmetry: if k lists neighbor, neighbor should list k
-					if neighbor not in self.adjacency_list or k not in self.adjacency_list[neighbor]:
-						print(f"  Error: Adjacency list asymmetry detected between {k} and {neighbor}.")
-						adj_list_ok = False
-						valid = False
-
-		if self.plates:
-			plate_check_ok = True
-			assigned_verts = set()
-			total_verts_in_plates = 0
-			if not self.vertex_to_plate_id:
-				plate_check_ok = False
-				valid = False
-			else:
-				# Check consistency between plate lists and map
-				for plate_id, plate in enumerate(self.plates):
-					if plate.plate_id != plate_id:
-						plate_check_ok = False; valid = False
-					total_verts_in_plates += len(plate.vertices)
-					for v_idx in plate.vertices:
-						if v_idx >= num_vertices or v_idx < 0:
-							plate_check_ok = False; valid = False
-						elif self.vertex_to_plate_id.get(v_idx) != plate_id:
-							plate_check_ok = False; valid = False
-						assigned_verts.add(v_idx)
-
-		return valid
-
 	def _build_vertex_plate_map(self):
+		"""Builds or rebuilds the vertex_to_plate_id dictionary from plate lists."""
+		# print(" Building vertex-to-plate map...")
 		self.vertex_to_plate_id.clear()
+		num_vertices = len(self.vertices)
+		if not self.plates:
+			# print(" No plates exist, map will be empty.")
+			return
+
+		vertices_assigned_count = 0
+		overlapping_vertices = 0
+		invalid_indices = 0
+
 		for plate_idx, plate in enumerate(self.plates):
 			for vertex_idx in plate.vertices:
-				if vertex_idx in self.vertex_to_plate_id:
-					print(f"Warning: Vertex {vertex_idx} found in multiple plates ({self.vertex_to_plate_id[vertex_idx]} and {plate_idx}). Overwriting.")
-				if vertex_idx >= len(self.vertices) or vertex_idx < 0:
-					print(f"Warning: Plate {plate_idx} contains invalid vertex index {vertex_idx}. Skipping.")
+				# Check index validity first
+				if not (0 <= vertex_idx < num_vertices):
+					# print(f"Warning: Plate {plate_idx} contains invalid vertex index {vertex_idx}. Skipping.")
+					invalid_indices += 1
 					continue
+
+				if vertex_idx in self.vertex_to_plate_id:
+					# Vertex found in multiple plate lists, indicates an issue upstream
+					# print(f"Warning: Vertex {vertex_idx} found in multiple plates ({self.vertex_to_plate_id[vertex_idx]} and {plate_idx}). Overwriting map entry with {plate_idx}.")
+					overlapping_vertices += 1
 				self.vertex_to_plate_id[vertex_idx] = plate_idx
-		if len(self.vertex_to_plate_id) != len(self.vertices):
-			print("Error: Mismatch between map size and vertex count!")
+				vertices_assigned_count += 1 # Count assignments, not unique vertices yet
+
+		map_size = len(self.vertex_to_plate_id)
+		# print(f" Vertex-to-plate map built. Size: {map_size}. Overlaps found: {overlapping_vertices}. Invalid indices skipped: {invalid_indices}.")
+
+		# Final consistency check
+		if map_size != num_vertices:
+			print(f"Error building map: Final map size ({map_size}) != number of vertices ({num_vertices}). {num_vertices - map_size} vertices are unmapped.")
+		elif overlapping_vertices > 0:
+			print(f"Warning: {overlapping_vertices} vertices were listed in multiple plates during map build.")
+
 
 	def _identify_boundaries(self):
 		"""Identifies vertices and edges lying on plate boundaries."""
@@ -691,7 +589,6 @@ class worldState:
 		for v1_idx in range(num_vertices):
 			plate1_id = self.vertex_to_plate_id.get(v1_idx, -1)
 			if plate1_id == -1:
-				# print(f"Warning: Vertex {v1_idx} is not assigned to any plate.")
 				continue # Cannot be a boundary if not on a plate
 
 			if v1_idx not in self.adjacency_list:
@@ -707,8 +604,8 @@ class worldState:
 					is_boundary_vertex = True
 					# Add the edge connecting them to the boundary edges set
 					edge = tuple(sorted((v1_idx, v2_idx)))
-					self.boundary_edges.add(edge)
-					# Mark the neighbor (v2_idx) as a boundary vertex too
+					if edge not in self.boundary_edges:
+						self.boundary_edges.add(edge)
 					self.boundary_vertices.add(v2_idx)
 
 			if is_boundary_vertex:
@@ -716,13 +613,12 @@ class worldState:
 
 		print(f"Boundaries identified. Boundary Vertices: {len(self.boundary_vertices)}, Boundary Edges: {len(self.boundary_edges)}")
 
-	def assign_random_angular_velocities(self, max_angular_velocity: float):
+	def assign_random_angular_velocities(self):
 		if not self.plates:
 			print("Warning: No plates exist to assign velocities to.")
 			return
 
 		for plate in self.plates:
-			# Random direction (uniformly on sphere)
 			phi = np.random.uniform(0, 2 * np.pi)
 			costheta = np.random.uniform(-1, 1)
 			theta = np.arccos(costheta)
@@ -732,10 +628,9 @@ class worldState:
 			direction = np.array([x, y, z])
 
 			# Random magnitude up to max_angular_velocity
-			magnitude = np.random.uniform(0, max_angular_velocity)
+			magnitude = np.random.uniform(0, MAX_ANGULAR_VELOCITY_RAD_PER_YR)
 
 			plate.angular_velocity = direction * magnitude
-			# print(f" Plate {plate.plate_id}: Magnitude {np.degrees(magnitude):.3f} deg/yr")
 		print("Angular velocities assigned.")
 
 	def calculate_boundary_motions(self, classification_threshold: float = 0.7) -> bool:
@@ -773,7 +668,6 @@ class worldState:
 			p_mid = (v1.pos + v2.pos) / 2.0
 			p_mid_norm = np.linalg.norm(p_mid)
 			if p_mid_norm < 1e-9:
-				print(f"Warning: Midpoint of edge {edge} is near origin. Skipping motion calc.")
 				continue
 			p_mid_unit = p_mid / p_mid_norm # Position vector on the unit sphere
 			p_mid_world = p_mid_unit * self.radius # Position vector in world units (meters)
@@ -832,9 +726,7 @@ class worldState:
 			total_mag = np.linalg.norm(v_rel_tangent) # meters/year
 
 			boundary_type = "undefined"
-			# Use a small threshold to treat very slow relative motion as passive
-			min_motion_threshold_yr = 1e-5 # m/yr (0.01 mm/yr)
-			if total_mag_yr < min_motion_threshold_yr:
+			if total_mag < 1e-9:
 				boundary_type = "passive"
 			else:
 				# Ratios for classification
@@ -925,8 +817,6 @@ class worldState:
 				elevation_change = base_transform * (1 + magnitude * rate_scaling_factor / base_transform) # Minor effect, scales with slip rate
 
 
-			# Apply influence to both vertices of the edge
-			# We average the influence from all connected boundary edges later
 			if boundary_type != "passive" and boundary_type != "undefined":
 				if v1_idx in self.boundary_vertices:
 					elevation_updates[v1_idx]['sum_influence'] += elevation_change
@@ -942,10 +832,6 @@ class worldState:
 				self.elevations[v_idx] = base_elevation + avg_influence
 			# else: vertex was in boundary_vertices but no edges contributed? Should not happen.
 
-
-		print(f" Initial boundary elevations assigned. Max: {max(self.elevations.values()):.0f}m, Min: {min(self.elevations.values()):.0f}m")
-
-		# --- Step 2: Diffuse elevation inland ---
 		if diffusion_passes > 0 and diffusion_factor > 0:
 			print(f" Performing {diffusion_passes} elevation diffusion passes (Factor: {diffusion_factor})...")
 			# Use a temporary dictionary for updates to avoid overwriting during pass
@@ -981,12 +867,14 @@ class worldState:
 						smoothed_elev = (1.0 - diffusion_factor) * current_elev + diffusion_factor * avg_neighbor_elev
 						next_elevations[v_idx] = smoothed_elev
 					else:
-						# No valid neighbors, keep current elevation
+						# No valid neighbors (shouldn't happen if not isolated), keep current
 						next_elevations[v_idx] = current_elevations.get(v_idx, base_elevation)
 
-
-				# Update current_elevations for the next pass
+				# Update current_elevations for the next pass (use copy)
 				current_elevations = next_elevations.copy()
+				# Optional: Print min/max elevation after each pass
+				# if i_pass % 5 == 0 and current_elevations:
+				#    print(f"    Pass {i_pass+1} Elev Range: {min(current_elevations.values()):.0f} to {max(current_elevations.values()):.0f}")
 
 
 			# Assign the final smoothed elevations back to the world state
@@ -995,14 +883,11 @@ class worldState:
 		else:
 			print(" Skipping elevation diffusion.")
 
-		# Final elevation range
-		final_max = max(self.elevations.values()) if self.elevations else 0
-		final_min = min(self.elevations.values()) if self.elevations else 0
+		final_min = min(self.elevations.values())
+		final_max = max(self.elevations.values())
 		norm_elevation.vmin = final_min
 		norm_elevation.vmax = final_max
 		print(f"Final Elevation Range: {final_min:.0f}m to {final_max:.0f}m")
-
-
 
 def VisualizeWorld(world: worldState, title: str = "World Mesh",
 				   color_mode: str = "elevation", # "elevation", "plates", "normal"
@@ -1027,48 +912,24 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 		count = 0
 		skipped_faces = 0
 
-		# Determine elevation range for normalization if needed
+		cmap_elevation = colormaps['terrain']
+		norm_elevation_dynamic = None
 		if color_mode == "elevation" and has_elevations:
 			all_elevs = list(world.elevations.values())
-			if all_elevs:
-				min_elev, max_elev = min(all_elevs), max(all_elevs)
-				print(f"Elevation range for coloring: {min_elev:.0f}m to {max_elev:.0f}m")
-				# Update the norm dynamically based on actual data
-				norm_elevation_dynamic = colors.Normalize(vmin=min_elev, vmax=max_elev)
-			else:
-				print("Warning: Elevation data exists but is empty. Using default elevation norm.")
-				norm_elevation_dynamic = norm_elevation # Use default if no values
-		elif color_mode == "elevation" and not has_elevations:
-			print("Warning: Elevation color mode selected, but no elevation data found. Using default normal colors.")
-			color_mode = "normal" # Fallback
+			min_elev, max_elev = min(all_elevs), max(all_elevs)
+			print(f" Elevation range for coloring: {min_elev:.0f}m to {max_elev:.0f}m")
+			norm_elevation_dynamic = colors.Normalize(vmin=min_elev, vmax=max_elev)
 
-		# Default normal colormap setup
-		cmap_normal = cm.get_cmap('RdYlGn_r')
+		cmap_normal = colormaps['viridis']
 		norm_normal = colors.Normalize(vmin=-1.0, vmax=1.0)
-
-		# Plate color setup
-		if color_mode == "plates" and not has_plates:
-			print("Warning: Plate color mode selected, but no plate data found. Using default normal colors.")
-			color_mode = "normal" # Fallback
-		elif color_mode == "plates" and not plate_colors_map:
-			print("Warning: Plate color mode selected, but no plate_colors_map provided. Generating random colors.")
-			# Generate random colors if missing
-			plate_colors_map = {}
-			num_plates_vis = len(world.plates)
-			distinct_colors = plt.cm.get_cmap('tab20').colors # Use a colormap with distinct colors
-			for i in range(num_plates_vis):
-				plate_colors_map[i] = distinct_colors[i % len(distinct_colors)]
 
 
 		for face in world.faces:
 			count += 1
-			if count % 5000 == 0 : print(f" Processing face {count}/{len(world.faces)}")
 
 			try:
-				verts_idx = list(face.vertices)
-				# Get 3D positions for the polygon
+				verts_idx = face.vertices
 				face_verts_pos_poly = [world.vertices[i].pos * world.radius for i in verts_idx]
-				# Note: Scaling by world.radius here for visualization if radius != 1
 
 				# --- Determine Face Color ---
 				f_color = (0.5, 0.5, 0.5, 0.5) # Default gray
@@ -1076,7 +937,16 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 				if color_mode == "elevation":
 					# Average elevation of face vertices
 					face_elevations = [world.elevations.get(i, 0.0) for i in verts_idx]
-					avg_elevation = sum(face_elevations) / len(face_elevations) if face_elevations else 0.0
+					# Check if all elevations were found
+					if len(face_elevations) == 3:
+						avg_elevation = sum(face_elevations) / 3.0
+						if norm_elevation_dynamic:
+							f_color = cmap_elevation(norm_elevation_dynamic(avg_elevation))
+						else: # Fallback if norm failed
+							f_color = (0.4, 0.4, 0.4, 0.6)
+					else: # Missing elevation data for some vertices
+						f_color = (0.1, 0.1, 0.1, 0.6) # Black/dark gray for missing data
+
 
 				elif color_mode == "plates":
 					# Use plate ID of the first vertex (approximation)
@@ -1085,7 +955,7 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 					if plate_id != -1 and plate_colors_map and plate_id in plate_colors_map:
 						f_color = plate_colors_map[plate_id]
 					else:
-						f_color = (0.3, 0.3, 0.3, 0.6) # Dark gray for unassigned/missing color
+						f_color = (0.3, 0.3, 0.3, 0.6) # Dark gray
 
 				elif color_mode == "normal":
 					# Color by face normal's Z component
@@ -1114,97 +984,77 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 			print(f"Skipped {skipped_faces} faces due to errors.")
 
 	if face_polys:
-		print(" Adding face collection to plot...")
-		# Use edgecolors='none' for cleaner look with many polygons
-		poly_collection = Poly3DCollection(face_polys, alpha=0.85, facecolors=face_colors, edgecolors='none', linewidth=0)
+		poly_collection = Poly3DCollection(face_polys, facecolors=face_colors, edgecolors='none', linewidth=0.1)
 		ax.add_collection3d(poly_collection)
 		print(" Faces added.")
 	else:
 		print(" No face polygons to plot.")
 
-	if edge_lines:
-		print(" Adding edge lines to plot...")
-		# Plot edges with low alpha to avoid clutter
-		for line_verts in edge_lines:
-			xs, ys, zs = zip(*line_verts)
-			ax.plot(xs, ys, zs, color='black', alpha=0.15, linewidth=0.4)
-		print(" Edges added.")
-	else:
-		print(" No edge lines to plot.")
-
-	# Optionally plot vertices (can be slow for high detail)
-	plot_vertices = False
-	if plot_vertices and world.vertices:
-		print(" Adding vertices to plot...")
-		vx, vy, vz = zip(*(v.pos * world.radius for v in world.vertices))
-		ax.scatter(vx, vy, vz, color='white', s=5, alpha=0.7, edgecolors='black', linewidths=0.3, depthshade=False)
-		print(" Vertices added.")
 
 	# --- Axes and Labels ---
 	ax.set_box_aspect([1, 1, 1]) # Equal aspect ratio
-	# Set limits based on radius
-	limit = world.radius * 1.15 # Add a bit of padding
+	limit = world.radius * 1.1
 	ax.set_xlim(-limit, limit)
 	ax.set_ylim(-limit, limit)
 	ax.set_zlim(-limit, limit)
 	ax.set_xlabel('X')
 	ax.set_ylabel('Y')
 	ax.set_zlabel('Z')
-	ax.set_title(f'{title}\n(Detail: {world.details}, Verts: {len(world.vertices)}, Faces: {len(world.faces)})')
-	# Basic lighting/shading improvement
-	# ax.view_init(elev=30, azim=45) # Adjust viewing angle
+	ax.set_title(f'{title}\n(Detail: {world.details}, Verts: {len(world.vertices)}, Faces: {len(world.faces)}, Mode: {color_mode})')
+	ax.view_init(elev=30, azim=45) # Adjust viewing angle
+	# Disable grid for cleaner look
+	ax.grid(False)
+	# Background color
+	ax.xaxis.set_pane_color((0.0, 0.0, 0.0, 0.1))
+	ax.yaxis.set_pane_color((0.0, 0.0, 0.0, 0.1))
+	ax.zaxis.set_pane_color((0.0, 0.0, 0.0, 0.1))
+
 
 	# --- Colorbar / Legend ---
-	if color_mode == "elevation" and has_elevations and all_elevs:
-		scalar_mappable = cm.ScalarMappable(norm=norm_elevation_dynamic, cmap='terrain')
+	# Adjust layout rect based on whether a legend or colorbar is added
+	legend_rect = [0, 0, 0.85, 1]
+	colorbar_rect = [0, 0, 0.9, 1]
+	default_rect = [0, 0, 1, 1]
+	current_rect = default_rect
+
+	if color_mode == "elevation" and norm_elevation_dynamic:
+		scalar_mappable = cm.ScalarMappable(norm=norm_elevation_dynamic, cmap=cmap_elevation)
 		scalar_mappable.set_array([]) # Important!
-		cbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.6, aspect=20, label='Elevation (m)')
-	elif color_mode == "plates" and has_plates and plate_colors_map:
-		handles = [plt.Rectangle((0,0),1,1, color=color) for color in plate_colors_map.values()]
-		labels = [f"Plate {i}" for i in plate_colors_map.keys()]
-		ax.legend(handles, labels, loc='center left', bbox_to_anchor=(1.05, 0.5), title="Plates")
-	elif color_mode == "normal":
-		scalar_mappable = cm.ScalarMappable(norm=norm_normal, cmap=cmap_normal)
-		scalar_mappable.set_array([])
-		cbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.6, aspect=20, label='Face Normal Z')
-	plt.tight_layout(rect=[0, 0, 0.85, 1] if color_mode=='plates' else [0, 0, 1, 1]) # Adjust layout for legend/colorbar
+		cbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.6, aspect=20, label='Elevation (m)', pad=0.08)
+		current_rect = colorbar_rect
+
+	plt.tight_layout(rect=current_rect) # Adjust layout for legend/colorbar
 	plt.show()
 
 
 # --- Main Execution ---
 
 def main():
-	world_radius_m = RADIUS # Approx Earth radius in meters
+	world_radius_m = RADIUS
 	num_plates = PLATES
 	subdivision_level = SUBDIVISIONS
 	max_plate_speed_deg_yr = 1.5 # Max rotation speed in degrees per year
 	max_ang_vel_rad_yr = np.radians(max_plate_speed_deg_yr)
 
 	# Elevation generation parameters
-	conv_elev = 6000.0 # Max elevation boost for convergence
-	div_elev = -7000.0 # Max depth for divergence
-	trans_elev = 200.0 # Minor ridges for transform
-	rate_scale = 5.0e7 # How much velocity (m/yr) affects elevation magnitude
-	diff_passes = 15
-	diff_factor = 0.10
+	# Using ridge for divergent instead of trench
+	conv_elev = 6000.0    # Base elevation boost for convergence (mountains)
+	div_elev = 1500.0     # Base elevation for divergent boundaries (mid-ocean ridge)
+	trans_elev = 200.0    # Minor ridges/troughs for transform faults
+	rate_scale = 5.0e7
+	diff_passes = 15      # Number of smoothing passes for elevation diffusion
+	diff_factor = 0.10    # How much elevation spreads per pass (0-1)
 
 	world_sim = worldState(radius=world_radius_m)
 	world_sim.details = subdivision_level
 
 	world_sim.icosphereBase()
 
-	# Validate the initial subdivided mesh structure
-	world_sim.validateStructure(check_intersection=False) # Intersection check is slow
-
 	world_sim.plates = world_sim.assign_icosphere_vertices_to_plates(num_plates)
 
-	# Verify plate assignment consistency
-	world_sim._build_vertex_plate_map() # Ensure map is built/updated
-	# world_sim.validateStructure() # Re-validate after plate assignment updates map
 
-	# --- Tectonic Simulation ---
 	if world_sim.plates:
-		world_sim.assign_random_angular_velocities(max_ang_vel_rad_yr)
+		world_sim.assign_random_angular_velocities()
 
 		world_sim._identify_boundaries()
 
@@ -1222,22 +1072,32 @@ def main():
 		else:
 			print("Skipping elevation assignment due to errors in motion calculation.")
 
-		world_sim.validateStructure(check_intersection=False)
 
 	else:
 		print("\nNo plates assigned, skipping tectonic simulation.")
 
-
 	plate_colors = None
 	if world_sim.plates:
 		plate_colors = {}
-		cmap_plates_vis = cm.get_cmap('turbo', len(world_sim.plates)) # 'turbo' is good for many categories
-		for i in range(len(world_sim.plates)):
-			plate_colors[i] = cmap_plates_vis(i)
+		num_p = len(world_sim.plates)
+		cmap_plates_vis = cm.get_cmap('tab20', num_p if num_p > 0 else 1) # Use tab20, ensure lut >= 1
+		for i in range(num_p):
+			plate_colors[i] = cmap_plates_vis(i) # Get RGBA tuple
+
+	# Choose visualization mode: "elevation", "plates", "normal", "boundary_type"
+	# VisualizeWorld(world_sim,
+	# 			   title=f"Plate Assignments (Plates: {num_plates}, Detail: {subdivision_level})",
+	# 			   color_mode="plates",
+	# 			   plate_colors_map=plate_colors)
 
 	VisualizeWorld(world_sim,
-				   title=f"World Simulation with Tectonic Elevation (Plates: {num_plates}, Detail: {subdivision_level})",
-				   color_mode="elevation") # Show elevation map
+				   title=f"World Simulation with Tectonic Elevation",
+				   color_mode="elevation")
+
+	# VisualizeWorld(world_sim,
+	# 			   title=f"Boundary Types",
+	# 			   color_mode="boundary_type")
+
 
 if __name__ == "__main__":
 	main()
