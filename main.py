@@ -832,8 +832,10 @@ class worldState:
 			total_mag = np.linalg.norm(v_rel_tangent) # meters/year
 
 			boundary_type = "undefined"
-			if total_mag < 1e-9: # Plates aren't moving relative to each other here
-				boundary_type = "passive" # Or "rift" if it was previously active?
+			# Use a small threshold to treat very slow relative motion as passive
+			min_motion_threshold_yr = 1e-5 # m/yr (0.01 mm/yr)
+			if total_mag_yr < min_motion_threshold_yr:
+				boundary_type = "passive"
 			else:
 				# Ratios for classification
 				conv_ratio = convergence_mag / total_mag
