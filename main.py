@@ -25,15 +25,11 @@ RADIUS = 6371000
 class Vertex:
 	def __init__(self, x, y, z):
 		self.pos = np.array([float(x), float(y), float(z)], dtype=np.float64)
-		self.x = float(x)
-		self.y = float(y)
-		self.z = float(z)
 
 	def normalize(self):
 		norm = np.linalg.norm(self.pos)
 		if abs(norm) > 1e-10:
 			self.pos /= norm
-			self.x, self.y, self.z = self.pos
 		return self
 
 	def dotProd(self, other):
@@ -53,24 +49,16 @@ class Vertex:
 		return np.allclose(self.pos, other.pos, atol=1e-10)
 
 	def __repr__(self):
-		return f"Vertex({self.x:.4f}, {self.y:.4f}, {self.z:.4f})"
+		return f"Vertex({self.pos[0]:.4f}, {self.pos[1]:.4f}, {self.pos[2]:.4f})"
 
 class Face:
 	def __init__(self, *vertices: int):
-		if len(vertices) < 3:
-			raise ValueError("Face must have at least 3 vertices")
 		self.vertices = tuple(vertices)
 
 	def get_vertices(self, world: 'worldState') -> List[Vertex]:
-		"""Helper to get the actual Vertex objects for this face."""
-		try:
-			return [world.vertices[i] for i in self.vertices]
-		except IndexError as e:
-			max_idx = max(self.vertices) if self.vertices else -1
-			raise IndexError(f"Error: Vertex index out of bounds in face {self.vertices}. Max index: {max_idx}, Num vertices: {len(world.vertices)}. Error: {e}") 
+		return [world.vertices[i] for i in self.vertices]
 
 	def normal(self, world: 'worldState') -> np.ndarray:
-		"""Calculates the approximate normal vector of the face (pointing outwards)."""
 		verts = self.get_vertices(world)
 		face_normal = np.zeros(3, dtype=np.float64)
 		num_verts = len(verts)
@@ -85,10 +73,7 @@ class Face:
 		if abs(norm) < 1e-10:
 			centroid = self.centroid(world).pos
 			norm_c = np.linalg.norm(centroid)
-			if norm_c > 1e-9:
-				return centroid / norm_c
-			else:
-				return np.array([0.0, 0.0, 1.0])
+			return centroid / norm_c
 
 		face_normal /= norm
 		if np.dot(face_normal, self.centroid(world).pos) < 0:
@@ -100,66 +85,6 @@ class Face:
 		verts = self.get_vertices(world)
 		center_pos = np.mean([v.pos for v in verts], axis=0)
 		return Vertex(*center_pos).normalize()
-
-	def _validate_face(self, world):
-		"""Ensure the face is simple (non-intersecting edges)"""
-		n = len(self.vertices)
-		if n < 3:
-			raise ValueError("Face must have at least 3 vertices")
-
-		if n > 3:
-			points = [world.vertices[i].pos for i in self.vertices]
-
-			normal = np.cross(points[1] - points[0], points[2] - points[0])
-			norm_val = np.linalg.norm(normal)
-			if norm_val < 1e-9:
-				if n > 3:
-					normal = np.cross(points[2] - points[1], points[3] - points[1])
-					norm_val = np.linalg.norm(normal)
-			normal /= norm_val
-
-			dominant_axis = np.argmax(np.abs(normal))
-			axes = [0, 1, 2]
-			axes.remove(dominant_axis)
-
-			projected = [(p[axes[0]], p[axes[1]]) for p in points]
-
-			for i in range(n):
-				for j in range(i + 2, n):
-					if (i == 0 and j == n - 1):
-						continue
-					a1, a2 = projected[i], projected[(i + 1) % n]
-					b1, b2 = projected[j], projected[(j + 1) % n]
-					if self._segments_intersect(a1, a2, b1, b2):
-						raise ValueError(f"Face {self.vertices} has self-intersecting edges between edge {i}-{ (i + 1) % n} and {j}-{(j + 1) % n}")
-
-	def _segments_intersect(self, p1, p2, p3, p4):
-		def orientation(p, q, r):
-			val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
-			if abs(val) < 1e-7: return 0
-			return 1 if val > 0 else 2
-		def on_segment(p, q, r):
-			return (q[0] <= max(p[0], r[0]) and q[0] >= min(p[0], r[0]) and
-					q[1] <= max(p[1], r[1]) and q[1] >= min(p[1], r[1]))
-
-		o1 = orientation(p1, p2, p3)
-		o2 = orientation(p1, p2, p4)
-		o3 = orientation(p3, p4, p1)
-		o4 = orientation(p3, p4, p2)
-
-		if o1 != o2 and o3 != o4:
-			eps = 1e-9
-			if np.linalg.norm(np.array(p1)-np.array(p3)) < eps or \
-			   np.linalg.norm(np.array(p1)-np.array(p4)) < eps or \
-			   np.linalg.norm(np.array(p2)-np.array(p3)) < eps or \
-			   np.linalg.norm(np.array(p2)-np.array(p4)) < eps:
-				return False
-			return True
-		if o1 == 0 and on_segment(p1, p3, p2): return True
-		if o2 == 0 and on_segment(p1, p4, p2): return True
-		if o3 == 0 and on_segment(p3, p1, p4): return True
-		if o4 == 0 and on_segment(p3, p2, p4): return True
-		return False
 
 	def area(self, world):
 		n = len(self.vertices)
@@ -216,7 +141,6 @@ class Plate:
 		ang_vel_deg_yr = np.degrees(np.linalg.norm(self.angular_velocity)) # Magnitude
 		return (f"Plate(ID: {self.plate_id}, Vertices: {len(self.vertices)}, "
 				f"AngVel: {ang_vel_deg_yr:.2f} deg/yr)")
-
 
 class worldState:
 	def __init__(self, radius: float = 1.0):
@@ -635,30 +559,6 @@ class worldState:
 						new_faces_next_level.append(Face(v1, m12, m01))
 						new_faces_next_level.append(Face(v2, m20, m12))
 						new_faces_next_level.append(Face(m01, m12, m20))
-						for nf in new_faces_next_level[-4:]:
-							try:
-								nf._validate_face(self)
-							except ValueError as ve:
-								print(f"  Validation failed for new face {nf.vertices} during subdivision: {ve}")
-
-					elif n > 3:
-						center_face = Face(*midpoint_indices)
-						new_faces_next_level.append(center_face)
-						try:
-							center_face._validate_face(self)
-						except ValueError as ve:
-							print(f"  Validation failed for new center face {center_face.vertices} during subdivision (n-gon): {ve}")
-
-						for j in range(n):
-							v_curr = vert_indices[j]
-							m_next = midpoint_indices[j]
-							m_prev = midpoint_indices[(j - 1 + n) % n]
-							edge_triangle = Face(v_curr, m_next, m_prev)
-							new_faces_next_level.append(edge_triangle)
-							try:
-								edge_triangle._validate_face(self)
-							except ValueError as ve:
-								print(f"  Validation failed for new edge triangle {edge_triangle.vertices} during subdivision: {ve}")
 
 				else:
 					faces_kept += 1
