@@ -5,8 +5,9 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from matplotlib.widgets import RadioButtons, Slider
 import numpy as np
 from collections import defaultdict
-import matplotlib.cm as cm 
+import matplotlib.cm as cm
 import matplotlib.colors as colors
+import random
 
 PHI = (1.0 + np.sqrt(5.0)) / 2.0
 cmap = cm.get_cmap('RdYlGn_r')
@@ -64,9 +65,9 @@ class Face:
 		"""Calculates the approximate normal vector of the face (pointing outwards)."""
 		verts = self.get_vertices(world)
 		if len(verts) < 3:
-			return np.array([0.0, 0.0, 0.0]) 
+			return np.array([0.0, 0.0, 0.0])
 
-		
+
 		face_normal = np.zeros(3, dtype=np.float64)
 		num_verts = len(verts)
 		for i in range(num_verts):
@@ -74,7 +75,7 @@ class Face:
 			v_next = verts[(i + 1) % num_verts].pos
 			face_normal[0] += (v_curr[1] - v_next[1]) * (v_curr[2] + v_next[2])
 			face_normal[1] += (v_curr[2] - v_next[2]) * (v_curr[0] + v_next[0])
-			face_normal[2] += (v_curr[0] - v_next[0]) * (v_curr[1] + v_next[1])
+			face_normal[2] += (v_curr[0] - v_next[2]) * (v_curr[1] + v_next[1])
 
 		norm = np.linalg.norm(face_normal)
 		if abs(norm) < 1e-10:
@@ -103,10 +104,10 @@ class Face:
 		n = len(self.vertices)
 		if n < 3:
 			raise ValueError("Face must have at least 3 vertices")
-			
+
 		if n > 3:
 			points = [world.vertices[i].pos for i in self.vertices]
-			
+
 			normal = np.cross(points[1] - points[0], points[2] - points[0])
 			norm_val = np.linalg.norm(normal)
 			if norm_val < 1e-9:
@@ -118,9 +119,9 @@ class Face:
 			dominant_axis = np.argmax(np.abs(normal))
 			axes = [0, 1, 2]
 			axes.remove(dominant_axis)
-			
+
 			projected = [(p[axes[0]], p[axes[1]]) for p in points]
-			
+
 			for i in range(n):
 				for j in range(i + 2, n):
 					if (i == 0 and j == n - 1):
@@ -167,7 +168,7 @@ class Face:
 
 		angle_sum = 0.0
 		for i in range(n):
-			p0 = verts_pos[(i - 1 + n) % n] 
+			p0 = verts_pos[(i - 1 + n) % n]
 			p1 = verts_pos[i]
 			p2 = verts_pos[(i + 1) % n]
 
@@ -201,14 +202,16 @@ class Face:
 		return f"Face{self.vertices}"
 
 class Plate:
-	def __init__(self):
-		self.vertices: List[int] = [] 
-		pass
+	def __init__(self, plate_id):
+		self.plate_id = plate_id
+		self.vertices: List[int] = [] # List of vertex indices belonging to this plate
 
-	def move(self, oldvert: List[int], newvert: List[int]):
-		for v in oldvert:
-			self.vertices.remove(v)
-		self.vertices.extend(newvert)
+	def add_vertex(self, vertex_index):
+		self.vertices.append(vertex_index)
+
+	def __repr__(self):
+		return f"Plate(ID: {self.plate_id}, Vertices: {len(self.vertices)})"
+
 
 class worldState:
 	def __init__(self):
@@ -219,6 +222,8 @@ class worldState:
 		self.gravity: float = 9.81
 		self.details: int = 3
 		self.elevations: dict[int, float] = {} #assign vertex to float elevation
+		self.plates: List[Plate] = [] # Add plates attribute
+		self.adjacency_list: defaultdict[int, List[int]] = defaultdict(list) # Adjacency list for vertices
 		#TODO: assign elevations based on plates. mountains and trenches along fault lines
 
 		# Cache for subdivision: key=sorted tuple(v_idx1, v_idx2), value=midpoint_idx
@@ -261,13 +266,22 @@ class worldState:
 				print(f"Warning: Duplicate vertex found after normalization: Index {i} same as {self._vertex_pos_cache[key]}")
 			self._vertex_pos_cache[key] = i
 
+	def _build_adjacency_list(self):
+		"""Builds an adjacency list for vertices based on faces."""
+		self.adjacency_list.clear()
+		for face in self.faces:
+			for v_idx in face.vertices:
+				for neighbor_idx in face.vertices:
+					if v_idx != neighbor_idx:
+						if neighbor_idx not in self.adjacency_list[v_idx]:
+							self.adjacency_list[v_idx].append(neighbor_idx)
 
 	def icosphereBase(self):
 		self.vertices = []
 		self.faces = []
 		self._vertex_pos_cache = {}
 		self._subdivision_cache = {}
-		
+
 		vertices = [
 			Vertex(-1, PHI, 0),
 			Vertex(1, PHI, 0),
@@ -282,10 +296,10 @@ class worldState:
 			Vertex(-PHI, 0, -1),
 			Vertex(-PHI, 0, 1)
 		]
-		
+
 		for v in vertices:
 			v.normalize()
-		
+
 		faces = [
 			Face(0, 11, 5),
 			Face(0, 5, 1),
@@ -310,8 +324,153 @@ class worldState:
 		]
 		self.vertices = vertices
 		self.faces = faces
-		self.subdivide() 
+		self.subdivide()
+		self._build_adjacency_list() # Build adjacency list after subdivision
 		return self
+
+	def assign_icosphere_vertices_to_plates(self, num_plates: int) -> List[Plate]:
+		"""Assigns vertices to plates using a proximity-biased random walk with recycling."""
+		plates = [Plate(i) for i in range(num_plates)]
+		unassigned_vertices = set(range(len(self.vertices)))
+		if num_plates > len(self.vertices):
+			num_plates = len(self.vertices)
+			print(f"Warning: Number of plates requested exceeds number of vertices. Reducing to {num_plates} plates.")
+
+		start_vertices_indices = random.sample(list(unassigned_vertices), num_plates)
+
+		for i in range(num_plates):
+			start_vertex_index = start_vertices_indices[i]
+			plates[i].add_vertex(start_vertex_index)
+			unassigned_vertices.remove(start_vertex_index)
+
+		plate_vertex_counts = [1] * num_plates
+
+		iteration_count = 0
+		max_iterations = 20000 # Limit iterations to prevent potential infinite loops
+
+		while unassigned_vertices and iteration_count < max_iterations:
+			iteration_count += 1
+			print(f"unassigned_vertices has {len(unassigned_vertices)} left, iteration: {iteration_count}")
+			plate_index = random.randrange(num_plates)
+			current_plate = plates[plate_index]
+			possible_expansion_vertices = set()
+
+			for plate_vertex_index in current_plate.vertices:
+				adjacent_vertices = self.adjacency_list[plate_vertex_index]
+				for v_idx in adjacent_vertices:
+					if v_idx in unassigned_vertices:
+						possible_expansion_vertices.add(v_idx)
+
+			possible_expansion_vertices = list(possible_expansion_vertices)
+
+			if not possible_expansion_vertices:
+				if unassigned_vertices: # Fallback: random assignment if no proximal expansion
+					next_vertex_index = random.choice(list(unassigned_vertices))
+					current_plate.add_vertex(next_vertex_index)
+					unassigned_vertices.remove(next_vertex_index)
+					continue
+				else:
+					break # No more unassigned vertices, exit loop
+
+
+			# Calculate proximity bias
+			proximity_scores = []
+			for expansion_vertex_idx in possible_expansion_vertices:
+				min_distance = float('inf')
+				expansion_vertex_pos = self.vertices[expansion_vertex_idx].pos
+				for plate_vertex_idx in current_plate.vertices:
+					plate_vertex_pos = self.vertices[plate_vertex_idx].pos
+					distance = 1.0 - np.dot(expansion_vertex_pos, plate_vertex_pos)
+					min_distance = min(min_distance, distance)
+				proximity_scores.append(1.0 / (min_distance + 1e-6))
+
+			probabilities = np.array(proximity_scores) / np.sum(proximity_scores) if np.sum(proximity_scores) > 0 else np.ones(len(possible_expansion_vertices)) / len(possible_expansion_vertices)
+
+			if not possible_expansion_vertices:
+				continue
+
+			try:
+				next_vertex_index = np.random.choice(possible_expansion_vertices, p=probabilities)
+			except ValueError as e:
+				print(f"Error during weighted choice: {e}, probabilities: {probabilities}, possible vertices: {possible_expansion_vertices}")
+				next_vertex_index = random.choice(possible_expansion_vertices)
+
+
+			current_plate.add_vertex(next_vertex_index)
+			unassigned_vertices.remove(next_vertex_index)
+			plate_vertex_counts[plate_index] += 1
+
+		print("Initial plate assignment complete. Starting vertex recycling...")
+
+		recycled_vertices_count = 0
+		recycling_iterations = 5 # Number of recycling passes
+
+		for recycle_iter in range(recycling_iterations):
+			vertices_to_recycle = []
+			for plate in plates:
+				plate_recyclable_vertices = []
+				for vertex_index in plate.vertices:
+					plate_neighbors_count = 0
+					for neighbor_index in self.adjacency_list[vertex_index]:
+						if neighbor_index in plate.vertices:
+							plate_neighbors_count += 1
+					if plate_neighbors_count <= 1: # Recycle if very few neighbors within the plate
+						plate_recyclable_vertices.append(vertex_index)
+				vertices_to_recycle.extend(plate_recyclable_vertices)
+				plate.vertices = [v_idx for v_idx in plate.vertices if v_idx not in plate_recyclable_vertices] # Remove recycled vertices from plate
+
+
+			if not vertices_to_recycle:
+				print(f"No vertices to recycle in iteration {recycle_iter+1}. Recycling complete.")
+				break
+			else:
+				print(f"Recycling {len(vertices_to_recycle)} vertices in iteration {recycle_iter+1}...")
+				recycled_vertices_count += len(vertices_to_recycle)
+				unassigned_vertices.update(vertices_to_recycle) # Add recycled vertices back to unassigned
+
+				while vertices_to_recycle:
+					vertex_index_to_reassign = vertices_to_recycle.pop(0)
+					best_plate_index = -1
+					max_proximity_score = -1.0
+
+					neighboring_plates = defaultdict(list) # Plate index -> list of neighbor vertex indices in that plate
+
+					for neighbor_vertex_index in self.adjacency_list[vertex_index_to_reassign]:
+						for plate_idx, plate in enumerate(plates):
+							if neighbor_vertex_index in plate.vertices:
+								neighboring_plates[plate_idx].append(neighbor_vertex_index)
+								break # Vertex can only belong to one plate
+
+					if neighboring_plates:
+						proximity_scores_reassign = []
+						plate_indices_reassign = list(neighboring_plates.keys())
+						for plate_idx in plate_indices_reassign:
+							plate = plates[plate_idx]
+							proximity_score = 0.0
+							vertex_pos = self.vertices[vertex_index_to_reassign].pos
+							for plate_vertex_index in plate.vertices:
+								plate_vertex_pos = self.vertices[plate_vertex_index].pos
+								proximity_score += 1.0 / (1.0 - np.dot(vertex_pos, plate_vertex_pos) + 1e-6) # Sum proximity to all plate vertices
+							proximity_scores_reassign.append(proximity_score)
+
+						probabilities_reassign = np.array(proximity_scores_reassign) / np.sum(proximity_scores_reassign) if np.sum(proximity_scores_reassign) > 0 else np.ones(len(plate_indices_reassign)) / len(plate_indices_reassign)
+
+						try:
+							reassign_plate_index = np.random.choice(plate_indices_reassign, p=probabilities_reassign)
+						except ValueError as e:
+							print(f"Error during re-assignment weighted choice: {e}, probabilities: {probabilities_reassign}, possible plates: {plate_indices_reassign}")
+							reassign_plate_index = random.choice(plate_indices_reassign)
+
+						plates[reassign_plate_index].add_vertex(vertex_index_to_reassign)
+						unassigned_vertices.remove(vertex_index_to_reassign) #remove from unassigned - already added to plate
+
+					elif unassigned_vertices: # If no neighboring plates, put back in unassigned for general assignment
+						unassigned_vertices.add(vertex_index_to_reassign) # Keep in unassigned for next round if no neighbors
+						continue # Go to next vertex to recycle
+
+		print(f"Vertex recycling complete. Recycled a total of {recycled_vertices_count} vertices.")
+		return plates
+
 
 	def cubeBase(self):
 		self.vertices = []
@@ -320,15 +479,15 @@ class worldState:
 		self._subdivision_cache = {}
 
 		raw_verts = [Vertex(x, y, z) for x in [-1, 1] for y in [-1, 1] for z in [-1, 1]]
-		cube_indices = [self._add_vertex(v) for v in raw_verts] 
+		cube_indices = [self._add_vertex(v) for v in raw_verts]
 
 		self.faces = [
-			Face(cube_indices[0], cube_indices[2], cube_indices[6], cube_indices[4]), 
-			Face(cube_indices[1], cube_indices[3], cube_indices[7], cube_indices[5]), 
-			Face(cube_indices[0], cube_indices[1], cube_indices[5], cube_indices[4]), 
-			Face(cube_indices[2], cube_indices[3], cube_indices[7], cube_indices[6]), 
-			Face(cube_indices[0], cube_indices[1], cube_indices[3], cube_indices[2]), 
-			Face(cube_indices[4], cube_indices[5], cube_indices[7], cube_indices[6])  
+			Face(cube_indices[0], cube_indices[2], cube_indices[6], cube_indices[4]),
+			Face(cube_indices[1], cube_indices[3], cube_indices[7], cube_indices[5]),
+			Face(cube_indices[0], cube_indices[1], cube_indices[5], cube_indices[4]),
+			Face(cube_indices[2], cube_indices[3], cube_indices[7], cube_indices[6]),
+			Face(cube_indices[0], cube_indices[1], cube_indices[3], cube_indices[2]),
+			Face(cube_indices[4], cube_indices[5], cube_indices[7], cube_indices[6])
 		]
 
 		self.subdivide()
@@ -534,7 +693,7 @@ class worldState:
 				break
 
 			face_areas = []
-			valid_faces_indices = [] 
+			valid_faces_indices = []
 			print(f"  Calculating areas for {len(current_faces)} faces...")
 			for i, face in enumerate(current_faces):
 				try:
@@ -547,7 +706,7 @@ class worldState:
 						valid_faces_indices.append(i)
 				except Exception as e:
 					print(f"  Error calculating area for face {face.vertices}: {e}. Skipping this face.")
-					face_areas.append(-1.0) 
+					face_areas.append(-1.0)
 
 			valid_areas = [face_areas[i] for i in valid_faces_indices]
 
@@ -573,7 +732,7 @@ class worldState:
 			for i, face in enumerate(current_faces):
 				current_area = face_areas[i]
 				if current_area < 0:
-					continue 
+					continue
 
 				if current_area >= area_threshold:
 					faces_subdivided += 1
@@ -590,7 +749,7 @@ class worldState:
 							midpoint_indices.append(mid_idx)
 					except IndexError as e:
 						print(f"  Error getting midpoints for face {face.vertices}: {e}. Skipping subdivision for this face.")
-						new_faces_next_level.append(face) 
+						new_faces_next_level.append(face)
 						faces_subdivided -= 1
 						faces_kept += 1
 						continue
@@ -607,10 +766,10 @@ class worldState:
 						new_faces_next_level.append(Face(v0, m01, m20))
 						new_faces_next_level.append(Face(v1, m12, m01))
 						new_faces_next_level.append(Face(v2, m20, m12))
-						new_faces_next_level.append(Face(m01, m12, m20)) 
-						for nf in new_faces_next_level[-4:]: 
+						new_faces_next_level.append(Face(m01, m12, m20))
+						for nf in new_faces_next_level[-4:]:
 							try:
-								nf._validate_face(self) 
+								nf._validate_face(self)
 							except ValueError as ve:
 								print(f"  Validation failed for new face {nf.vertices} during subdivision: {ve}")
 
@@ -649,7 +808,7 @@ class worldState:
 		pass
 
 
-def VisualizeWorld(world: worldState, title: str = "World Mesh"):
+def VisualizeWorld(world: worldState, title: str = "World Mesh", plate_colors: Dict[int, str] = None):
 	fig = plt.figure(figsize=(12, 10))
 	ax = fig.add_subplot(111, projection='3d')
 
@@ -667,9 +826,24 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh"):
 				verts_idx = list(face.vertices)
 				face_verts_pos_poly = [world.vertices[i].pos for i in verts_idx]
 
-				face_normal = face.normal(world)
-				z_normal = face_normal[2]
-				f_color = cmap(norm(z_normal))
+				if plate_colors:
+					# Determine plate_id for this face (using the first vertex as a proxy - might need refinement for complex cases)
+					plate_id = -1
+					for plate in world.plates:
+						if verts_idx[0] in plate.vertices:
+							plate_id = plate.plate_id
+							break
+					if plate_id != -1 and plate_id in plate_colors:
+						f_color = plate_colors[plate_id]
+					else:
+						face_normal = face.normal(world)
+						z_normal = face_normal[2]
+						f_color = cmap(norm(z_normal)) # Default color if plate color not found
+				else:
+					face_normal = face.normal(world)
+					z_normal = face_normal[2]
+					f_color = cmap(norm(z_normal))
+
 
 				face_polys.append(face_verts_pos_poly)
 				face_colors.append(f_color)
@@ -706,7 +880,7 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh"):
 		ax.scatter(x, y, z, color='white', s=8, alpha=0.9, edgecolors='black', linewidths=0.5, depthshade=False)
 		print("Vertices added.")
 
-	ax.set_box_aspect([1, 1, 1]) 
+	ax.set_box_aspect([1, 1, 1])
 	limit = world.radius * 1.1
 	ax.set_xlim(-limit, limit)
 	ax.set_ylim(-limit, limit)
@@ -717,9 +891,15 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh"):
 	ax.set_zlabel('Z')
 	ax.set_title(f'{title} (Level: {world.details}, Verts: {len(world.vertices)}, Faces: {len(world.faces)})')
 
-	scalar_mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
-	scalar_mappable.set_array([]) 
-	cbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.6, aspect=20, label='Face Normal Z (Green: +1, Red: -1)')
+	if plate_colors:
+		# Create a legend for plates (basic example - adjust as needed)
+		handles = [plt.Rectangle((0,0),1,1, color=color) for color in plate_colors.values()]
+		labels = [f"Plate {i}" for i in plate_colors.keys()]
+		ax.legend(handles, labels, loc='upper left', bbox_to_anchor=(1, 1))
+	else:
+		scalar_mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
+		scalar_mappable.set_array([])
+		cbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.6, aspect=20, label='Face Normal Z (Green: +1, Red: -1)')
 
 	print("Finalizing plot...")
 	plt.tight_layout()
@@ -727,49 +907,30 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh"):
 
 def main():
 	common_radius = 1.0
+	num_plates = 15 # Modifiable number of plates
 
-	# # --- Icosphere Example ---
-	# print("Generating Icosphere...")
+	# --- Icosphere Example ---
+	print("Generating Icosphere...")
 	world_ico = worldState()
 	world_ico.radius = common_radius
 	world_ico.details = 2 # Detail level
 	world_ico.icosphereBase()
 	print(f"Icosphere Vertices: {len(world_ico.vertices)}, Faces: {len(world_ico.faces)}")
-	VisualizeWorld(world_ico, "Icosphere")
+	world_ico.plates = world_ico.assign_icosphere_vertices_to_plates(num_plates) # Assign plates with proximity-biased random walk + recycling
+	print(f"Plates: {world_ico.plates}") # Print plate info
+
+	# Assign colors to plates for visualization
+	plate_colors_map = {}
+	random.seed(42) # for consistent colors
+	distinct_colors = ['red', 'blue', 'green', 'purple', 'orange', 'cyan', 'magenta', 'yellow', 'lime', 'pink', 'teal', 'lavender', 'brown', 'beige', 'maroon']
+	plate_colors = random.sample(distinct_colors, num_plates) if num_plates <= len(distinct_colors) else distinct_colors * (num_plates // len(distinct_colors) + 1)
+
+	for i in range(num_plates):
+		plate_colors_map[i] = plate_colors[i]
 
 
-	# # --- Cube Sphere Example ---
-	# print("\nGenerating Cube Sphere...")
-	# world_cube = worldState()
-	# world_cube.radius = common_radius
-	# world_cube.details = 3 # Detail level
-	# world_cube.cubeBase()
-	# print(f"Cube Sphere Vertices: {len(world_cube.vertices)}, Faces: {len(world_cube.faces)}")
-	# VisualizeWorld(world_cube, "Cube Sphere")
+	VisualizeWorld(world_ico, f"Icosphere with {num_plates} Plates (Proximity Biased + Recycling)", plate_colors=plate_colors_map)
 
-
-	# --- Truncated Icosahedron Example ---
-	# print("\nGenerating Truncated Icosahedron Sphere...")
-	# world_trunc = worldState()
-	# world_trunc.radius = common_radius
-	# world_trunc.details = 3 # Start with lower detail for faster generation/viz
-	# world_trunc.truncatedIcosahedronBase()
-	# print(f"Trunc. Ico. Vertices: {len(world_trunc.vertices)}, Faces: {len(world_trunc.faces)}")
-	# face_types = defaultdict(int)
-	# total_area = 0
-	# for f in world_trunc.faces:
-	# 	face_types[len(f.vertices)] += 1
-	# 	try:
-	# 		total_area += f.area(world_trunc) # Calculate area
-	# 	except Exception as e:
-	# 		print(f"Error calculating area for face {f.vertices}: {e}")
-
-	# print(f"Face types after subdivision: {dict(face_types)}")
-	# expected_area = 4 * np.pi * world_trunc.radius**2
-	# print(f"Total calculated face area: {total_area:.5f}")
-	# print(f"Expected sphere area:       {expected_area:.5f}")
-	# print(f"Area difference: {abs(total_area - expected_area):.5f}")
-	# VisualizeWorld(world_trunc, "Truncated Icosahedron Sphere")
 
 
 if __name__ == "__main__":
