@@ -10,18 +10,21 @@ import matplotlib.cm as cm
 import matplotlib.colors as colors
 import random
 
-
 PHI = (1.0 + np.sqrt(5.0)) / 2.0
-norm_elevation = colors.Normalize(vmin=-10000, vmax=10000) # Example range, adjust later
-
+norm_elevation = colors.Normalize(vmin=-15000, vmax=15000) # Fixed range for colorbar
 PLATES = 15 #earth rate
 SUBDIVISIONS = 3 #3 is balanced for testing, but 5 is needed for reasonable accuracy
 MAX_ANGULAR_VELOCITY_RAD_PER_YR = np.radians(1.0) # Corresponds to ~11 cm/yr at equator for Earth radius. Adjust as needed.
-ELEVATION_MOUNTAIN_BASE = 4000.0 # meters
-ELEVATION_TRENCH_BASE = -5000.0 # meters
+ELEVATION_MOUNTAIN_BASE = 10000.0 # meters
+ELEVATION_TRENCH_BASE = -11000.0 # meters
 ELEVATION_DIFFUSION_FACTOR = 0.15 # How much elevation spreads per pass
 ELEVATION_DIFFUSION_PASSES = 10 # Number of smoothing passes
 RADIUS = 6371000
+
+CONTINENTAL_PLATE_PROB = 0.3  # Probability of a plate being continental
+CONTINENTAL_BASE_ELEVATION = 2000.0 # meters
+OCEANIC_BASE_ELEVATION = -3000.0 # meters
+
 
 class Vertex:
 	def __init__(self, x, y, z):
@@ -95,9 +98,9 @@ class Face:
 
 		# Calculate the lengths of the sides (as angles on the unit sphere)
 		# Use clip to avoid domain errors in acos due to floating point inaccuracies
-		a = np.arccos(np.clip(np.dot(p1, p2)))
-		b = np.arccos(np.clip(np.dot(p0, p2)))
-		c = np.arccos(np.clip(np.dot(p0, p1)))
+		a = np.arccos(np.clip(np.dot(p1, p2), -1.0, 1.0))
+		b = np.arccos(np.clip(np.dot(p0, p2), -1.0, 1.0))
+		c = np.arccos(np.clip(np.dot(p0, p1), -1.0, 1.0))
 
 		# Calculate the semi-perimeter
 		s = (a + b + c) / 2.0
@@ -137,15 +140,16 @@ class Face:
 class Plate:
 	def __init__(self, plate_id):
 		self.plate_id = plate_id
-		self.vertices: List[int] = [] 
-		self.angular_velocity: np.ndarray = np.zeros(3, dtype=np.float64) 
+		self.vertices: List[int] = []
+		self.angular_velocity: np.ndarray = np.zeros(3, dtype=np.float64)
+		self.plate_type: str = 'oceanic' # Default to oceanic, can be 'continental'
 
 	def add_vertex(self, vertex_index):
 		self.vertices.append(vertex_index)
 
 	def __repr__(self):
 		ang_vel_deg_yr = np.degrees(np.linalg.norm(self.angular_velocity)) # Magnitude
-		return (f"Plate(ID: {self.plate_id}, Vertices: {len(self.vertices)}, "
+		return (f"Plate(ID: {self.plate_id}, Type: {self.plate_type}, Vertices: {len(self.vertices)}, "
 				f"AngVel: {ang_vel_deg_yr:.2f} deg/yr)")
 
 class worldState:
@@ -160,8 +164,8 @@ class worldState:
 		self.plates: List[Plate] = []
 		self.adjacency_list: defaultdict[int, List[int]] = defaultdict(list)
 		self.vertex_to_plate_id: Dict[int, int] = {}
-		self.boundary_vertices: Set[int] = set() 
-		self.boundary_edges: Set[Tuple[int, int]] = set() 
+		self.boundary_vertices: Set[int] = set()
+		self.boundary_edges: Set[Tuple[int, int]] = set()
 		self.boundary_properties: Dict[Tuple[int, int], Dict] = {}
 
 		# Cache for subdivision: key=sorted tuple(v_idx1, v_idx2), value=midpoint_idx
@@ -273,6 +277,14 @@ class worldState:
 	def assign_icosphere_vertices_to_plates(self, num_plates: int) -> List[Plate]:
 		"""Assigns vertices to plates using a proximity-biased random walk with recycling."""
 		plates = [Plate(i) for i in range(num_plates)]
+
+		# Randomly assign plate types (continental/oceanic)
+		for plate in plates:
+			if random.random() < CONTINENTAL_PLATE_PROB:
+				plate.plate_type = 'continental'
+			else:
+				plate.plate_type = 'oceanic'
+
 		unassigned_vertices = set(range(len(self.vertices)))
 		self.vertex_to_plate_id = {} # Reset map
 		start_vertices_indices = random.sample(list(unassigned_vertices), num_plates)
@@ -320,7 +332,6 @@ class worldState:
 				min_distance_sq = float('inf')
 				for plate_v_pos in plate_vertex_positions:
 					dot_prod = np.dot(exp_pos, plate_v_pos)
-					angle = np.arccos(np.clip(dot_prod, -1.0, 1.0))
 					distance_metric = 1.0 - dot_prod # Smaller value is closer
 					min_distance_sq = min(min_distance_sq, distance_metric)
 
@@ -443,7 +454,7 @@ class worldState:
 							# Add score based on proximity (dot product)
 							neighbor_pos = self.vertices[neighbor_idx].pos
 							dot_prod = np.dot(vertex_pos, neighbor_pos)
-							plate_score += (1.0 + dot_prod) # Score higher for closer neighbors (dot ~ 1)
+							plate_score += (1.0 + dot_prod) # Score higher for closer neighbors
 
 					# Normalize by the number of neighbors from that plate? Or just sum scores? Sum seems ok.
 					scores[target_plate_id] = plate_score * neighboring_plate_counts[target_plate_id] # Weight by count too
@@ -776,18 +787,22 @@ class worldState:
 										  diffusion_passes: int = ELEVATION_DIFFUSION_PASSES,
 										  diffusion_factor: float = ELEVATION_DIFFUSION_FACTOR):
 		"""Assigns vertex elevations based on nearby boundary types and magnitudes, then smooths."""
-		print("\nAssigning elevations based on plate boundaries...")
-		if not self.boundary_properties:
-			print(" Error: Boundary properties not calculated. Run calculate_boundary_motions first.")
-			return
-		if not self.vertices:
-			print(" Error: No vertices exist.")
-			return
+
 
 		num_vertices = len(self.vertices)
 		# Initialize elevations to 0 (or a base sea level)
 		base_elevation = 0.0
 		self.elevations = {i: base_elevation for i in range(num_vertices)}
+
+		print(" Assigning base elevations based on plate type...")
+		for v_idx in range(num_vertices):
+			plate_id = self.vertex_to_plate_id.get(v_idx)
+			if plate_id is not None:
+				plate_type = self.plates[plate_id].plate_type
+				if plate_type == 'continental':
+					self.elevations[v_idx] += CONTINENTAL_BASE_ELEVATION
+				elif plate_type == 'oceanic':
+					self.elevations[v_idx] += OCEANIC_BASE_ELEVATION
 
 		# --- Step 1: Apply direct elevation changes at boundary vertices ---
 		print(f" Applying direct elevation changes to {len(self.boundary_vertices)} boundary vertices...")
@@ -829,7 +844,7 @@ class worldState:
 		for v_idx, data in elevation_updates.items():
 			if data['count'] > 0:
 				avg_influence = data['sum_influence'] / data['count']
-				self.elevations[v_idx] = base_elevation + avg_influence
+				self.elevations[v_idx] += avg_influence # Add to existing base elevation
 			# else: vertex was in boundary_vertices but no edges contributed? Should not happen.
 
 		if diffusion_passes > 0 and diffusion_factor > 0:
@@ -885,8 +900,8 @@ class worldState:
 
 		final_min = min(self.elevations.values())
 		final_max = max(self.elevations.values())
-		norm_elevation.vmin = final_min
-		norm_elevation.vmax = final_max
+		norm_elevation.vmin = -15000 # Fixed range
+		norm_elevation.vmax = 15000 # Fixed range
 		print(f"Final Elevation Range: {final_min:.0f}m to {final_max:.0f}m")
 
 def VisualizeWorld(world: worldState, title: str = "World Mesh",
@@ -913,12 +928,13 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 		skipped_faces = 0
 
 		cmap_elevation = colormaps['terrain']
-		norm_elevation_dynamic = None
-		if color_mode == "elevation" and has_elevations:
-			all_elevs = list(world.elevations.values())
-			min_elev, max_elev = min(all_elevs), max(all_elevs)
-			print(f" Elevation range for coloring: {min_elev:.0f}m to {max_elev:.0f}m")
-			norm_elevation_dynamic = colors.Normalize(vmin=min_elev, vmax=max_elev)
+		norm_elevation_dynamic = colors.Normalize(vmin=-15000, vmax=15000) # Fixed range
+		# norm_elevation_dynamic = None # Old dynamic range
+		# if color_mode == "elevation" and has_elevations:
+		# 	all_elevs = list(world.elevations.values())
+		# 	min_elev, max_elev = min(all_elevs), max(all_elevs)
+		# 	print(f" Elevation range for coloring: {min_elev:.0f}m to {max_elev:.0f}m")
+		# 	norm_elevation_dynamic = colors.Normalize(vmin=min_elev, vmax=max_elev) # Old dynamic range
 
 		cmap_normal = colormaps['viridis']
 		norm_normal = colors.Normalize(vmin=-1.0, vmax=1.0)
@@ -947,22 +963,6 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 					else: # Missing elevation data for some vertices
 						f_color = (0.1, 0.1, 0.1, 0.6) # Black/dark gray for missing data
 
-
-				elif color_mode == "plates":
-					# Use plate ID of the first vertex (approximation)
-					first_vertex_id = verts_idx[0]
-					plate_id = world.vertex_to_plate_id.get(first_vertex_id, -1)
-					if plate_id != -1 and plate_colors_map and plate_id in plate_colors_map:
-						f_color = plate_colors_map[plate_id]
-					else:
-						f_color = (0.3, 0.3, 0.3, 0.6) # Dark gray
-
-				elif color_mode == "normal":
-					# Color by face normal's Z component
-					face_normal_vec = face.normal(world)
-					z_normal = face_normal_vec[2] if len(face_normal_vec) == 3 else 0.0
-					f_color = cmap_normal(norm_normal(z_normal))
-
 				face_polys.append(face_verts_pos_poly)
 				face_colors.append(f_color)
 
@@ -984,7 +984,7 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 			print(f"Skipped {skipped_faces} faces due to errors.")
 
 	if face_polys:
-		poly_collection = Poly3DCollection(face_polys, facecolors=face_colors, edgecolors='none', linewidth=0.1)
+		poly_collection = Poly3DCollection(face_polys, facecolors=face_colors, edgecolors='k', linewidth=0.1) # Added edgecolors='k' for black edges
 		ax.add_collection3d(poly_collection)
 		print(" Faces added.")
 	else:
@@ -1000,27 +1000,27 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 	ax.set_xlabel('X')
 	ax.set_ylabel('Y')
 	ax.set_zlabel('Z')
-	ax.set_title(f'{title}\n(Detail: {world.details}, Verts: {len(world.vertices)}, Faces: {len(world.faces)}, Mode: {color_mode})')
+	ax.set_title(f'{title}\n(Detail: {world.details}, Verts: {len(world.vertices)}, Faces: {len(world.faces)}, Mode: {color_mode})', pad=20) # Added pad for title
 	ax.view_init(elev=30, azim=45) # Adjust viewing angle
-	# Disable grid for cleaner look
-	ax.grid(False)
+	ax.grid(True, linestyle='--', linewidth=0.5, color='gray', alpha=0.5) # Added gridlines
 	# Background color
-	ax.xaxis.set_pane_color((0.0, 0.0, 0.0, 0.1))
-	ax.yaxis.set_pane_color((0.0, 0.0, 0.0, 0.1))
-	ax.zaxis.set_pane_color((0.0, 0.0, 0.0, 0.1))
+	ax.xaxis.set_pane_color((0.9, 0.9, 0.9, 0.1))
+	ax.yaxis.set_pane_color((0.9, 0.9, 0.9, 0.1))
+	ax.zaxis.set_pane_color((0.9, 0.9, 0.9, 0.1))
 
 
 	# --- Colorbar / Legend ---
 	# Adjust layout rect based on whether a legend or colorbar is added
 	legend_rect = [0, 0, 0.85, 1]
-	colorbar_rect = [0, 0, 0.9, 1]
+	colorbar_rect = [0, 0.02, 0.88, 0.96]
 	default_rect = [0, 0, 1, 1]
 	current_rect = default_rect
 
 	if color_mode == "elevation" and norm_elevation_dynamic:
 		scalar_mappable = cm.ScalarMappable(norm=norm_elevation_dynamic, cmap=cmap_elevation)
 		scalar_mappable.set_array([]) # Important!
-		cbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.6, aspect=20, label='Elevation (m)', pad=0.08)
+		cbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.6, aspect=20, label='Elevation (m)', pad=0.08, location='right') # Adjusted location
+		cbar.ax.set_ylim(-15000, 15000) 
 		current_rect = colorbar_rect
 
 	plt.tight_layout(rect=current_rect) # Adjust layout for legend/colorbar
@@ -1041,7 +1041,7 @@ def main():
 	conv_elev = 6000.0    # Base elevation boost for convergence (mountains)
 	div_elev = 1500.0     # Base elevation for divergent boundaries (mid-ocean ridge)
 	trans_elev = 200.0    # Minor ridges/troughs for transform faults
-	rate_scale = 5.0e7
+	rate_scale = 5.0e1
 	diff_passes = 15      # Number of smoothing passes for elevation diffusion
 	diff_factor = 0.10    # How much elevation spreads per pass (0-1)
 
@@ -1077,10 +1077,16 @@ def main():
 		print("\nNo plates assigned, skipping tectonic simulation.")
 
 	plate_colors = None
+	if world_sim.elevations:
+		min_elev = min(world_sim.elevations.values())
+		max_elev = max(world_sim.elevations.values())
+		print(f"Elevation range: min={min_elev}, max={max_elev}")
+	else:
+		print("world_sim.elevations is empty!")
 	if world_sim.plates:
 		plate_colors = {}
 		num_p = len(world_sim.plates)
-		cmap_plates_vis = cm.get_cmap('tab20', num_p if num_p > 0 else 1) # Use tab20, ensure lut >= 1
+		cmap_plates_vis = plt.get_cmap('tab20', num_p if num_p > 0 else 1) # Use tab20, ensure lut >= 1
 		for i in range(num_p):
 			plate_colors[i] = cmap_plates_vis(i) # Get RGBA tuple
 
