@@ -10,7 +10,7 @@ import matplotlib.cm as cm
 import matplotlib.colors as colors
 import random
 
-from globals import PLATES, RADIUS, SUBDIVISIONS
+from globals import ELEVATION_MOUNTAIN_BASE, ELEVATION_TRENCH_BASE, PLATES, RADIUS, SUBDIVISIONS
 from shape import Face, Vertex
 from world import worldState, icosphere
 
@@ -149,10 +149,10 @@ def main():
 
 	# Elevation generation parameters
 	# Using ridge for divergent instead of trench
-	conv_elev = 6000.0    # Base elevation boost for convergence (mountains)
-	div_elev = 1500.0     # Base elevation for divergent boundaries (mid-ocean ridge)
+	conv_elev = ELEVATION_MOUNTAIN_BASE    # Base elevation boost for convergence (mountains)
+	div_elev = ELEVATION_TRENCH_BASE     # Base elevation for divergent boundaries (mid-ocean ridge)
 	trans_elev = 200.0    # Minor ridges/troughs for transform faults
-	rate_scale = 5.0e1
+	rate_scale = 5.0
 	diff_passes = 15      # Number of smoothing passes for elevation diffusion
 	diff_factor = 0.10    # How much elevation spreads per pass (0-1)
 
@@ -169,14 +169,7 @@ def main():
 		success = world_sim.calculate_boundary_motions(classification_threshold=0.65)
 
 		if success:
-			world_sim.assign_elevations_from_boundaries(
-				base_convergent=conv_elev,
-				base_divergent=div_elev,
-				base_transform=trans_elev,
-				rate_scaling_factor=rate_scale,
-				diffusion_passes=diff_passes,
-				diffusion_factor=diff_factor
-			)
+			world_sim.assign_elevations_from_boundaries()
 		else:
 			print("Skipping elevation assignment due to errors in motion calculation.")
 

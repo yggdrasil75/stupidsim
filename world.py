@@ -9,6 +9,23 @@ from globals import CONTINENTAL_BASE_ELEVATION, CONTINENTAL_PLATE_PROB, ELEVATIO
 from shape import Face, Vertex
 
 
+#copied from globals for reference
+# NORM_ELEVATION = colors.Normalize(vmin=-15000, vmax=15000) # Fixed range for colorbar
+# PLATES = 15 #earth rate
+# SUBDIVISIONS: int = 3 #3 is balanced for testing, but 5 is needed for reasonable accuracy
+# MAX_ANGULAR_VELOCITY_RAD_PER_YR = np.radians(1.0) # Corresponds to ~11 cm/yr at equator for Earth radius. Adjust as needed.
+# ELEVATION_MOUNTAIN_BASE = 10000.0 # meters
+# ELEVATION_TRENCH_BASE = -11000.0 # meters
+# ELEVATION_DIFFUSION_FACTOR = 0.15 # How much elevation spreads per pass
+# ELEVATION_DIFFUSION_PASSES = 10 # Number of smoothing passes
+# RADIUS = 6371000
+
+# CONTINENTAL_PLATE_PROB = 0.3  # Probability of a plate being continental
+# CONTINENTAL_BASE_ELEVATION = 2000.0 # meters
+# OCEANIC_BASE_ELEVATION = -3000.0 # meters
+
+# PHI = (1.0 + np.sqrt(5.0)) / 2.0
+
 class Plate:
 	def __init__(self, plate_id):
 		self.plate_id = plate_id
@@ -391,7 +408,7 @@ class worldState:
 			direction = np.array([x, y, z])
 
 			# Random magnitude up to max_angular_velocity
-			magnitude = np.random.uniform(0, MAX_ANGULAR_VELOCITY_RAD_PER_YR)
+			magnitude = np.random.uniform(0, MAX_ANGULAR_VELOCITY_RAD_PER_YR) / self.radius
 
 			plate.angular_velocity = direction * magnitude
 		print("Angular velocities assigned.")
@@ -435,13 +452,9 @@ class worldState:
 			p_mid_unit = p_mid / p_mid_norm # Position vector on the unit sphere
 			p_mid_world = p_mid_unit * self.radius # Position vector in world units (meters)
 
-			# Relative linear velocity: v_rel = omega_rel x p_mid_world
-			# v_rel = np.cross(omega_rel, p_mid_world) # meters/year
-
-			# Calculate relative velocity more robustly using individual velocities
-			vel1 = np.cross(omega1, p_mid_world) # Velocity of point if it were on plate 1
-			vel2 = np.cross(omega2, p_mid_world) # Velocity of point if it were on plate 2
-			v_rel = vel2 - vel1 # Velocity of plate 2 relative to plate 1 at p_mid (meters/year)
+			vel1 = np.cross(omega1, p_mid_world)
+			vel2 = np.cross(omega2, p_mid_world)
+			v_rel = vel2 - vel1
 
 
 			# --- Classify Boundary ---
@@ -531,14 +544,14 @@ class worldState:
 			return False
 		return True
 
-	def assign_elevations_from_boundaries(self,
-				base_convergent: float = ELEVATION_MOUNTAIN_BASE,
-				base_divergent: float = ELEVATION_TRENCH_BASE,
-				base_transform: float = 100.0, # Slight ridge/fracture zone
-				rate_scaling_factor: float = 1e6, # Scale velocity (m/yr) to elevation impact
-				diffusion_passes: int = ELEVATION_DIFFUSION_PASSES,
-				diffusion_factor: float = ELEVATION_DIFFUSION_FACTOR):
+	def assign_elevations_from_boundaries(self):
 		"""Assigns vertex elevations based on nearby boundary types and magnitudes, then smooths."""
+		base_convergent: float = ELEVATION_MOUNTAIN_BASE / 2
+		base_divergent: float = ELEVATION_TRENCH_BASE / 2
+		base_transform: float = 200.0 # Slight ridge/fracture zone
+		rate_scaling_factor: float = 5.0e6 # Scale velocity (m/yr) to elevation impact
+		diffusion_passes: int = ELEVATION_DIFFUSION_PASSES
+		diffusion_factor: float = ELEVATION_DIFFUSION_FACTOR
 
 
 		num_vertices = len(self.vertices)
@@ -552,21 +565,16 @@ class worldState:
 			if plate_id is not None:
 				plate_type = self.plates[plate_id].plate_type
 				if plate_type == 'continental':
-					self.elevations[v_idx] += CONTINENTAL_BASE_ELEVATION
+					self.elevations[v_idx] += CONTINENTAL_BASE_ELEVATION * (self.radius / 6371000)
 				elif plate_type == 'oceanic':
-					self.elevations[v_idx] += OCEANIC_BASE_ELEVATION
-
-		# --- Step 1: Apply direct elevation changes at boundary vertices ---
-		print(f" Applying direct elevation changes to {len(self.boundary_vertices)} boundary vertices...")
+					self.elevations[v_idx] += OCEANIC_BASE_ELEVATION * (self.radius / 6371000)
 		elevation_updates = defaultdict(lambda: {'sum_influence': 0.0, 'count': 0})
 
-		# Convert rates from m/s back to m/year for potentially more intuitive scaling
 		m_per_sec_to_m_per_yr = 1.0 / (1.0 / (365.25 * 24 * 3600))
 
 		for edge, props in self.boundary_properties.items():
 			v1_idx, v2_idx = edge
 			boundary_type = props.get("type", "undefined")
-			# Use absolute convergence rate for magnitude, sign determines type effect
 			conv_rate_myr = props.get("convergence_rate_mps", 0.0) * m_per_sec_to_m_per_yr
 			trans_rate_myr = abs(props.get("transform_rate_mps", 0.0)) * m_per_sec_to_m_per_yr
 
@@ -574,14 +582,14 @@ class worldState:
 			if boundary_type == "convergent":
 				# Negative conv_rate_myr means convergence
 				magnitude = abs(conv_rate_myr) # Use absolute rate
-				elevation_change = base_convergent * (1 + magnitude * rate_scaling_factor / base_convergent)
+				elevation_change = base_convergent * (1 + magnitude * rate_scaling_factor / base_convergent) * (self.radius / 6371000)
 			elif boundary_type == "divergent":
 				# Positive conv_rate_myr means divergence
-				magnitude = abs(conv_rate_myr)
-				elevation_change = base_divergent * (1 + magnitude * rate_scaling_factor / abs(base_divergent)) # Trench gets deeper
+				magnitude = conv_rate_myr
+				elevation_change = base_divergent * (1 + magnitude * rate_scaling_factor / base_divergent) * (self.radius / 6371000) # Trench gets deeper
 			elif boundary_type == "transform":
 				magnitude = trans_rate_myr
-				elevation_change = base_transform * (1 + magnitude * rate_scaling_factor / base_transform) # Minor effect, scales with slip rate
+				elevation_change = base_transform * (1 + magnitude * rate_scaling_factor / base_transform) * (self.radius / 6371000) # Minor effect, scales with slip rate
 
 
 			if boundary_type != "passive" and boundary_type != "undefined":
@@ -621,7 +629,9 @@ class worldState:
 					for n_idx in neighbor_indices:
 						# Check if neighbor index is valid before accessing elevation
 						if n_idx in current_elevations:
-							sum_neighbor_elev += current_elevations[n_idx]
+							dist = np.linalg.norm(self.vertices[v_idx].pos - self.vertices[n_idx].pos) * self.radius
+							weight = 1.0 / dist
+							sum_neighbor_elev += current_elevations[n_idx] * weight
 							num_valid_neighbors += 1
 						# else: print(f"Warning: Neighbor {n_idx} not in current_elevations during diffusion.")
 
