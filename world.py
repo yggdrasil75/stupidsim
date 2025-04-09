@@ -42,7 +42,7 @@ class Plate:
 				f"AngVel: {ang_vel_deg_yr:.2f} deg/yr)")
 
 class worldState:
-	def __init__(self, radius: float = 1.0, subdivisions=3):
+	def __init__(self, radius, subdivisions=3):
 		self.vertices: List[Vertex] = []
 		self.faces: List[Face] = []
 		self.radius: float = radius # Physical radius (e.g., in meters or km)
@@ -546,10 +546,10 @@ class worldState:
 
 	def assign_elevations_from_boundaries(self):
 		"""Assigns vertex elevations based on nearby boundary types and magnitudes, then smooths."""
-		base_convergent: float = ELEVATION_MOUNTAIN_BASE / 2
-		base_divergent: float = ELEVATION_TRENCH_BASE / 2
+		base_convergent: float = ELEVATION_MOUNTAIN_BASE 
+		base_divergent: float = ELEVATION_TRENCH_BASE 
 		base_transform: float = 200.0 # Slight ridge/fracture zone
-		rate_scaling_factor: float = 5.0e6 # Scale velocity (m/yr) to elevation impact
+		rate_scaling_factor: float = 5.0e7 # Scale velocity (m/yr) to elevation impact
 		diffusion_passes: int = ELEVATION_DIFFUSION_PASSES
 		diffusion_factor: float = ELEVATION_DIFFUSION_FACTOR
 
@@ -565,9 +565,9 @@ class worldState:
 			if plate_id is not None:
 				plate_type = self.plates[plate_id].plate_type
 				if plate_type == 'continental':
-					self.elevations[v_idx] += CONTINENTAL_BASE_ELEVATION * (self.radius / 6371000)
+					self.elevations[v_idx] += CONTINENTAL_BASE_ELEVATION# * (self.radius / 6371000)
 				elif plate_type == 'oceanic':
-					self.elevations[v_idx] += OCEANIC_BASE_ELEVATION * (self.radius / 6371000)
+					self.elevations[v_idx] += OCEANIC_BASE_ELEVATION# * (self.radius / 6371000)
 		elevation_updates = defaultdict(lambda: {'sum_influence': 0.0, 'count': 0})
 
 		m_per_sec_to_m_per_yr = 1.0 / (1.0 / (365.25 * 24 * 3600))
@@ -575,26 +575,26 @@ class worldState:
 		for edge, props in self.boundary_properties.items():
 			v1_idx, v2_idx = edge
 			boundary_type = props.get("type", "undefined")
-			conv_rate_myr = props.get("convergence_rate_mps", 0.0) * m_per_sec_to_m_per_yr
-			trans_rate_myr = abs(props.get("transform_rate_mps", 0.0)) * m_per_sec_to_m_per_yr
+			conv_rate_myr = props.get("convergence_rate_mps", 0.0)
+			trans_rate_myr = abs(props.get("transform_rate_mps", 0.0))
 
 			elevation_change = 0.0
 			if boundary_type == "convergent":
 				# Negative conv_rate_myr means convergence
 				magnitude = abs(conv_rate_myr) # Use absolute rate
-				elevation_change = base_convergent * (1 + magnitude * rate_scaling_factor / base_convergent) * (self.radius / 6371000)
+				elevation_change = base_convergent * (1 + magnitude * rate_scaling_factor / base_convergent)# * (self.radius / 6371000)
 			elif boundary_type == "divergent":
 				# Positive conv_rate_myr means divergence
 				magnitude = conv_rate_myr
-				elevation_change = base_divergent * (1 + magnitude * rate_scaling_factor / base_divergent) * (self.radius / 6371000) # Trench gets deeper
+				elevation_change = base_divergent * (1 + magnitude * rate_scaling_factor / base_divergent)# * (self.radius / 6371000) # Trench gets deeper
 			elif boundary_type == "transform":
 				magnitude = trans_rate_myr
-				elevation_change = base_transform * (1 + magnitude * rate_scaling_factor / base_transform) * (self.radius / 6371000) # Minor effect, scales with slip rate
+				elevation_change = base_transform * (1 + magnitude * rate_scaling_factor / base_transform)# * (self.radius / 6371000) # Minor effect, scales with slip rate
 
 
 			if boundary_type != "passive" and boundary_type != "undefined":
 				if v1_idx in self.boundary_vertices:
-					elevation_updates[v1_idx]['sum_influence'] += elevation_change
+					elevation_updates[v1_idx]['sum_influence'] += elevation_change 
 					elevation_updates[v1_idx]['count'] += 1
 				if v2_idx in self.boundary_vertices:
 					elevation_updates[v2_idx]['sum_influence'] += elevation_change
@@ -615,8 +615,6 @@ class worldState:
 
 			for i_pass in range(diffusion_passes):
 
-				# Update all vertices *except* potentially the boundary ones?
-				# Let's update all vertices, allowing boundaries to smooth slightly too.
 				for v_idx in range(num_vertices):
 					if v_idx not in self.adjacency_list or not self.adjacency_list[v_idx]:
 						# Isolated vertex, keep its current elevation
