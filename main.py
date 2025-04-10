@@ -10,7 +10,7 @@ import matplotlib.cm as cm
 import matplotlib.colors as colors
 import random
 
-from globals import ELEVATION_MOUNTAIN_BASE, ELEVATION_TRENCH_BASE, PLATES, RADIUS, SUBDIVISIONS
+from globals import ELEVATION_MOUNTAIN_BASE, ELEVATION_TRENCH_BASE, NORM_ELEVATION, PLATES, RADIUS, SUBDIVISIONS, VMAX, VMIN
 from shape import Face, Vertex
 from world import worldState, icosphere
 
@@ -38,17 +38,14 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 		count = 0
 		skipped_faces = 0
 
-		cmap_elevation = colormaps['terrain']
-		norm_elevation_dynamic = colors.Normalize(vmin=-15000, vmax=15000) # Fixed range
+		cmap_elevation = colormaps['gray']
+		norm_elevation_dynamic = NORM_ELEVATION
 		# norm_elevation_dynamic = None # Old dynamic range
 		# if color_mode == "elevation" and has_elevations:
 		# 	all_elevs = list(world.elevations.values())
 		# 	min_elev, max_elev = min(all_elevs), max(all_elevs)
 		# 	print(f" Elevation range for coloring: {min_elev:.0f}m to {max_elev:.0f}m")
 		# 	norm_elevation_dynamic = colors.Normalize(vmin=min_elev, vmax=max_elev) # Old dynamic range
-
-		cmap_normal = colormaps['viridis']
-		norm_normal = colors.Normalize(vmin=-1.0, vmax=1.0)
 
 
 		for face in world.faces:
@@ -131,7 +128,7 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 		scalar_mappable = cm.ScalarMappable(norm=norm_elevation_dynamic, cmap=cmap_elevation)
 		scalar_mappable.set_array([]) # Important!
 		cbar = fig.colorbar(scalar_mappable, ax=ax, shrink=0.6, aspect=20, label='Elevation (m)', pad=0.08, location='right') # Adjusted location
-		cbar.ax.set_ylim(-15000, 15000) 
+		cbar.ax.set_ylim(VMIN, VMAX) 
 		current_rect = colorbar_rect
 
 	plt.tight_layout(rect=current_rect) # Adjust layout for legend/colorbar

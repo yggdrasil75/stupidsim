@@ -5,24 +5,26 @@ import random
 from typing import Dict, List, Set, Tuple
 
 import numpy as np
-from globals import CONTINENTAL_BASE_ELEVATION, CONTINENTAL_PLATE_PROB, ELEVATION_DIFFUSION_FACTOR, ELEVATION_DIFFUSION_PASSES, ELEVATION_MOUNTAIN_BASE, ELEVATION_TRENCH_BASE, MAX_ANGULAR_VELOCITY_RAD_PER_YR, NORM_ELEVATION, OCEANIC_BASE_ELEVATION, PHI
+from globals import CONTINENTAL_BASE_ELEVATION, CONTINENTAL_PLATE_PROB, ELEVATION_DIFFUSION_FACTOR, ELEVATION_DIFFUSION_PASSES, ELEVATION_MOUNTAIN_BASE, ELEVATION_TRENCH_BASE, MAX_ANGULAR_VELOCITY_RAD_PER_YR, NORM_ELEVATION, OCEANIC_BASE_ELEVATION, PHI, VMAX, VMIN
 from shape import Face, Vertex
 
 
 #copied from globals for reference
-# NORM_ELEVATION = colors.Normalize(vmin=-15000, vmax=15000) # Fixed range for colorbar
+# VMIN=-11000
+# VMAX=11000
+# NORM_ELEVATION = colors.Normalize(vmin=VMIN, vmax=VMAX) # Fixed range for colorbar
 # PLATES = 15 #earth rate
-# SUBDIVISIONS: int = 3 #3 is balanced for testing, but 5 is needed for reasonable accuracy
+# SUBDIVISIONS: int = 5 #3 is balanced for testing, but 5 is needed for reasonable accuracy
 # MAX_ANGULAR_VELOCITY_RAD_PER_YR = np.radians(1.0) # Corresponds to ~11 cm/yr at equator for Earth radius. Adjust as needed.
 # ELEVATION_MOUNTAIN_BASE = 10000.0 # meters
 # ELEVATION_TRENCH_BASE = -11000.0 # meters
-# ELEVATION_DIFFUSION_FACTOR = 0.15 # How much elevation spreads per pass
-# ELEVATION_DIFFUSION_PASSES = 10 # Number of smoothing passes
+# ELEVATION_DIFFUSION_FACTOR = 0.05 # How much elevation spreads per pass
+# ELEVATION_DIFFUSION_PASSES = 5 # Number of smoothing passes
 # RADIUS = 6371000
 
 # CONTINENTAL_PLATE_PROB = 0.3  # Probability of a plate being continental
-# CONTINENTAL_BASE_ELEVATION = 2000.0 # meters
-# OCEANIC_BASE_ELEVATION = -3000.0 # meters
+# CONTINENTAL_BASE_ELEVATION = 500.0 # meters
+# OCEANIC_BASE_ELEVATION = -4000.0 # meters
 
 # PHI = (1.0 + np.sqrt(5.0)) / 2.0
 
@@ -549,7 +551,7 @@ class worldState:
 		base_convergent: float = ELEVATION_MOUNTAIN_BASE 
 		base_divergent: float = ELEVATION_TRENCH_BASE 
 		base_transform: float = 200.0 # Slight ridge/fracture zone
-		rate_scaling_factor: float = 5.0e7 # Scale velocity (m/yr) to elevation impact
+		rate_scaling_factor: float = 5.0e8 # Scale velocity (m/yr) to elevation impact
 		diffusion_passes: int = ELEVATION_DIFFUSION_PASSES
 		diffusion_factor: float = ELEVATION_DIFFUSION_FACTOR
 
@@ -660,8 +662,8 @@ class worldState:
 
 		final_min = min(self.elevations.values())
 		final_max = max(self.elevations.values())
-		NORM_ELEVATION.vmin = -15000 # Fixed range
-		NORM_ELEVATION.vmax = 15000 # Fixed range
+		NORM_ELEVATION.vmin = VMIN # Fixed range
+		NORM_ELEVATION.vmax = VMAX # Fixed range
 		print(f"Final Elevation Range: {final_min:.0f}m to {final_max:.0f}m")
 
 

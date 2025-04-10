@@ -2,14 +2,15 @@
 from matplotlib import colors
 import numpy as np
 
-
-NORM_ELEVATION = colors.Normalize(vmin=-15000, vmax=15000) # Fixed range for colorbar
+VMIN=-11000
+VMAX=11000
+NORM_ELEVATION = colors.Normalize(vmin=VMIN, vmax=VMAX) # Fixed range for colorbar
 PLATES = 15 #earth rate
 SUBDIVISIONS: int = 3 #3 is balanced for testing, but 5 is needed for reasonable accuracy
 MAX_ANGULAR_VELOCITY_RAD_PER_YR = np.radians(1.0) # Corresponds to ~11 cm/yr at equator for Earth radius. Adjust as needed.
 ELEVATION_MOUNTAIN_BASE = 10000.0 # meters
 ELEVATION_TRENCH_BASE = -11000.0 # meters
-ELEVATION_DIFFUSION_FACTOR = 0.10 # How much elevation spreads per pass
+ELEVATION_DIFFUSION_FACTOR = 0.05 # How much elevation spreads per pass
 ELEVATION_DIFFUSION_PASSES = 5 # Number of smoothing passes
 RADIUS = 6371000
 
