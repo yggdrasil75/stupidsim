@@ -170,10 +170,10 @@ def main():
 		else:
 			print("Skipping elevation assignment due to errors in motion calculation.")
 
-
 	else:
 		print("\nNo plates assigned, skipping tectonic simulation.")
 
+	world_sim.duplicateLayers()
 	plate_colors = None
 	if world_sim.elevations:
 		min_elev = min(world_sim.elevations.values())

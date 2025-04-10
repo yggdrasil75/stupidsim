@@ -1,5 +1,3 @@
-
-
 from collections import defaultdict
 import random
 from typing import Dict, List, Set, Tuple
@@ -27,6 +25,30 @@ from shape import Face, Vertex
 # OCEANIC_BASE_ELEVATION = -4000.0 # meters
 
 # PHI = (1.0 + np.sqrt(5.0)) / 2.0
+
+class Vertex:
+	def __init__(self, x, y, z):
+		self.pos = np.array([float(x), float(y), float(z)], dtype=np.float64)
+		self.layer_id: int = 0 #default layer
+		self.original_vertex_index: int = -1 #index in the original surface layer
+
+	def normalize(self):
+		norm = np.linalg.norm(self.pos)
+		if norm > 0:
+			self.pos /= norm
+		return self
+
+	def __repr__(self):
+		return f"Vertex({self.pos}, Layer: {self.layer_id})"
+
+class Face:
+	def __init__(self, v0, v1, v2):
+		#vertex indices, not vertex objects
+		self.vertices = (v0, v1, v2)
+
+	def __repr__(self):
+		return f"Face({self.vertices})"
+
 
 class Plate:
 	def __init__(self, plate_id):
@@ -309,7 +331,73 @@ class worldState:
 		return plates
 
 	def duplicateLayers(self):
-		pass
+		if self.details <= 0:
+			print("No subdivisions to create layers.")
+			return
+
+		original_vertices = self.vertices[:] # Keep a copy of the original surface vertices
+		original_faces = self.faces[:]
+		original_adjacency_list = self.adjacency_list.copy()
+		original_vertex_to_plate_id = self.vertex_to_plate_id.copy()
+		original_elevations = self.elevations.copy()
+		original_plates = [Plate(p.plate_id) for p in self.plates] # Create new Plate objects, copy attributes later
+		for i, p in enumerate(self.plates):
+			original_plates[i].plate_id = p.plate_id
+			original_plates[i].vertices = p.vertices[:]
+			original_plates[i].angular_velocity = p.angular_velocity.copy()
+			original_plates[i].plate_type = p.plate_type
+
+		self.vertices = [] # Clear existing vertices and faces
+		self.faces = []
+		self.adjacency_list = defaultdict(list)
+		self.vertex_to_plate_id = {}
+		self.elevations = {}
+		self.plates = [] # Clear plates as well
+		self._vertex_pos_cache = {} # Clear vertex position cache for new vertices
+
+		num_layers = self.details * 2 + 1 # Original + details inward + details outward
+		layers_vertices = [[] for _ in range(num_layers)] # Store vertex indices for each layer
+		layer_shift_factor = 0.05 # Adjust this factor to control layer spacing relative to radius
+
+		for layer_index in range(num_layers):
+			layer_id = layer_index - self.details # Layer IDs: -details to +details
+			shift_multiplier = layer_id * layer_shift_factor
+			layer_vertices_indices = []
+			for original_vertex_index, original_vertex in enumerate(original_vertices):
+				new_pos = original_vertex.pos * (1 + shift_multiplier) # Scale position for shift
+				new_vertex = Vertex(new_pos[0], new_pos[1], new_pos[2]) # Create new vertex
+				new_vertex_index = self._add_vertex(new_vertex) # Add to self.vertices and get index
+				new_vertex.layer_id = layer_id # Store layer ID
+				new_vertex.original_vertex_index = original_vertex_index # Store original vertex index
+				layer_vertices_indices.append(new_vertex_index)
+				layers_vertices[layer_index].append(new_vertex_index)
+
+			# For the base layer (layer 0), copy faces and plate assignments
+			if layer_id == 0:
+				vertex_map = {old_idx: new_idx for old_idx, new_idx in zip(range(len(original_vertices)), layer_vertices_indices)}
+				new_faces = []
+				for face in original_faces:
+					new_face_vertices = tuple(vertex_map[v_idx] for v_idx in face.vertices)
+					new_faces.append(Face(*new_face_vertices))
+				self.faces = new_faces
+				self.plates = original_plates # Copy plates
+				self.vertex_to_plate_id = original_vertex_to_plate_id.copy()
+				self.elevations = original_elevations.copy()
+				self._build_adjacency_list() # Build adjacency for layer 0 (surface layer)
+
+		# Connect vertices between layers
+		for layer_index in range(num_layers):
+			if layer_index > 0: # Connect to layer below
+				current_layer_vertices = layers_vertices[layer_index]
+				lower_layer_vertices = layers_vertices[layer_index - 1]
+				for i in range(len(current_layer_vertices)): # Assuming same vertex count in each layer
+					v1_idx = current_layer_vertices[i]
+					v2_idx = lower_layer_vertices[i]
+					if v2_idx not in self.adjacency_list[v1_idx]: self.adjacency_list[v1_idx].append(v2_idx)
+					if v1_idx not in self.adjacency_list[v2_idx]: self.adjacency_list[v2_idx].append(v1_idx)
+
+		print(f"Duplicated layers. Total vertices: {len(self.vertices)}, Faces (layer 0): {len(self.faces)}, Layers: {num_layers}")
+
 
 	def _build_vertex_plate_map(self):
 		"""Builds or rebuilds the vertex_to_plate_id dictionary from plate lists."""
@@ -548,8 +636,8 @@ class worldState:
 
 	def assign_elevations_from_boundaries(self):
 		"""Assigns vertex elevations based on nearby boundary types and magnitudes, then smooths."""
-		base_convergent: float = ELEVATION_MOUNTAIN_BASE 
-		base_divergent: float = ELEVATION_TRENCH_BASE 
+		base_convergent: float = ELEVATION_MOUNTAIN_BASE
+		base_divergent: float = ELEVATION_TRENCH_BASE
 		base_transform: float = 200.0 # Slight ridge/fracture zone
 		rate_scaling_factor: float = 5.0e8 # Scale velocity (m/yr) to elevation impact
 		diffusion_passes: int = ELEVATION_DIFFUSION_PASSES
@@ -596,7 +684,7 @@ class worldState:
 
 			if boundary_type != "passive" and boundary_type != "undefined":
 				if v1_idx in self.boundary_vertices:
-					elevation_updates[v1_idx]['sum_influence'] += elevation_change 
+					elevation_updates[v1_idx]['sum_influence'] += elevation_change
 					elevation_updates[v1_idx]['count'] += 1
 				if v2_idx in self.boundary_vertices:
 					elevation_updates[v2_idx]['sum_influence'] += elevation_change
@@ -670,7 +758,7 @@ class worldState:
 class icosphere(worldState):
 	def __init__(self, radius, subdivions):
 		super().__init__(radius, subdivions)
-	
+
 	def shapeBase(self):
 		self.vertices = []
 		self.faces = []
@@ -795,3 +883,36 @@ class icosphere(worldState):
 			self.faces = new_faces_next_level # Update faces list for the next level
 
 		# print(f"Subdivision complete. Vertices: {len(self.vertices)}, Faces: {len(self.faces)}")
+
+
+if __name__ == '__main__':
+	world = icosphere(RADIUS, SUBDIVISIONS)
+	num_plates = 15
+	plates = world.assign_icosphere_vertices_to_plates(num_plates)
+	world.assign_random_angular_velocities()
+	world._identify_boundaries()
+	world.calculate_boundary_motions()
+	world.assign_elevations_from_boundaries()
+
+	print(f"Initial world - Vertices: {len(world.vertices)}, Faces: {len(world.faces)}")
+
+	world.duplicateLayers()
+	print(f"World with layers - Vertices: {len(world.vertices)}, Faces (Layer 0): {len(world.faces)}") #Faces count will remain the same as it's based on layer 0.
+
+	# Example of accessing layer_id and original_vertex_index
+	for i in range(min(10, len(world.vertices))): # Print info for first 10 vertices
+		v = world.vertices[i]
+		print(f"Vertex {i}: Pos={v.pos}, Layer={v.layer_id}, Original Index={v.original_vertex_index}")
+
+	# Verify adjacency list includes inter-layer connections (example check)
+	surface_vertex_index = world.layers_vertices[world.details][0] # Get the first vertex from layer 0
+	neighbors = world.adjacency_list[surface_vertex_index]
+	has_lower_layer_neighbor = False
+	has_upper_layer_neighbor = False
+	for neighbor_index in neighbors:
+		if world.vertices[neighbor_index].layer_id == -1:
+			has_lower_layer_neighbor = True
+		if world.vertices[neighbor_index].layer_id == 1:
+			has_upper_layer_neighbor = True
+
+	print(f"Vertex {surface_vertex_index} (Layer 0) has lower layer neighbor: {has_lower_layer_neighbor}, upper layer neighbor: {has_upper_layer_neighbor}")

@@ -4,6 +4,8 @@ import numpy as np
 class Vertex:
 	def __init__(self, x, y, z):
 		self.pos = np.array([float(x), float(y), float(z)], dtype=np.float64)
+		self.layer_id = 0
+		self.original_vertex_index: int = -1 #index in the original surface layer
 
 	def normalize(self):
 		norm = np.linalg.norm(self.pos)
