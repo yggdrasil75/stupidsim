@@ -25,31 +25,6 @@ from shape import Face, Vertex
 # OCEANIC_BASE_ELEVATION = -4000.0 # meters
 
 # PHI = (1.0 + np.sqrt(5.0)) / 2.0
-
-class Vertex:
-	def __init__(self, x, y, z):
-		self.pos = np.array([float(x), float(y), float(z)], dtype=np.float64)
-		self.layer_id: int = 0 #default layer
-		self.original_vertex_index: int = -1 #index in the original surface layer
-
-	def normalize(self):
-		norm = np.linalg.norm(self.pos)
-		if norm > 0:
-			self.pos /= norm
-		return self
-
-	def __repr__(self):
-		return f"Vertex({self.pos}, Layer: {self.layer_id})"
-
-class Face:
-	def __init__(self, v0, v1, v2):
-		#vertex indices, not vertex objects
-		self.vertices = (v0, v1, v2)
-
-	def __repr__(self):
-		return f"Face({self.vertices})"
-
-
 class Plate:
 	def __init__(self, plate_id):
 		self.plate_id = plate_id
@@ -80,6 +55,7 @@ class worldState:
 		self.boundary_vertices: Set[int] = set()
 		self.boundary_edges: Set[Tuple[int, int]] = set()
 		self.boundary_properties: Dict[Tuple[int, int], Dict] = {}
+		self.water_level: float = 0.0 # Global water level, can be adjusted
 
 		# Cache for subdivision: key=sorted tuple(v_idx1, v_idx2), value=midpoint_idx
 		self._subdivision_cache: Dict[Tuple[int, int], int] = {}
@@ -371,6 +347,14 @@ class worldState:
 				new_vertex.original_vertex_index = original_vertex_index # Store original vertex index
 				layer_vertices_indices.append(new_vertex_index)
 				layers_vertices[layer_index].append(new_vertex_index)
+
+				# Initialize water properties based on layer_id
+				if layer_id < 0:
+					new_vertex.groundwater = 1.0 # Example: Max groundwater for layers below 0
+				if layer_id == 0:
+					new_vertex.surface_water = 0.5 # Example: Some surface water on layer 0
+				new_vertex.humidity = 0.2 # Example: Base humidity for all layers
+
 
 			# For the base layer (layer 0), copy faces and plate assignments
 			if layer_id == 0:
@@ -883,36 +867,3 @@ class icosphere(worldState):
 			self.faces = new_faces_next_level # Update faces list for the next level
 
 		# print(f"Subdivision complete. Vertices: {len(self.vertices)}, Faces: {len(self.faces)}")
-
-
-if __name__ == '__main__':
-	world = icosphere(RADIUS, SUBDIVISIONS)
-	num_plates = 15
-	plates = world.assign_icosphere_vertices_to_plates(num_plates)
-	world.assign_random_angular_velocities()
-	world._identify_boundaries()
-	world.calculate_boundary_motions()
-	world.assign_elevations_from_boundaries()
-
-	print(f"Initial world - Vertices: {len(world.vertices)}, Faces: {len(world.faces)}")
-
-	world.duplicateLayers()
-	print(f"World with layers - Vertices: {len(world.vertices)}, Faces (Layer 0): {len(world.faces)}") #Faces count will remain the same as it's based on layer 0.
-
-	# Example of accessing layer_id and original_vertex_index
-	for i in range(min(10, len(world.vertices))): # Print info for first 10 vertices
-		v = world.vertices[i]
-		print(f"Vertex {i}: Pos={v.pos}, Layer={v.layer_id}, Original Index={v.original_vertex_index}")
-
-	# Verify adjacency list includes inter-layer connections (example check)
-	surface_vertex_index = world.layers_vertices[world.details][0] # Get the first vertex from layer 0
-	neighbors = world.adjacency_list[surface_vertex_index]
-	has_lower_layer_neighbor = False
-	has_upper_layer_neighbor = False
-	for neighbor_index in neighbors:
-		if world.vertices[neighbor_index].layer_id == -1:
-			has_lower_layer_neighbor = True
-		if world.vertices[neighbor_index].layer_id == 1:
-			has_upper_layer_neighbor = True
-
-	print(f"Vertex {surface_vertex_index} (Layer 0) has lower layer neighbor: {has_lower_layer_neighbor}, upper layer neighbor: {has_upper_layer_neighbor}")

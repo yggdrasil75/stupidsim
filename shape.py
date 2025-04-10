@@ -6,6 +6,9 @@ class Vertex:
 		self.pos = np.array([float(x), float(y), float(z)], dtype=np.float64)
 		self.layer_id = 0
 		self.original_vertex_index: int = -1 #index in the original surface layer
+		self.groundwater: float = 0.0 # Water below layer 0
+		self.surface_water: float = 0.0 # Water on layer 0 surface
+		self.humidity: float = 0.0 # General humidity for all layers
 
 	def normalize(self):
 		norm = np.linalg.norm(self.pos)
