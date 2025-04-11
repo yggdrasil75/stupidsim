@@ -55,7 +55,10 @@ class worldState:
 		self.boundary_vertices: Set[int] = set()
 		self.boundary_edges: Set[Tuple[int, int]] = set()
 		self.boundary_properties: Dict[Tuple[int, int], Dict] = {}
-		self.water_level: float = 0.0 # Global water level, can be adjusted
+		self.total_water_volume_surface: float = 0.0 # Total surface water volume in Petaliters (PL)
+		self.total_water_volume_ground: float = 0.0  # Total groundwater volume in Petaliters (PL)
+		self.total_water_volume_ice: float = 0.0     # Total ice water volume in Petaliters (PL)
+		self.total_water_volume_atmosphere: float = 0.0 # Total atmospheric water in some unit
 
 		# Cache for subdivision: key=sorted tuple(v_idx1, v_idx2), value=midpoint_idx
 		self._subdivision_cache: Dict[Tuple[int, int], int] = {}
@@ -347,14 +350,6 @@ class worldState:
 				new_vertex.original_vertex_index = original_vertex_index # Store original vertex index
 				layer_vertices_indices.append(new_vertex_index)
 				layers_vertices[layer_index].append(new_vertex_index)
-
-				# Initialize water properties based on layer_id
-				if layer_id < 0:
-					new_vertex.groundwater = 1.0 # Example: Max groundwater for layers below 0
-				if layer_id == 0:
-					new_vertex.surface_water = 0.5 # Example: Some surface water on layer 0
-				new_vertex.humidity = 0.2 # Example: Base humidity for all layers
-
 
 			# For the base layer (layer 0), copy faces and plate assignments
 			if layer_id == 0:
@@ -737,6 +732,112 @@ class worldState:
 		NORM_ELEVATION.vmin = VMIN # Fixed range
 		NORM_ELEVATION.vmax = VMAX # Fixed range
 		print(f"Final Elevation Range: {final_min:.0f}m to {final_max:.0f}m")
+
+	def distribute_water(self, total_water_zettaliters: float):
+		"""Distributes water over the world surface to each vertex based on elevation and layer."""
+		total_water_petaliters = total_water_zettaliters * 1e6 # 1 ZL = 10^6 PL
+		print(f"Distributing {total_water_zettaliters:.3f} ZL ({total_water_petaliters:.0f} PL) of water...")
+
+		num_vertices = len(self.vertices)
+		if not self.elevations:
+			print("Warning: Elevations not assigned yet. Please assign elevations before distributing water.")
+			return
+
+		# --- 1. Surface Water (Layer 0) ---
+		surface_water_fraction = 0.7  # 70% of total water to surface
+		total_surface_water_volume = total_water_petaliters * surface_water_fraction
+		available_surface_water = total_surface_water_volume
+		elevation_sum_surface = 0.0
+		surface_vertices = []
+
+		for v_idx in range(num_vertices):
+			if self.vertices[v_idx].layer_id == 0:
+				elevation = self.elevations.get(v_idx, 0.0)
+				if elevation <= 0: # Distribute more to lower/negative elevations (sea level and below)
+					elevation_sum_surface += max(0, -elevation + 1) # Bias towards lower elevation
+				else:
+					elevation_sum_surface += 1 # Still consider higher elevation, but less influence
+				surface_vertices.append(v_idx)
+
+		if elevation_sum_surface > 0:
+			for v_idx in surface_vertices:
+				elevation = self.elevations.get(v_idx, 0.0)
+				elevation_weight = 0
+				if elevation <= 0:
+					elevation_weight = max(0, -elevation + 1)
+				else:
+					elevation_weight = 1
+
+				water_ratio = elevation_weight / elevation_sum_surface
+				vertex_water_volume = total_surface_water_volume * water_ratio
+				print(f'assigning water to vertex:  {vertex_water_volume}')
+				self.vertices[v_idx].surface_water += vertex_water_volume
+				available_surface_water -= vertex_water_volume # Keep track, though should sum to total
+		self.total_water_volume_surface = total_surface_water_volume # Store total distributed surface water
+
+		# --- 2. Groundwater (Layer < 0) ---
+		groundwater_fraction = 0.2 # 20% to groundwater
+		total_groundwater_volume = total_water_petaliters * groundwater_fraction
+		available_groundwater = total_groundwater_volume
+		ground_vertices_count = 0
+		for v_idx in range(num_vertices):
+			if self.vertices[v_idx].layer_id < 0:
+				ground_vertices_count += 1
+
+		if ground_vertices_count > 0:
+			base_groundwater_per_vertex = total_groundwater_volume / ground_vertices_count
+			for v_idx in range(num_vertices):
+				if self.vertices[v_idx].layer_id < 0:
+					self.vertices[v_idx].groundwater += base_groundwater_per_vertex
+					available_groundwater -= base_groundwater_per_vertex
+		self.total_water_volume_ground = total_groundwater_volume
+
+		# --- 3. Ice/Glaciers (High Latitude & Elevation) ---
+		ice_water_fraction = 0.05 # 5% to ice/glaciers
+		total_ice_water_volume = total_water_petaliters * ice_water_fraction
+		available_ice_water = total_ice_water_volume
+		ice_vertices = []
+
+		for v_idx in range(num_vertices):
+			if self.vertices[v_idx].layer_id == 0: # Only surface layer for ice for now
+				vertex = self.vertices[v_idx]
+				latitude_factor = abs(vertex.pos[2]) # Approx latitude using z-coordinate (assuming poles on z-axis)
+				elevation = self.elevations.get(v_idx, 0.0)
+				elevation_factor = max(0, elevation / ELEVATION_MOUNTAIN_BASE) # High elevation boost
+				ice_potential = latitude_factor + elevation_factor # Combine factors
+				if ice_potential > 1.0: # Adjust threshold as needed
+					ice_vertices.append(v_idx)
+
+		if ice_vertices:
+			base_ice_per_vertex = total_ice_water_volume / len(ice_vertices) if ice_vertices else 0
+			for v_idx in ice_vertices:
+				self.vertices[v_idx].ice_water += base_ice_per_vertex
+				available_ice_water -= base_ice_per_vertex
+		self.total_water_volume_ice = total_ice_water_volume
+
+		# --- 4. Atmospheric Water (Layer > 0) ---
+		atmosphere_water_fraction = 0.05 # 5% to atmosphere
+		total_atmospheric_water_volume = total_water_petaliters * atmosphere_water_fraction # Using Petaliters as unit for simplicity, could be different.
+		available_atmospheric_water = total_atmospheric_water_volume
+		atmosphere_vertices_count = 0
+		for v_idx in range(num_vertices):
+			if self.vertices[v_idx].layer_id > 0:
+				atmosphere_vertices_count += 1
+
+		if atmosphere_vertices_count > 0:
+			base_atmospheric_water_per_vertex = total_atmospheric_water_volume / atmosphere_vertices_count
+			for v_idx in range(num_vertices):
+				if self.vertices[v_idx].layer_id > 0:
+					self.vertices[v_idx].atmospheric_water += base_atmospheric_water_per_vertex
+					available_atmospheric_water -= base_atmospheric_water_per_vertex
+		self.total_water_volume_atmosphere = total_atmospheric_water_volume
+
+		print(f"Water distributed to vertex attributes.")
+		print(f"  Surface Water: {self.total_water_volume_surface:.3f} PL")
+		print(f"  Groundwater: {self.total_water_volume_ground:.3f} PL")
+		print(f"  Ice Water: {self.total_water_volume_ice:.3f} PL")
+		print(f"  Atmospheric Water: {self.total_water_volume_atmosphere:.3f} PL")
+		print(f"  Total Distributed: {(self.total_water_volume_surface + self.total_water_volume_ground + self.total_water_volume_ice + self.total_water_volume_atmosphere):.3f} PL")
 
 
 class icosphere(worldState):

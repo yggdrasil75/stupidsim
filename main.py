@@ -217,20 +217,9 @@ def main():
 	else:
 		print("\nNo plates assigned, skipping tectonic simulation.")
 
+	world_sim.distribute_water(1335)
+
 	world_sim.duplicateLayers()
-
-	# Example: Increase surface water on layer 0 vertices to visualize water
-	for v in world_sim.vertices:
-		if v.layer_id == 0:
-			if world_sim.elevations.get(world_sim.vertices.index(v), 0) < -1000: # Deeper water
-				v.surface_water = 1.0 # Full water
-			elif world_sim.elevations.get(world_sim.vertices.index(v), 0) < 0: # water at lower elevations
-				v.surface_water = 0.8 # High water
-			elif world_sim.elevations.get(world_sim.vertices.index(v), 0) < 200:
-				v.surface_water = 0.3 # Medium water
-			else:
-				v.surface_water = 0.05 # Little water at higher elevations
-
 
 	plate_colors = None
 	if world_sim.elevations:

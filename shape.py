@@ -5,10 +5,12 @@ class Vertex:
 	def __init__(self, x, y, z):
 		self.pos = np.array([float(x), float(y), float(z)], dtype=np.float64)
 		self.layer_id = 0
-		self.original_vertex_index: int = -1 #index in the original surface layer
-		self.groundwater: float = 0.0 # Water below layer 0
-		self.surface_water: float = 0.0 # Water on layer 0 surface
-		self.humidity: float = 0.0 # General humidity for all layers
+		self.original_vertex_index: int = -1 #index in the original surface layerelf.surface_water: float = 0.0 # in Petaliters (PL) or some volume unit
+		self.groundwater: float = 0.0  # in Petaliters (PL) or some volume unit
+		self.ice_water: float = 0.0     # in Petaliters (PL) or some volume unit
+		self.atmospheric_water: float = 0.0 # in some unit (e.g., kg/m^2 or just relative unit)
+		self.humidity: float = 0.0
+		self.surface_water: float = 0.0
 
 	def normalize(self):
 		norm = np.linalg.norm(self.pos)
