@@ -57,7 +57,7 @@ def VisualizeWorld(world: worldState, title: str = "World Mesh",
 				if color_mode == "elevation":
 					# Average elevation of face vertices
 					face_elevations = [world.elevations.get(i, 0.0) for i in verts_idx]
-					face_water = [world.vertices[i].surface_water for i in verts_idx] # Get surface water
+					face_water = [world.surface_water[i] for i in verts_idx] # Get surface water
 
 					# Check if all elevations were found
 					if len(face_elevations) == 3:
@@ -188,16 +188,7 @@ def main():
 	max_plate_speed_deg_yr = 1.5 # Max rotation speed in degrees per year
 	max_ang_vel_rad_yr = np.radians(max_plate_speed_deg_yr)
 
-	# Elevation generation parameters
-	# Using ridge for divergent instead of trench
-	conv_elev = ELEVATION_MOUNTAIN_BASE    # Base elevation boost for convergence (mountains)
-	div_elev = ELEVATION_TRENCH_BASE     # Base elevation for divergent boundaries (mid-ocean ridge)
-	trans_elev = 200.0    # Minor ridges/troughs for transform faults
-	rate_scale = 5.0
-	diff_passes = 15      # Number of smoothing passes for elevation diffusion
-	diff_factor = 0.10    # How much elevation spreads per pass (0-1)
-
-	world_sim = icosphere(radius=world_radius_m, subdivions=subdivision_level)
+	world_sim = icosphere(radius=world_radius_m, subdivisions=subdivision_level)
 
 	world_sim.plates = world_sim.assign_icosphere_vertices_to_plates(num_plates)
 
@@ -217,9 +208,11 @@ def main():
 	else:
 		print("\nNo plates assigned, skipping tectonic simulation.")
 
-	world_sim.distribute_water(1335)
-
 	world_sim.duplicateLayers()
+	print("\nDEBUG: Faces in main.py after duplicateLayers():")
+	for face in world_sim.faces[:5]: # Print first 5 faces
+		print(f"  Face: {face.vertices}")
+	print("DEBUG: Vertex count in main.py:", len(world_sim.vertices))
 
 	plate_colors = None
 	if world_sim.elevations:
@@ -235,6 +228,21 @@ def main():
 		for i in range(num_p):
 			plate_colors[i] = cmap_plates_vis(i) # Get RGBA tuple
 
+	plate_colors = None
+	if world_sim.elevations:
+		min_elev = min(world_sim.elevations.values())
+		max_elev = max(world_sim.elevations.values())
+		print(f"Elevation range: min={min_elev}, max={max_elev}")
+	else:
+		print("world_sim.elevations is empty!")
+	if world_sim.plates:
+		plate_colors = {}
+		num_p = len(world_sim.plates)
+		cmap_plates_vis = plt.get_cmap('tab20', num_p if num_p > 0 else 1) # Use tab20, ensure lut >= 1
+		for i in range(num_p):
+			plate_colors[i] = cmap_plates_vis(i) # Get RGBA tuple
+
+	world_sim.distribute_water(total_water_zettaliters=1335)
 
 	VisualizeWorld(world_sim,
 				   title=f"World Simulation with Elevation and Water Overlay",
