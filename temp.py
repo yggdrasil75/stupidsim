@@ -1,12 +1,17 @@
+import ctypes
+import queue
 import random
-from matplotlib.colorbar import Colorbar
+#import threading
+import time
+#from matplotlib.colorbar import Colorbar
 from matplotlib.widgets import RadioButtons
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import math
 from collections import deque
-from itertools import permutations
+#from itertools import permutations
+import multiprocessing
 
 
 OCEANIC_CRUST_THICKNESS = -5000
@@ -74,7 +79,77 @@ class Plate:
             if len(neighbor_plates) > 1:  # Boundary vertex
                 boundary.append(v_idx)
         return boundary
-    
+
+# --- Multiprocessing functions ---
+
+def plate_grow_worker_process(plate_id, work_queue_indices, plate_id_array, unassigned_indices_queue, assignment_lock, vertices_neighbors_getter):
+    """
+    Worker function designed for multiprocessing.
+    Reads shared plate_id_array, attempts assignments, puts successes
+    into a result queue.
+    """
+    assigned_in_this_run = [] # Track (vertex_idx, plate_id)
+
+    # In a real scenario, efficiently getting neighbors for many vertices might
+    # require passing more precomputed data or using a shared structure if feasible.
+    # Here, using a passed-in getter function/object.
+    find_neighbors = vertices_neighbors_getter
+
+    # Process items from the input queue for this iteration
+    local_queue = deque(work_queue_indices) # Process local copy
+
+    while True:
+        try:
+            current_assigned_idx = local_queue.popleft()
+        except IndexError:
+            break # Local queue for this iteration empty
+
+        # --- Perform neighbor finding and weighted selection ---
+        # (Simplified - Adapt your detailed logic here)
+        # Read plate IDs from shared array (no lock needed for read usually)
+        # Needs access to neighbor info (passed via vertices_neighbors_getter)
+
+        neighbors = find_neighbors(current_assigned_idx)
+        potential_unassigned_neighbors = []
+
+        # Check shared array for unassigned status
+        plate_ids_vals = plate_id_array.get_obj() # Get access to array values
+        for n_idx in neighbors:
+             # LOCKLESS READ - might be slightly stale but checked authoritatively later
+             if plate_ids_vals[n_idx] == -1:
+                 potential_unassigned_neighbors.append(n_idx)
+
+        if not potential_unassigned_neighbors:
+            continue
+
+        # --- Weighted selection (simplified example) ---
+        if potential_unassigned_neighbors:
+            # Replace with your actual weighted logic
+            selected_neighbor_idx = random.choice(potential_unassigned_neighbors)
+        else:
+            continue
+
+        # --- Critical Section: Attempt Assignment ---
+        if selected_neighbor_idx != -1:
+            with assignment_lock:
+                # *** Authoritative Check & Assignment ***
+                # Re-check using locked access to the shared array
+                current_plate_id_val = plate_id_array[selected_neighbor_idx]
+                if current_plate_id_val == -1:
+                    plate_id_array[selected_neighbor_idx] = plate_id
+                    # Signal success by putting index onto result queue
+                    # We don't directly modify the global 'unassigned' set here
+                    assigned_in_this_run.append(selected_neighbor_idx)
+
+    # Put all successful assignments from this worker onto the shared result queue
+    if assigned_in_this_run:
+        unassigned_indices_queue.put((plate_id, assigned_in_this_run))
+
+def get_neighbors_func(idx, precomputed_neighbors):
+    # Example: if neighbors are precomputed in a dict/list
+    return precomputed_neighbors[idx]
+
+
 # --- World Hierarchy ---
 
 class World:
@@ -138,6 +213,10 @@ class World:
         # Assign vertices to plates
         self._assign_tectonic_plates(num_plates)
 
+    def _get_neighbors_for_worker(self, idx):
+        # Assuming self.vertices or some neighbor structure exists
+        return self._find_vertex_neighbors(idx)
+
     def _find_vertex_neighbors(self, vertex_idx):
         """Find all neighboring vertices (shared faces) for a given vertex."""
         neighbors = set()
@@ -147,161 +226,386 @@ class World:
                     if v_idx != vertex_idx:
                         neighbors.add(v_idx)
         return list(neighbors)
+    
+    def _plate_grow_worker(self, plate_id, plate_queue, vertices, unassigned, plates, assignment_lock):
+        """
+        Worker function for a single plate's growth *in one iteration*.
+        Processes its assigned queue until empty.
+        """
+        my_plate = plates[plate_id]
+        # num_vertices_total = len(vertices) # Not used currently
 
-    def _assign_tectonic_plates(self, num_plates):
-        """Assign vertices to tectonic plates using weighted region growing."""
-        num_vertices = len(self.vertices)
-        if num_plates <= 0 or num_plates > num_vertices:
-            raise ValueError("num_plates must be positive and less than or equal to the number of vertices.")
+        while True:
+            current_assigned_idx = -1
+            try:
+                # Get an *assigned* vertex from this plate's expansion frontier
+                current_assigned_idx = plate_queue.popleft()
+            except IndexError:
+                # Queue for this iteration is empty for this plate
+                break # Exit the loop for this thread for this iteration
 
-        # Initialize all vertices as unassigned (-1)
-        for v in self.vertices:
-            v.plate_id = -1
-        unassigned = set(range(num_vertices))
+            # Find neighbors (read-only operation)
+            neighbors = self._find_vertex_neighbors(current_assigned_idx)
 
-        # Choose random starting points for each plate
-        available_starts = list(unassigned)
-        if len(available_starts) < num_plates:
-             raise ValueError(f"Cannot select {num_plates} unique start points from {len(available_starts)} available vertices.")
-        plate_starts = np.random.choice(available_starts, size=num_plates, replace=False)
+            # --- Find potentially unassigned neighbors ---
+            # Fast check outside lock (might be slightly stale)
+            potential_unassigned_neighbors_indices = []
+            # Read unassigned (potentially needs lock if not thread-safe read)
+            # Assuming standard Python set reads are generally safe enough here
+            for n_idx in neighbors:
+                # Check vertex plate_id first (atomic read, less likely to be stale than set)
+                if vertices[n_idx].plate_id == -1:
+                     # Optional: Double check against the shared 'unassigned' set
+                     # if n_idx in unassigned: # This read might need the lock
+                     potential_unassigned_neighbors_indices.append(n_idx)
 
-        # Create plate assignment queues
-        plate_queues = {plate_id: deque() for plate_id in range(num_plates)}
-        plate_active = {plate_id: True for plate_id in range(num_plates)}
+            if not potential_unassigned_neighbors_indices:
+                continue # No potential neighbors found from this vertex
 
-        # Assign starting points and initialize queues
-        for plate_id, start_idx in enumerate(plate_starts):
-            if start_idx in unassigned:
-                self.vertices[start_idx].plate_id = plate_id
-                self.plates[plate_id].add_vertex(start_idx)
-                unassigned.remove(start_idx)
-                plate_queues[plate_id].append(start_idx)
+            # --- Weighted random selection ---
+            # Filter further and calculate weights
+            valid_neighbors_for_assignment = []
+            weights = []
+            for n_idx in potential_unassigned_neighbors_indices:
+                # The critical check happens later under lock, but we calculate
+                # weights based on the state we see *now*.
+                n_neighbors = self._find_vertex_neighbors(n_idx)
 
-        # Grow plates using a round-robin approach
-        active_plates = num_plates
-        while unassigned and active_plates > 0:
-            progress_made_in_round = False
-            plate_order = list(range(num_plates))
-            random.shuffle(plate_order)
+                # Weight: count neighbors already in *this* plate + bias
+                count = sum(1 for nn_idx in n_neighbors
+                            if nn_idx != current_assigned_idx and vertices[nn_idx].plate_id == plate_id)
 
-            for plate_id in plate_order:
-                if not plate_active[plate_id] or not plate_queues[plate_id]:
-                    if plate_active[plate_id]:
-                       plate_active[plate_id] = False
-                       active_plates -= 1
-                    continue
+                # Add base weight (e.g., 1) + count + small random factor (optional)
+                # Ensure non-zero weight to allow assignment even with count=0
+                weight = count + 1.0 + random.uniform(0, 0.5) # Example weighting
+                weights.append(weight)
+                valid_neighbors_for_assignment.append(n_idx)
 
-                current_idx = plate_queues[plate_id].popleft()
-                neighbors = self._find_vertex_neighbors(current_idx)
-                unassigned_neighbors = [n for n in neighbors if n in unassigned]
+            if not valid_neighbors_for_assignment:
+                continue
 
-                if not unassigned_neighbors:
-                    if not plate_queues[plate_id]:
-                        plate_active[plate_id] = False
-                        active_plates -= 1
-                    continue
+            # --- Select one neighbor based on weights ---
+            selected_neighbor_idx = -1
+            weights = np.array(weights, dtype=float)
+            total_weight = weights.sum()
 
-                # Weighted random selection
-                weights = []
-                valid_neighbors = []
-                for n_idx in unassigned_neighbors:
-                    n_neighbors = self._find_vertex_neighbors(n_idx)
-                    count = sum(1 for nn in n_neighbors if nn != current_idx and self.vertices[nn].plate_id == plate_id)
-                    weights.append(count + 1)
-                    valid_neighbors.append(n_idx)
+            if total_weight > 1e-9 and len(valid_neighbors_for_assignment) > 0: # Check > 0 and length
+                try:
+                    weights /= total_weight # Normalize
+                    selected_neighbor_idx = np.random.choice(valid_neighbors_for_assignment, p=weights)
+                except ValueError as e:
+                    # print(f"Plate {plate_id}: Weight error {e}. Weights={weights}, Sum={total_weight}. Falling back to random.")
+                    # Fallback to uniform random choice among valid neighbors
+                    selected_neighbor_idx = random.choice(valid_neighbors_for_assignment)
+            elif valid_neighbors_for_assignment:
+                 # Fallback if weights sum to zero (or close) but neighbors exist
+                 selected_neighbor_idx = random.choice(valid_neighbors_for_assignment)
+            else:
+                 # Should not happen based on earlier checks, but safety first
+                 continue
 
-                if not valid_neighbors:
-                     if not plate_queues[plate_id]:
-                         plate_active[plate_id] = False
-                         active_plates -= 1
-                     continue
 
-                weights = np.array(weights, dtype=float)
-                total_weight = weights.sum()
+            if selected_neighbor_idx == -1:
+                 continue # No neighbor selected
 
-                if total_weight == 0:
-                     selected_neighbor_idx = np.random.choice(valid_neighbors)
-                else:
-                    weights /= total_weight
-                    try:
-                        selected_neighbor_idx = np.random.choice(valid_neighbors, p=weights)
-                    except ValueError:
-                         selected_neighbor_idx = np.random.choice(valid_neighbors)
-
-                # Assign the selected neighbor
-                self.vertices[selected_neighbor_idx].plate_id = plate_id
-                self.plates[plate_id].add_vertex(selected_neighbor_idx)
+            # --- Critical Section: Attempt Assignment ---
+            # assigned_successfully = False # Not needed with new logic
+            with assignment_lock:
+                # *** Authoritative Check ***
+                # Is the selected neighbor STILL unassigned? Check the definitive source.
                 if selected_neighbor_idx in unassigned:
+                    # Assign the selected neighbor
+                    vertices[selected_neighbor_idx].plate_id = plate_id
+                    my_plate.add_vertex(selected_neighbor_idx) # Assumes Plate.add_vertex is thread-safe or trivial
                     unassigned.remove(selected_neighbor_idx)
 
-                plate_queues[plate_id].append(selected_neighbor_idx)
-                progress_made_in_round = True
+                    # NOTE: We DO NOT add the newly assigned vertex back to the queue *within the worker*.
+                    # The queue for this worker is only for processing the initial frontier
+                    # assigned to it *for this iteration*. The main loop will repopulate
+                    # queues for the *next* iteration based on the new global state.
+                    # assigned_successfully = True # Not needed
+                    # print(f"Plate {plate_id} assigned {selected_neighbor_idx}. Remaining: {len(unassigned)}")
 
-            # Fallback assignment if no progress
-            if not progress_made_in_round and unassigned:
-                orphans = list(unassigned)
-                assigned_in_fallback = False
-                for v_idx in orphans:
-                    if v_idx not in unassigned: continue
+            # No need to put current_assigned_idx back in the queue if assignment failed.
+            # Just move on to the next item in this worker's queue for this iteration.
+            # The iterative approach handles conflicts implicitly in the next round.
 
-                    neighbors = self._find_vertex_neighbors(v_idx)
-                    assigned_neighbors = [(n, self.vertices[n].plate_id) for n in neighbors if self.vertices[n].plate_id != -1]
 
-                    if assigned_neighbors:
-                        random_neighbor_idx, assigned_plate_id = random.choice(assigned_neighbors)
-                        self.vertices[v_idx].plate_id = assigned_plate_id
-                        self.plates[assigned_plate_id].add_vertex(v_idx)
-                        unassigned.remove(v_idx)
-                        assigned_in_fallback = True
+    def _assign_tectonic_plates(self, num_plates, parallel_threshold_percent=10.0, max_iterations=100):
+        num_vertices = len(self.vertices)
+        print("Initializing plate assignment (Multiprocessing)...")
 
-                if not assigned_in_fallback and unassigned:
-                     remaining_unassigned = list(unassigned)
-                     for v_idx in remaining_unassigned:
-                          if num_plates > 0:
-                             plate_id = np.random.randint(num_plates)
-                             self.vertices[v_idx].plate_id = plate_id
-                             self.plates[plate_id].add_vertex(v_idx)
-                             unassigned.remove(v_idx)
-                          else: break
-            print(f'there are {len(unassigned)} remaining')
+        # --- Initialize Shared State ---
+        # Shared array for plate IDs (-1 for unassigned)
+        plate_id_array = multiprocessing.Array(ctypes.c_int, num_vertices)
+        for i in range(num_vertices):
+            plate_id_array[i] = -1 # Initialize all as unassigned
 
-        if unassigned:
-            print('normal has concluded, remainder being passed.')
-            self._assign_remaining_vertices(unassigned)
+        # Master 'unassigned' set (managed only by main process)
+        unassigned = set(range(num_vertices))
 
-    def _assign_remaining_vertices(self, unassigned):
-        """Assign any remaining unassigned vertices to the nearest plate."""
-        for v_idx in unassigned:
-            queue = deque()
-            visited = set()
-            
-            neighbors = self._find_vertex_neighbors(v_idx)
-            queue.extend(neighbors)
-            visited.update(neighbors)
-            
-            found = False
-            while queue and not found:
-                current = queue.popleft()
-                if self.vertices[current].plate_id != -1:
-                    plate_id = self.vertices[current].plate_id
-                    self.vertices[v_idx].plate_id = plate_id
-                    self.plates[plate_id].add_vertex(v_idx)
-                    found = True
-                    break
-                    
-                new_neighbors = [n for n in self._find_vertex_neighbors(current) 
-                            if n not in visited]
-                queue.extend(new_neighbors)
-                visited.update(new_neighbors)
-                
-            if not found:
-                if self.plates:
-                    plate_id = random.choice(list(self.plates.keys()))
-                    self.vertices[v_idx].plate_id = plate_id
-                    self.plates[plate_id].add_vertex(v_idx)
-            print(f'there are {len(unassigned)} remaining')
-        print('all vertices assigned')
-                    
+        # Lock for synchronizing writes to plate_id_array
+        assignment_lock = multiprocessing.Lock()
+
+        # Queue for workers to report successful assignments back to main process
+        # Format: (plate_id, [list_of_assigned_indices])
+        manager = multiprocessing.Manager()
+        results_queue = manager.Queue() # Use manager queue for simplicity here
+
+        # Plates dictionary (managed only by main process)
+        self.plates = {plate_id: Plate(plate_id) for plate_id in range(num_plates)}
+
+        # --- Assign Starting Points ---
+        # (Main process modifies shared array and local 'unassigned' set)
+        plate_starts = np.random.choice(list(unassigned), size=num_plates, replace=False)
+        with assignment_lock: # Lock needed if multiple ops touch shared state
+            for plate_id, start_idx in enumerate(plate_starts):
+                if start_idx in unassigned: # Check local set
+                    plate_id_array[start_idx] = plate_id # Update shared array
+                    self.plates[plate_id].add_vertex(start_idx) # Update local Plate obj
+                    unassigned.remove(start_idx) # Update local set
+
+        print(f"Assigned {num_plates} starting points. Remaining unassigned: {len(unassigned)}")
+
+        # --- Iterative Multi-Processing Growth ---
+        iteration = 0
+        parallel_threshold_count = int(num_vertices * (parallel_threshold_percent / 100.0))
+
+        # Precompute or prepare neighbor data if needed by workers in a pickleable way
+        # Example: precomputed_neighbors = {i: self._find_vertex_neighbors(i) for i in range(num_vertices)}
+        # neighbor_getter = lambda idx: precomputed_neighbors[idx]
+        # OR if _get_neighbors_for_worker is sufficient:
+        neighbor_getter = self._get_neighbors_for_worker # Pass instance method carefully or make static
+
+        while len(unassigned) > parallel_threshold_count and iteration < max_iterations:
+            iteration += 1
+            unassigned_count_start_iter = len(unassigned)
+            print(f"\n--- Iteration {iteration} --- Starting | Unassigned: {unassigned_count_start_iter}/{num_vertices}")
+
+            # 1. Identify Frontier (Main process reads shared array)
+            plate_frontiers = {plate_id: [] for plate_id in range(num_plates)}
+            current_unassigned_list = list(unassigned) # Iterate over local copy
+
+            plate_ids_vals = plate_id_array.get_obj() # Efficient access
+            for u_idx in current_unassigned_list:
+                 # Optional: Double check if u_idx is *still* unassigned in shared array
+                 if plate_ids_vals[u_idx] != -1:
+                      if u_idx in unassigned: unassigned.remove(u_idx) # Sync local set
+                      continue
+
+                 neighbors = self._find_vertex_neighbors(u_idx) # Main process finds neighbors
+                 for n_idx in neighbors:
+                      assigned_plate_id = plate_ids_vals[n_idx]
+                      if assigned_plate_id != -1:
+                           # Add the *assigned* neighbor 'n_idx' to the frontier queue for its plate
+                           if assigned_plate_id in plate_frontiers:
+                                plate_frontiers[assigned_plate_id].append(n_idx)
+                           # Break inner loop if you only need one neighbor, or collect all
+                           # break # Optimization: only need one assigned neighbor to add 'n_idx'
+
+            # Deduplicate frontier points per plate for this iteration's work queues
+            work_items = {}
+            active_plate_count = 0
+            total_frontier_size = 0
+            for plate_id, frontier_indices in plate_frontiers.items():
+                unique_indices = list(set(frontier_indices)) # Make unique
+                if unique_indices:
+                    work_items[plate_id] = unique_indices
+                    active_plate_count += 1
+                    total_frontier_size += len(unique_indices)
+
+            print(f"Iteration {iteration}: Found {total_frontier_size} frontier points across {active_plate_count} active plates.")
+
+            if active_plate_count == 0:
+                print(f"Iteration {iteration}: No active plates found. Stopping parallel phase.")
+                break
+
+            # 2. Start Worker Processes for this iteration
+            processes = []
+            for plate_id, indices_to_process in work_items.items():
+                if indices_to_process:
+                    p = multiprocessing.Process(
+                        target=plate_grow_worker_process,
+                        args=(
+                            plate_id,
+                            indices_to_process, # Work items for this process
+                            plate_id_array,     # Shared
+                            results_queue,      # Shared queue for results
+                            assignment_lock,    # Shared
+                            neighbor_getter     # How worker finds neighbors
+                        )
+                    )
+                    processes.append(p)
+                    p.start()
+
+            # 3. Wait for Processes to finish & Collect Results from Queue
+            for p in processes:
+                p.join() # Wait for process completion
+
+            assigned_in_iter = 0
+            while not results_queue.empty():
+                 try:
+                     res_plate_id, assigned_indices = results_queue.get_nowait()
+                     newly_assigned_count = 0
+                     # Update master state in main process
+                     for v_idx in assigned_indices:
+                          if v_idx in unassigned: # Check if still considered unassigned locally
+                              unassigned.remove(v_idx)
+                              self.plates[res_plate_id].add_vertex(v_idx)
+                              newly_assigned_count += 1
+                          # else: It was already assigned (e.g., by another process or earlier step)
+                     assigned_in_iter += newly_assigned_count
+                 except queue.Empty: # Should theoretically not happen with qsize check
+                     break
+                 except Exception as e:
+                     print(f"Error processing results queue: {e}")
+
+
+            unassigned_count_end_iter = len(unassigned)
+            print(f"Iteration {iteration}: Finished | Assigned in iter: {assigned_in_iter} | Remaining Unassigned: {unassigned_count_end_iter}")
+
+            if assigned_in_iter == 0 and unassigned_count_start_iter > 0:
+                 print(f"Iteration {iteration}: Stalled. Stopping parallel phase.")
+                 break
+
+        print(f"\nParallel growth phase finished after {iteration} iterations.")
+        print(f"Remaining unassigned vertices (local set): {len(unassigned)}")
+
+        # --- Sync vertex objects with final plate_id_array state ---
+        # Important if _assign_remaining_vertices_safe relies on vertex.plate_id
+        print("Syncing final plate IDs to vertex objects...")
+        final_plate_ids = plate_id_array.get_obj()
+        for i, v in enumerate(self.vertices):
+             v.plate_id = final_plate_ids[i]
+             # Optional: Ensure vertex is in the correct Plate object set if not already
+             # if v.plate_id != -1 and i not in self.plates[v.plate_id].vertices:
+             #     self.plates[v.plate_id].add_vertex(i) # Might happen due to sync differences
+
+
+        # --- Fallback Assignment ---
+        # Make sure fallback uses the up-to-date vertex.plate_id
+        remaining_indices_final = [i for i, pid in enumerate(final_plate_ids) if pid == -1]
+        if remaining_indices_final:
+             print(f'Passing {len(remaining_indices_final)} remaining vertices to sequential fallback.')
+             self._assign_remaining_vertices_safe(remaining_indices_final) # Ensure this uses vertex.plate_id
+        else:
+             print("All vertices assigned during parallel phase.")
+
+    def _assign_remaining_vertices_safe(self, remaining_unassigned_indices):
+        """
+        Assign remaining unassigned vertices sequentially (BFS from orphan).
+        Operates on the provided list and modifies self.vertices/self.plates.
+        Relies on vertex.plate_id, not the global `unassigned` set.
+        """
+        print(f"Assigning {len(remaining_unassigned_indices)} remaining vertices sequentially using BFS...")
+        assigned_count_in_fallback = 0
+        still_unassigned_after_bfs = []
+        processed_indices = set() # Track which of the input list we've handled
+
+        # Make multiple passes if necessary, as assigning one orphan might
+        # make a previously isolated orphan reachable.
+        pass_num = 0
+        indices_to_process = list(remaining_unassigned_indices)
+
+        while indices_to_process:
+             pass_num += 1
+             print(f"Fallback Pass {pass_num}: Processing {len(indices_to_process)} indices...")
+             next_indices_to_process = []
+             assigned_in_pass = 0
+
+             queue = deque()
+             visited_bfs = set()
+
+             for v_idx in indices_to_process:
+                 # Check if already processed or assigned by another orphan's BFS in this pass
+                 if v_idx in processed_indices or self.vertices[v_idx].plate_id != -1:
+                      continue
+
+                 processed_indices.add(v_idx) # Mark as processed for this fallback run
+
+                 # Start BFS from this orphan
+                 queue.clear()
+                 visited_bfs.clear()
+                 queue.append(v_idx)
+                 visited_bfs.add(v_idx)
+                 found_plate = -1
+                 closest_assigned_neighbor_idx = -1
+
+                 while queue:
+                      current_bfs = queue.popleft()
+                      neighbors = self._find_vertex_neighbors(current_bfs)
+
+                      # Check neighbors first for an assigned plate
+                      for n_idx in neighbors:
+                           neighbor_plate = self.vertices[n_idx].plate_id
+                           if neighbor_plate != -1:
+                                found_plate = neighbor_plate
+                                closest_assigned_neighbor_idx = n_idx # Record who we found it from
+                                # print(f"Orphan {v_idx} found plate {found_plate} via neighbor {n_idx}")
+                                break # Found the nearest plate
+
+                      if found_plate != -1:
+                           break # Exit BFS loop for this orphan
+
+                      # If no assigned neighbor found yet, expand BFS to unassigned neighbors
+                      for n_idx in neighbors:
+                           if n_idx not in visited_bfs and self.vertices[n_idx].plate_id == -1:
+                                visited_bfs.add(n_idx)
+                                queue.append(n_idx)
+
+                 # Assign the original orphan v_idx if a plate was found
+                 if found_plate != -1:
+                      self.vertices[v_idx].plate_id = found_plate
+                      if found_plate in self.plates:
+                           self.plates[found_plate].add_vertex(v_idx)
+                      else:
+                           print(f"Warning: Found plate {found_plate} for orphan {v_idx} but plate not in self.plates dict!")
+                      assigned_count_in_fallback += 1
+                      assigned_in_pass += 1
+                 else:
+                      # BFS completed without finding an assigned neighbor this pass
+                      next_indices_to_process.append(v_idx)
+                      # print(f"Vertex {v_idx} remains unassigned after BFS pass {pass_num}.")
+
+             print(f"Fallback Pass {pass_num}: Assigned {assigned_in_pass} vertices.")
+             if not next_indices_to_process:
+                 print(f"Fallback Pass {pass_num}: No remaining unassigned after BFS.")
+                 break # All processed or assigned
+             if not assigned_in_pass and next_indices_to_process:
+                 # If a pass assigned nothing but vertices remain, they are truly isolated
+                 print(f"Fallback Pass {pass_num}: Stalled. Moving to random assignment for remaining.")
+                 still_unassigned_after_bfs = next_indices_to_process
+                 break
+
+             indices_to_process = next_indices_to_process # Prepare for next pass
+
+             if pass_num > 10: # Safety break for infinite loops
+                 print("Warning: Exceeded fallback pass limit.")
+                 still_unassigned_after_bfs = indices_to_process
+                 break
+
+
+        # Force-assign any vertices that are still unassigned (truly isolated components)
+        if still_unassigned_after_bfs:
+             print(f"Warning: {len(still_unassigned_after_bfs)} vertices remain unassigned after BFS. Force assigning randomly.")
+             available_plate_ids = list(self.plates.keys())
+             if not available_plate_ids:
+                  print("Error: No plates available to assign remaining vertices!")
+             else:
+                  assigned_randomly = 0
+                  for v_idx in still_unassigned_after_bfs:
+                      # Double check it wasn't assigned somehow
+                      if self.vertices[v_idx].plate_id == -1:
+                           chosen_plate_id = random.choice(available_plate_ids)
+                           self.vertices[v_idx].plate_id = chosen_plate_id
+                           self.plates[chosen_plate_id].add_vertex(v_idx)
+                           assigned_count_in_fallback += 1
+                           assigned_randomly += 1
+                  print(f"Force assigned {assigned_randomly} vertices randomly.")
+
+
+        print(f"Fallback phase finished. Total vertices assigned in fallback: {assigned_count_in_fallback}")
+
     def _calculate_boundary_elevations(self, min_height, max_height):
         """Calculate elevations based on plate interactions at boundaries."""
         boundary_vertices = []
@@ -383,7 +687,7 @@ class World:
                 distance_to_center = np.linalg.norm(vertex.pos - center_pos)
                 
                 # Add random hills/mountains that fade toward plate edges
-                if random.random() < 0.2:  # 20% chance of a feature
+                if random.random() < 0.8:  # 20% chance of a feature
                     feature_size = random.uniform(0.05, 0.3)
                     # Scale by distance to center (stronger features near center)
                     feature_strength = feature_size * (1 - distance_to_center/2)
@@ -493,7 +797,7 @@ class World:
                         neighbors.add(v_idx)
         return list(neighbors)
         
-    def plot(self, fig=None, ax=None, cmap='terrain', edge_color=None, alpha=0.9):
+    def plot(self, fig=None, ax=None, cmap='terrain', edge_color=None, alpha=1):
         """Plots the shape with interactive radio toggle for elevation/plate visualization."""
         if fig is None or ax is None:
             fig = plt.figure(figsize=(10, 8))
