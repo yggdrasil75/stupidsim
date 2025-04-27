@@ -8,6 +8,13 @@ import math
 from collections import deque
 from itertools import permutations
 
+
+OCEANIC_CRUST_THICKNESS = -5000
+CONTINENTAL_CRUST_THICKNESS = 4000
+PLATE_TYPE_OCEANIC = 0
+PLATE_TYPE_CONTINENTAL = 1
+
+
 # --- Data Holder Classes (Vertex, Face - unchanged) ---
 
 class Vertex:
@@ -50,6 +57,9 @@ class Plate:
         self.plate_id = plate_id
         self.velocity = np.random.uniform(-1, 1, 3)  # Angular velocity vector
         self.vertices = set()  # Indices of vertices belonging to this plate
+        self.type = random.choice([PLATE_TYPE_OCEANIC, PLATE_TYPE_CONTINENTAL])
+        self.base_elevation = (OCEANIC_CRUST_THICKNESS if self.type == PLATE_TYPE_OCEANIC 
+                              else CONTINENTAL_CRUST_THICKNESS)
         
     def add_vertex(self, vertex_idx):
         """Add a vertex to this plate."""
@@ -92,19 +102,31 @@ class World:
         raise NotImplementedError("Subclasses must implement subdivide()")
 
     def genElevations(self, num_plates=7, min_height=0.0, max_height=1.0):
-        """Generate elevation values based on tectonic plate simulation."""
+        """Generate elevation values with plate tectonics and continental/oceanic plates."""
         if not self.vertices:
             return
             
         # Reset all elevations to zero first
         for vertex in self.vertices:
             vertex.elevation = 0.0
-            vertex.plate_id = -1  # Add plate_id attribute to vertices
+            vertex.plate_id = -1
             
         self._create_plates(num_plates)
+        self._assign_base_elevations()  # Set base elevations based on plate type
+        self.minheight = min_height
+        self.maxheight = max_height
         self._calculate_boundary_elevations(min_height, max_height)
-        self._smooth_elevations(iterations=2)
+        self._smooth_elevations(iterations=3)
+        self._add_variations()
 
+    def _assign_base_elevations(self):
+        """Assign base elevations based on plate type."""
+        for plate in self.plates.values():
+            for v_idx in plate.vertices:
+                # Add some random variation to the base elevation
+                variation = np.random.uniform(-0.1, 0.1)
+                self.vertices[v_idx].elevation = plate.base_elevation + variation
+    
     def _create_plates(self, num_plates):
         """Create plates and assign vertices to them."""
         self.plates = {}
@@ -241,8 +263,10 @@ class World:
                              self.plates[plate_id].add_vertex(v_idx)
                              unassigned.remove(v_idx)
                           else: break
+            print(f'there are {len(unassigned)} remaining')
 
         if unassigned:
+            print('normal has concluded, remainder being passed.')
             self._assign_remaining_vertices(unassigned)
 
     def _assign_remaining_vertices(self, unassigned):
@@ -275,58 +299,103 @@ class World:
                     plate_id = random.choice(list(self.plates.keys()))
                     self.vertices[v_idx].plate_id = plate_id
                     self.plates[plate_id].add_vertex(v_idx)
+            print(f'there are {len(unassigned)} remaining')
+        print('all vertices assigned')
                     
-    def _find_vertex_neighbors(self, vertex_idx):
-        """Find all neighboring vertices (shared faces) for a given vertex."""
-        neighbors = set()
-        for face in self.faces:
-            if vertex_idx in face.v_indices:
-                for v_idx in face.v_indices:
-                    if v_idx != vertex_idx:
-                        neighbors.add(v_idx)
-        return list(neighbors)
-        
     def _calculate_boundary_elevations(self, min_height, max_height):
         """Calculate elevations based on plate interactions at boundaries."""
-        # First pass: identify boundary vertices
         boundary_vertices = []
+        boundary_info = {}  # Store boundary information for each vertex
+        
+        # First pass: identify boundary vertices and calculate interactions
         for plate in self.plates.values():
-            boundary_vertices.extend(plate.get_boundary_vertices(self))
-            
-        # Calculate relative movements at boundaries
+            for v_idx in plate.get_boundary_vertices(self):
+                vertex = self.vertices[v_idx]
+                neighbors = self._find_vertex_neighbors(v_idx)
+                
+                # Find all adjacent plates
+                adjacent_plates = set()
+                for n in neighbors:
+                    adjacent_plates.add(self.vertices[n].plate_id)
+                adjacent_plates.add(vertex.plate_id)
+                
+                # Calculate relative movement vectors
+                movement_vectors = []
+                current_plate = self.plates[vertex.plate_id]
+                
+                for plate_id in adjacent_plates:
+                    if plate_id == vertex.plate_id:
+                        continue
+                        
+                    other_plate = self.plates[plate_id]
+                    rel_velocity = current_plate.velocity - other_plate.velocity
+                    
+                    # Project onto vertex normal
+                    normal = vertex.pos / np.linalg.norm(vertex.pos)
+                    movement = np.dot(rel_velocity, normal)
+                    movement_vectors.append(movement)
+                
+                boundary_info[v_idx] = {
+                    'movements': movement_vectors,
+                    'adjacent_plates': adjacent_plates,
+                    'plate_type': current_plate.type
+                }
+                boundary_vertices.append(v_idx)
+
+        # Second pass: assign elevations based on boundary interactions
         for v_idx in boundary_vertices:
             vertex = self.vertices[v_idx]
-            neighbors = self._find_vertex_neighbors(v_idx)
+            info = boundary_info[v_idx]
+            movements = info['movements']
+            plate_type = info['plate_type']
             
-            # Find all adjacent plates
-            adjacent_plates = set()
-            for n in neighbors:
-                adjacent_plates.add(self.vertices[n].plate_id)
-            adjacent_plates.add(vertex.plate_id)
+            if not movements:
+                continue
+                
+            avg_movement = np.mean(movements)
             
-            # Calculate relative movement vectors
-            movement_vectors = []
-            current_plate = self.plates[vertex.plate_id]
+            # Different elevation responses based on plate type interactions
+            if plate_type == PLATE_TYPE_CONTINENTAL:
+                # Continental plates create mountains when colliding
+                elevation = CONTINENTAL_CRUST_THICKNESS + (max_height - CONTINENTAL_CRUST_THICKNESS) * (avg_movement + 1)/2
+            else:
+                # Oceanic plates create trenches or islands
+                if avg_movement > 0:  # Converging
+                    elevation = OCEANIC_CRUST_THICKNESS - (OCEANIC_CRUST_THICKNESS - min_height) * avg_movement
+                else:  # Diverging (mid-ocean ridges)
+                    elevation = OCEANIC_CRUST_THICKNESS + (0.5 - OCEANIC_CRUST_THICKNESS) * abs(avg_movement)
             
-            for plate_id in adjacent_plates:
-                if plate_id == vertex.plate_id:
-                    continue
+            vertex.elevation = elevation
+        print('boundary effects calculated')
+
+    def _add_variations(self):
+        """Add natural elevation variations within plates."""
+        for plate in self.plates.values():
+            # Only add variations to continental plates
+            if plate.type != PLATE_TYPE_CONTINENTAL:
+                continue
+                
+            # Find plate center
+            center_pos = np.mean([self.vertices[v_idx].pos for v_idx in plate.vertices], axis=0)
+            
+            for v_idx in plate.vertices:
+                vertex = self.vertices[v_idx]
+                distance_to_center = np.linalg.norm(vertex.pos - center_pos)
+                
+                # Add random hills/mountains that fade toward plate edges
+                if random.random() < 0.2:  # 20% chance of a feature
+                    feature_size = random.uniform(0.05, 0.3)
+                    # Scale by distance to center (stronger features near center)
+                    feature_strength = feature_size * (1 - distance_to_center/2)
+                    vertex.elevation += feature_strength
                     
-                other_plate = self.plates[plate_id]
-                rel_velocity = current_plate.velocity - other_plate.velocity
-                
-                # Project onto vertex normal
-                normal = vertex.pos / np.linalg.norm(vertex.pos)
-                movement = np.dot(rel_velocity, normal)
-                movement_vectors.append(movement)
-                
-            # Elevation based on average relative movement
-            if movement_vectors:
-                avg_movement = np.mean(movement_vectors)
-                vertex.elevation = min_height + (max_height - min_height) * (avg_movement + 1) / 2
-                
+        # Ensure elevations stay within bounds
+        for vertex in self.vertices:
+            vertex.elevation = max(self.minheight, min(self.maxheight, vertex.elevation))
+        print('randomized elevations')
+
     def _smooth_elevations(self, iterations=2):
-        """Smooth elevation values across the sphere."""
+        """Smooth elevation values with plate-aware smoothing."""
         for _ in range(iterations):
             new_elevations = []
             for i, vertex in enumerate(self.vertices):
@@ -335,12 +404,20 @@ class World:
                     new_elevations.append(vertex.elevation)
                     continue
                     
-                neighbor_elevations = [self.vertices[n].elevation for n in neighbors]
+                # Get neighbors from the same plate
+                same_plate_neighbors = [n for n in neighbors 
+                                       if self.vertices[n].plate_id == vertex.plate_id]
+                
+                # Use all neighbors if no same-plate neighbors found
+                smoothing_neighbors = same_plate_neighbors if same_plate_neighbors else neighbors
+                
+                neighbor_elevations = [self.vertices[n].elevation for n in smoothing_neighbors]
                 avg = np.mean([vertex.elevation] + neighbor_elevations)
                 new_elevations.append(avg)
                 
             for i, elevation in enumerate(new_elevations):
                 self.vertices[i].elevation = elevation
+        print('smoothed elevations')
 
     def _get_midpoint_vertex(self, v1_idx, v2_idx, midpoint_cache, next_level_vertices, radius):
         """
@@ -388,19 +465,34 @@ class World:
         return new_idx
 
     def _compute_face_centroid(self, v_indices, vertices, radius):
-        centroid = Vertex(0, 0, 0)
-        for idx in v_indices:
-            v = vertices[idx]
-            centroid.pos[0] += v.pos[0]
-            centroid.pos[1] += v.pos[1]
-            centroid.pos[2] += v.pos[2]
-        n = len(v_indices)
-        centroid.pos[0] /= n
-        centroid.pos[1] /= n
-        centroid.pos[2] /= n
-        centroid.normalize(radius)
-        return centroid
+        # centroid = Vertex(0, 0, 0)
+        # for idx in v_indices:
+        #     v = vertices[idx]
+        #     centroid.pos[0] += v.pos[0]
+        #     centroid.pos[1] += v.pos[1]
+        #     centroid.pos[2] += v.pos[2]
+        # n = len(v_indices)
+        # centroid.pos[0] /= n
+        # centroid.pos[1] /= n
+        # centroid.pos[2] /= n
+        # centroid.normalize(radius)
+        # return centroid
+        face_vertex_positions = np.array([vertices[idx].pos for idx in v_indices], dtype=float)
+        centroid_pos = np.mean(face_vertex_positions, axis=0)
+        norm = np.linalg.norm(centroid_pos)
+        normalized_centroid_pos = centroid_pos * (radius / norm)
+        return Vertex(*normalized_centroid_pos)
     
+    def _find_vertex_neighbors(self, vertex_idx):
+        """Find all neighboring vertices (shared faces) for a given vertex."""
+        neighbors = set()
+        for face in self.faces:
+            if vertex_idx in face.v_indices:
+                for v_idx in face.v_indices:
+                    if v_idx != vertex_idx:
+                        neighbors.add(v_idx)
+        return list(neighbors)
+        
     def plot(self, fig=None, ax=None, cmap='terrain', edge_color=None, alpha=0.9):
         """Plots the shape with interactive radio toggle for elevation/plate visualization."""
         if fig is None or ax is None:
@@ -1227,7 +1319,7 @@ class Cube(World):
 # --- Main Execution ---
 if __name__ == "__main__":
     shape_type = "cube" # Choose "icosahedron" or "truncated"
-    num_subdivisions = 3     # Adjust level of detail
+    num_subdivisions = 5     # Adjust level of detail
     sphere_radius = 1.0
     plates = 15
     elevationmin = -15000
