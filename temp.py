@@ -1,4 +1,5 @@
 import random
+from matplotlib.colorbar import Colorbar
 from matplotlib.widgets import RadioButtons
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,7 +16,6 @@ class Vertex:
         self.pos = np.array([x, y, z], dtype=float)
         self.elevation = 0.0
         self.plate_id = -1
-
 
     def normalize(self, radius=1.0):
         """Normalizes the vertex position to be on a sphere of given radius."""
@@ -44,6 +44,27 @@ class Face:
     def __repr__(self):
         return f"Face({self.v_indices})"
 
+class Plate:
+    """Represents a tectonic plate with velocity and associated vertices."""
+    def __init__(self, plate_id):
+        self.plate_id = plate_id
+        self.velocity = np.random.uniform(-1, 1, 3)  # Angular velocity vector
+        self.vertices = set()  # Indices of vertices belonging to this plate
+        
+    def add_vertex(self, vertex_idx):
+        """Add a vertex to this plate."""
+        self.vertices.add(vertex_idx)
+        
+    def get_boundary_vertices(self, world):
+        """Return vertices on the boundary of this plate."""
+        boundary = []
+        for v_idx in self.vertices:
+            neighbors = world._find_vertex_neighbors(v_idx)
+            neighbor_plates = {world.vertices[n].plate_id for n in neighbors}
+            if len(neighbor_plates) > 1:  # Boundary vertex
+                boundary.append(v_idx)
+        return boundary
+    
 # --- World Hierarchy ---
 
 class World:
@@ -51,6 +72,7 @@ class World:
     def __init__(self):
         self.vertices = [] # List of Vertex objects
         self.faces = []    # List of Face objects
+        self.plates = {}
 
     def add_vertex(self, vertex):
         """Adds a vertex and returns its index."""
@@ -79,20 +101,30 @@ class World:
             vertex.elevation = 0.0
             vertex.plate_id = -1  # Add plate_id attribute to vertices
             
-        # 1. Assign plates
-        self._assign_tectonic_plates(num_plates)
-        
-        # 2. Assign plate movements (angular velocities)
-        self.plate_velocities = {}
-        for plate_id in range(num_plates):
-            # Random 3D vector for angular velocity
-            self.plate_velocities[plate_id] = np.random.uniform(-1, 1, 3)
-            
-        # 3. Calculate elevations at plate boundaries
+        self._create_plates(num_plates)
         self._calculate_boundary_elevations(min_height, max_height)
-        
-        # 4. Smooth elevations
         self._smooth_elevations(iterations=2)
+
+    def _create_plates(self, num_plates):
+        """Create plates and assign vertices to them."""
+        self.plates = {}
+        
+        # Create plate objects
+        for plate_id in range(num_plates):
+            self.plates[plate_id] = Plate(plate_id)
+            
+        # Assign vertices to plates
+        self._assign_tectonic_plates(num_plates)
+
+    def _find_vertex_neighbors(self, vertex_idx):
+        """Find all neighboring vertices (shared faces) for a given vertex."""
+        neighbors = set()
+        for face in self.faces:
+            if vertex_idx in face.v_indices:
+                for v_idx in face.v_indices:
+                    if v_idx != vertex_idx:
+                        neighbors.add(v_idx)
+        return list(neighbors)
 
     def _assign_tectonic_plates(self, num_plates):
         """Assign vertices to tectonic plates using weighted region growing."""
@@ -100,201 +132,125 @@ class World:
         if num_plates <= 0 or num_plates > num_vertices:
             raise ValueError("num_plates must be positive and less than or equal to the number of vertices.")
 
-        # Initialize all vertices as unassigned (-1 or None)
+        # Initialize all vertices as unassigned (-1)
         for v in self.vertices:
             v.plate_id = -1
         unassigned = set(range(num_vertices))
 
-        # Handle edge case where num_plates equals num_vertices
-        if num_plates == num_vertices:
-            for i in range(num_vertices):
-                self.vertices[i].plate_id = i
-            return
-
         # Choose random starting points for each plate
-        # Ensure we have enough unassigned vertices to pick from
         available_starts = list(unassigned)
         if len(available_starts) < num_plates:
              raise ValueError(f"Cannot select {num_plates} unique start points from {len(available_starts)} available vertices.")
         plate_starts = np.random.choice(available_starts, size=num_plates, replace=False)
 
-        # Create plate assignment queues (deque for efficient popleft/append)
-        plates = {plate_id: deque() for plate_id in range(num_plates)}
-        plate_active = {plate_id: True for plate_id in range(num_plates)} # Track if a plate can still grow
+        # Create plate assignment queues
+        plate_queues = {plate_id: deque() for plate_id in range(num_plates)}
+        plate_active = {plate_id: True for plate_id in range(num_plates)}
 
         # Assign starting points and initialize queues
         for plate_id, start_idx in enumerate(plate_starts):
             if start_idx in unassigned:
                 self.vertices[start_idx].plate_id = plate_id
+                self.plates[plate_id].add_vertex(start_idx)
                 unassigned.remove(start_idx)
-                plates[plate_id].append(start_idx)
-            # else: # Should not happen with replace=False if logic is sound
-            #     print(f"Warning: Start index {start_idx} already assigned?")
+                plate_queues[plate_id].append(start_idx)
 
-
-        # Grow plates using a round-robin approach until all vertices are assigned
+        # Grow plates using a round-robin approach
         active_plates = num_plates
         while unassigned and active_plates > 0:
             progress_made_in_round = False
-            plate_order = list(range(num_plates)) # Process in fixed order each round
-            random.shuffle(plate_order) # Shuffle order each round for fairness
+            plate_order = list(range(num_plates))
+            random.shuffle(plate_order)
 
             for plate_id in plate_order:
-                if not plate_active[plate_id] or not plates[plate_id]:
-                    if plate_active[plate_id]: # If it just became inactive
+                if not plate_active[plate_id] or not plate_queues[plate_id]:
+                    if plate_active[plate_id]:
                        plate_active[plate_id] = False
                        active_plates -= 1
-                    continue # Skip inactive plates or plates with empty queues
+                    continue
 
-                # Process one vertex from the front of the queue for this plate
-                # Limit processing per plate per round to avoid one plate dominating quickly
-                # Here we process just one, but you could process more if needed.
-                try:
-                    current_idx = plates[plate_id].popleft()
-                except IndexError:
-                     # Queue became empty unexpectedly? Mark inactive.
-                     plate_active[plate_id] = False
-                     active_plates -= 1
-                     continue
-
+                current_idx = plate_queues[plate_id].popleft()
                 neighbors = self._find_vertex_neighbors(current_idx)
                 unassigned_neighbors = [n for n in neighbors if n in unassigned]
 
                 if not unassigned_neighbors:
-                    # This vertex has no unassigned neighbors. If the queue is now empty,
-                    # the plate might become inactive.
-                    if not plates[plate_id]:
+                    if not plate_queues[plate_id]:
                         plate_active[plate_id] = False
                         active_plates -= 1
-                    # Add vertex back to queue *if* it might have neighbors that become unassigned later?
-                    # NO - standard BFS doesn't add back. If it has no unassigned neighbors now, it's done its job expanding.
-                    # We only put newly assigned vertices into the queue.
-                    continue # Go to the next plate
+                    continue
 
-                # --- Weighted random selection ---
+                # Weighted random selection
                 weights = []
                 valid_neighbors = []
                 for n_idx in unassigned_neighbors:
-                    # Check neighbors of the *potential* neighbor (n_idx)
                     n_neighbors = self._find_vertex_neighbors(n_idx)
-                    # Count how many of *its* neighbors already belong to the current plate
                     count = sum(1 for nn in n_neighbors if nn != current_idx and self.vertices[nn].plate_id == plate_id)
-                    weights.append(count + 1) # +1 bias to ensure non-zero weight
+                    weights.append(count + 1)
                     valid_neighbors.append(n_idx)
 
-                if not valid_neighbors: # Should not happen if unassigned_neighbors is not empty
-                     if not plates[plate_id]: # Check again if queue is empty
+                if not valid_neighbors:
+                     if not plate_queues[plate_id]:
                          plate_active[plate_id] = False
                          active_plates -= 1
                      continue
 
-
-                # Normalize weights
                 weights = np.array(weights, dtype=float)
                 total_weight = weights.sum()
 
                 if total_weight == 0:
-                     # All weights were zero (only possible if all counts were -1, which shouldn't happen)
-                     # Fallback to uniform probability if something went wrong
                      selected_neighbor_idx = np.random.choice(valid_neighbors)
-                     # print(f"Warning: Zero total weight for plate {plate_id} at vertex {current_idx}. Choosing uniformly.")
-
                 else:
                     weights /= total_weight
-                    # Select *one* neighbor to assign
                     try:
                         selected_neighbor_idx = np.random.choice(valid_neighbors, p=weights)
-                    except ValueError as e:
-                         print(f"Error choosing neighbor for plate {plate_id} from {current_idx}:")
-                         print(f"  Neighbors: {valid_neighbors}")
-                         print(f"  Weights: {weights}")
-                         print(f"  Sum: {weights.sum()}")
-                         # Fallback: choose uniformly or raise error
+                    except ValueError:
                          selected_neighbor_idx = np.random.choice(valid_neighbors)
-                         # raise e # Or re-raise
-
 
                 # Assign the selected neighbor
                 self.vertices[selected_neighbor_idx].plate_id = plate_id
+                self.plates[plate_id].add_vertex(selected_neighbor_idx)
                 if selected_neighbor_idx in unassigned:
                     unassigned.remove(selected_neighbor_idx)
-                else:
-                    # This indicates a potential race condition or logic error if another plate
-                    # assigned this vertex *within the same round*. Shuffling helps mitigate but doesn't eliminate.
-                    print(f"Warning: Vertex {selected_neighbor_idx} was already assigned when plate {plate_id} tried to claim it.")
-                    # We will overwrite, assuming the last assignment wins in this round robin.
-                    # A more complex lock/claim mechanism could be used if strict guarantees are needed.
 
-
-                plates[plate_id].append(selected_neighbor_idx) # Add the newly assigned vertex to the queue
+                plate_queues[plate_id].append(selected_neighbor_idx)
                 progress_made_in_round = True
 
-                # Optimization: If a vertex is popped and expands, maybe add it back to the *end*
-                # of the queue so it can potentially expand again later if needed?
-                # Standard BFS doesn't do this. Let's stick to standard for now.
-                # plates[plate_id].append(current_idx) # <--- Optional: Add back if desired
-
-
-            # End of round: Check if any progress was made overall
+            # Fallback assignment if no progress
             if not progress_made_in_round and unassigned:
-                # Fallback: If no plate could expand in a full round, assign remaining orphans
-                # This might happen if plates block each other completely or graph is disconnected
-                # print(f"Warning: No progress made, {len(unassigned)} vertices remain. Using fallback assignment.")
-                orphans = list(unassigned) # Make a copy to iterate over
+                orphans = list(unassigned)
                 assigned_in_fallback = False
                 for v_idx in orphans:
-                    if v_idx not in unassigned: continue # Already assigned by another orphan's assignment
+                    if v_idx not in unassigned: continue
 
                     neighbors = self._find_vertex_neighbors(v_idx)
                     assigned_neighbors = [(n, self.vertices[n].plate_id) for n in neighbors if self.vertices[n].plate_id != -1]
 
                     if assigned_neighbors:
-                        # Assign to the plate of a random *assigned* neighbor
                         random_neighbor_idx, assigned_plate_id = random.choice(assigned_neighbors)
                         self.vertices[v_idx].plate_id = assigned_plate_id
-                        # Do NOT add to queue here, just assign
+                        self.plates[assigned_plate_id].add_vertex(v_idx)
                         unassigned.remove(v_idx)
                         assigned_in_fallback = True
-                    # else:
-                        # Vertex has no assigned neighbors (isolated component start?)
-                        # This case requires a decision: assign to random plate? leave unassigned?
-                        # Assigning to a random existing plate might be best here.
-                        # if num_plates > 0:
-                        #     self.vertices[v_idx].plate_id = np.random.randint(num_plates)
-                        #     unassigned.remove(v_idx)
-                        #     assigned_in_fallback = True
-                        # else:
-                        #     # This should not happen if num_plates > 0
-                        #     print(f"Error: Cannot assign orphan {v_idx}, no plates exist.")
 
-
-                if not assigned_in_fallback and unassigned :
-                     # If even the fallback didn't assign anything, something is wrong
-                     # or we have completely isolated unassigned vertices.
-                     print(f"Warning: Fallback couldn't assign remaining {len(unassigned)} vertices. Graph might be disconnected or error occurred.")
-                     # Force assign remaining to random plates
+                if not assigned_in_fallback and unassigned:
                      remaining_unassigned = list(unassigned)
                      for v_idx in remaining_unassigned:
                           if num_plates > 0:
-                             self.vertices[v_idx].plate_id = np.random.randint(num_plates)
+                             plate_id = np.random.randint(num_plates)
+                             self.vertices[v_idx].plate_id = plate_id
+                             self.plates[plate_id].add_vertex(v_idx)
                              unassigned.remove(v_idx)
-                          else: break # Cannot assign if no plates
-                     if not unassigned:
-                         print("Force assignment completed.")
+                          else: break
 
         if unassigned:
-            self._assign_remaining_vertices(unassigned, plates.keys())
-            
-    def _assign_remaining_vertices(self, unassigned, plate_ids):
+            self._assign_remaining_vertices(unassigned)
+
+    def _assign_remaining_vertices(self, unassigned):
         """Assign any remaining unassigned vertices to the nearest plate."""
-        plate_ids = list(plate_ids)
         for v_idx in unassigned:
-            # Find the closest assigned vertex (by graph distance, not spatial)
-            # This is a simplified approach - could be optimized
             queue = deque()
             visited = set()
             
-            # Start with this vertex's neighbors
             neighbors = self._find_vertex_neighbors(v_idx)
             queue.extend(neighbors)
             visited.update(neighbors)
@@ -303,21 +259,23 @@ class World:
             while queue and not found:
                 current = queue.popleft()
                 if self.vertices[current].plate_id != -1:
-                    # Found an assigned vertex, use its plate
-                    self.vertices[v_idx].plate_id = self.vertices[current].plate_id
+                    plate_id = self.vertices[current].plate_id
+                    self.vertices[v_idx].plate_id = plate_id
+                    self.plates[plate_id].add_vertex(v_idx)
                     found = True
                     break
                     
-                # Add new neighbors to queue
                 new_neighbors = [n for n in self._find_vertex_neighbors(current) 
                             if n not in visited]
                 queue.extend(new_neighbors)
                 visited.update(new_neighbors)
                 
             if not found:
-                # Fallback: assign to random plate
-                self.vertices[v_idx].plate_id = np.random.choice(plate_ids)
-                
+                if self.plates:
+                    plate_id = random.choice(list(self.plates.keys()))
+                    self.vertices[v_idx].plate_id = plate_id
+                    self.plates[plate_id].add_vertex(v_idx)
+                    
     def _find_vertex_neighbors(self, vertex_idx):
         """Find all neighboring vertices (shared faces) for a given vertex."""
         neighbors = set()
@@ -330,14 +288,11 @@ class World:
         
     def _calculate_boundary_elevations(self, min_height, max_height):
         """Calculate elevations based on plate interactions at boundaries."""
-        # First pass: identify boundary vertices (those with neighbors from other plates)
+        # First pass: identify boundary vertices
         boundary_vertices = []
-        for i, vertex in enumerate(self.vertices):
-            neighbors = self._find_vertex_neighbors(i)
-            neighbor_plates = {self.vertices[n].plate_id for n in neighbors}
-            if len(neighbor_plates) > 1:  # Boundary vertex
-                boundary_vertices.append(i)
-                
+        for plate in self.plates.values():
+            boundary_vertices.extend(plate.get_boundary_vertices(self))
+            
         # Calculate relative movements at boundaries
         for v_idx in boundary_vertices:
             vertex = self.vertices[v_idx]
@@ -347,18 +302,20 @@ class World:
             adjacent_plates = set()
             for n in neighbors:
                 adjacent_plates.add(self.vertices[n].plate_id)
-            adjacent_plates.add(vertex.plate_id)  # Include own plate
+            adjacent_plates.add(vertex.plate_id)
             
             # Calculate relative movement vectors
             movement_vectors = []
+            current_plate = self.plates[vertex.plate_id]
+            
             for plate_id in adjacent_plates:
                 if plate_id == vertex.plate_id:
                     continue
                     
-                # Relative velocity is difference between plate velocities
-                rel_velocity = self.plate_velocities[vertex.plate_id] - self.plate_velocities[plate_id]
+                other_plate = self.plates[plate_id]
+                rel_velocity = current_plate.velocity - other_plate.velocity
                 
-                # Project onto vertex normal (approximate)
+                # Project onto vertex normal
                 normal = vertex.pos / np.linalg.norm(vertex.pos)
                 movement = np.dot(rel_velocity, normal)
                 movement_vectors.append(movement)
@@ -366,7 +323,6 @@ class World:
             # Elevation based on average relative movement
             if movement_vectors:
                 avg_movement = np.mean(movement_vectors)
-                # Scale to desired height range
                 vertex.elevation = min_height + (max_height - min_height) * (avg_movement + 1) / 2
                 
     def _smooth_elevations(self, iterations=2):
@@ -379,15 +335,12 @@ class World:
                     new_elevations.append(vertex.elevation)
                     continue
                     
-                # Average with neighbors
                 neighbor_elevations = [self.vertices[n].elevation for n in neighbors]
                 avg = np.mean([vertex.elevation] + neighbor_elevations)
                 new_elevations.append(avg)
                 
-            # Apply smoothed values
             for i, elevation in enumerate(new_elevations):
                 self.vertices[i].elevation = elevation
-
 
     def _get_midpoint_vertex(self, v1_idx, v2_idx, midpoint_cache, next_level_vertices, radius):
         """
@@ -467,7 +420,8 @@ class World:
             'alpha': alpha,
             'polygons': [],
             'face_elevations': [],
-            'face_plates': []
+            'face_plates': [],
+            'cbar_ax': None  # Store the colorbar axis separately
         }
         
         # Precompute face data
@@ -503,20 +457,26 @@ class World:
         
         # Radio button callback
         def on_radio_change(label):
+            # Remove old elements
             plot_data['collection'].remove()
-            plot_data['cbar'].remove()
+            if plot_data['cbar'] is not None:
+                plot_data['cbar'].remove()
+            if plot_data['cbar_ax'] is not None:
+                plot_data['cbar_ax'].remove()
             
             new_collection = self._create_collection(plot_data, mode=label.lower())
             plot_data['collection'] = new_collection
             plot_data['ax'].add_collection3d(new_collection)
             
+            # Add new colorbar
             plot_data['cbar'] = self._add_colorbar(plot_data, ax, mode=label.lower())
+            
             fig.canvas.draw_idle()
         
         radio.on_clicked(on_radio_change)
         
         return fig, ax, radio
-    
+
     def _create_collection(self, plot_data, mode='elevation'):
         """Create the appropriate Poly3DCollection based on visualization mode."""
         if mode == 'elevation':
@@ -542,6 +502,8 @@ class World:
     
     def _add_colorbar(self, plot_data, ax, mode='elevation'):
         """Add appropriate colorbar based on visualization mode."""
+        fig = plot_data['fig']
+        cbar_ax = fig.add_axes([0.85, 0.15, 0.03, 0.7])
         if mode == 'elevation':
             norm = plt.Normalize(
                 vmin=min(plot_data['face_elevations']),
@@ -550,14 +512,14 @@ class World:
             cmap = plt.get_cmap(plot_data['cmap'])
             mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
             mappable.set_array(plot_data['face_elevations'])
-            cbar = plt.colorbar(mappable, ax=ax, label='Elevation')
+            cbar = fig.colorbar(mappable, cax=cbar_ax, label='Elevation')
         else:  # plates
             unique_plates = sorted(list(set(plot_data['face_plates'])))
             plate_cmap = plt.get_cmap('tab20')
             norm = plt.Normalize(vmin=0, vmax=len(unique_plates)-1)
             mappable = plt.cm.ScalarMappable(norm=norm, cmap=plate_cmap)
             mappable.set_array([unique_plates.index(p) for p in plot_data['face_plates']])
-            cbar = plt.colorbar(mappable, ax=ax, label='Plate ID')
+            cbar = fig.colorbar(mappable, cax=cbar_ax, label='Plate ID')
             cbar.set_ticks(range(len(unique_plates)))
             cbar.set_ticklabels(unique_plates)
         
@@ -1265,7 +1227,7 @@ class Cube(World):
 # --- Main Execution ---
 if __name__ == "__main__":
     shape_type = "cube" # Choose "icosahedron" or "truncated"
-    num_subdivisions = 5     # Adjust level of detail
+    num_subdivisions = 3     # Adjust level of detail
     sphere_radius = 1.0
     plates = 15
     elevationmin = -15000
