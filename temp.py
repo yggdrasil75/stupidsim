@@ -12,6 +12,7 @@ import math
 from collections import deque
 #from itertools import permutations
 import multiprocessing
+import torch
 
 
 OCEANIC_CRUST_THICKNESS = -5000
@@ -27,7 +28,10 @@ class Vertex:
     def __init__(self, x, y, z):
         self.pos = np.array([x, y, z], dtype=float)
         self.elevation = 0.0
+        self.water = 0.0
         self.plate_id = -1
+        self.neighbors = {}
+        self.river_size = 0.0
 
     def normalize(self, radius=1.0):
         """Normalizes the vertex position to be on a sphere of given radius."""
@@ -53,6 +57,10 @@ class Face:
         """Returns the elevation values of the vertices forming this face."""
         return [vertex_list[i].elevation for i in self.v_indices]
 
+    def get_vertices_water(self, vertex_list):
+        """Returns the water values of the vertices forming this face."""
+        return [vertex_list[i].water for i in self.v_indices]
+    
     def __repr__(self):
         return f"Face({self.v_indices})"
 
@@ -158,6 +166,8 @@ class World:
         self.vertices = [] # List of Vertex objects
         self.faces = []    # List of Face objects
         self.plates = {}
+        self._neighbor_map_initialized = False
+        self.sea_level = 0.0
 
     def add_vertex(self, vertex):
         """Adds a vertex and returns its index."""
@@ -176,6 +186,41 @@ class World:
         """Abstract method to subdivide the faces."""
         raise NotImplementedError("Subclasses must implement subdivide()")
 
+    def _initialize_neighbor_map(self):
+        """Initialize the neighbor map with weights based on vertex distances."""
+        if self._neighbor_map_initialized:
+            return
+            
+        print("Initializing neighbor map...")
+        
+        # First pass: find all direct neighbors through shared faces
+        neighbor_sets = [set() for _ in range(len(self.vertices))]
+        for face in self.faces:
+            for i in range(len(face.v_indices)):
+                v1 = face.v_indices[i]
+                for j in range(i+1, len(face.v_indices)):
+                    v2 = face.v_indices[j]
+                    neighbor_sets[v1].add(v2)
+                    neighbor_sets[v2].add(v1)
+        
+        # Second pass: calculate weights based on distances
+        for v_idx, neighbors in enumerate(neighbor_sets):
+            for neighbor_idx in neighbors:
+                # Calculate distance between vertices
+                dist = np.linalg.norm(self.vertices[v_idx].pos - self.vertices[neighbor_idx].pos)
+                # Weight is inverse of distance (closer neighbors have higher weight)
+                weight = 1.0 / (dist + 1e-9)  # Small epsilon to avoid division by zero
+                self.vertices[v_idx].neighbors[neighbor_idx] = weight
+        
+        self._neighbor_map_initialized = True
+        print("Neighbor map initialized")
+
+    def _find_vertex_neighbors(self, vertex_idx):
+        """Get neighbors with weights for a vertex."""
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_map()
+        return self.vertices[vertex_idx].neighbors
+
     def genElevations(self, num_plates=7, min_height=0.0, max_height=1.0):
         """Generate elevation values with plate tectonics and continental/oceanic plates."""
         if not self.vertices:
@@ -193,6 +238,9 @@ class World:
         self._calculate_boundary_elevations(min_height, max_height)
         self._smooth_elevations(iterations=3)
         self._add_variations()
+        self._simulate_water() 
+
+    #### plates and elevation
 
     def _assign_base_elevations(self):
         """Assign base elevations based on plate type."""
@@ -206,9 +254,26 @@ class World:
         """Create plates and assign vertices to them."""
         self.plates = {}
         
+        plate_types = []
         # Create plate objects
+        for _ in range(num_plates):
+            # Bias towards alternating types
+            if len(plate_types) > 0 and plate_types[-1] == PLATE_TYPE_CONTINENTAL:
+                next_type = PLATE_TYPE_OCEANIC
+            elif len(plate_types) > 0 and plate_types[-1] == PLATE_TYPE_OCEANIC:
+                next_type = PLATE_TYPE_CONTINENTAL
+            else:
+                next_type = random.choice([PLATE_TYPE_CONTINENTAL, PLATE_TYPE_OCEANIC])
+            plate_types.append(next_type)
+            
+        for i in range(num_plates // 3):  # Adjust fraction to control randomness
+            if random.random() < 0.5:  # 50% chance to swap a plate's type
+                plate_types[i] = 1 - plate_types[i]  # Flips the type
+
+        # Create plates with assigned types
         for plate_id in range(num_plates):
             self.plates[plate_id] = Plate(plate_id)
+            self.plates[plate_id].type = plate_types[plate_id]
             
         # Assign vertices to plates
         self._assign_tectonic_plates(num_plates)
@@ -216,16 +281,6 @@ class World:
     def _get_neighbors_for_worker(self, idx):
         # Assuming self.vertices or some neighbor structure exists
         return self._find_vertex_neighbors(idx)
-
-    def _find_vertex_neighbors(self, vertex_idx):
-        """Find all neighboring vertices (shared faces) for a given vertex."""
-        neighbors = set()
-        for face in self.faces:
-            if vertex_idx in face.v_indices:
-                for v_idx in face.v_indices:
-                    if v_idx != vertex_idx:
-                        neighbors.add(v_idx)
-        return list(neighbors)
     
     def _plate_grow_worker(self, plate_id, plate_queue, vertices, unassigned, plates, assignment_lock):
         """
@@ -267,6 +322,12 @@ class World:
             valid_neighbors_for_assignment = []
             weights = []
             for n_idx in potential_unassigned_neighbors_indices:
+                neighbor_plate_ids = [self.vertices[nn_idx].plate_id for nn_idx in self._find_vertex_neighbors(n_idx) if self.vertices[nn_idx].plate_id != -1]
+                opposite_type_count = 0
+                for pid in neighbor_plate_ids:
+                    if pid in self.plates and self.plates[pid].type != self.plates[plate_id].type:
+                        opposite_type_count += 1
+
                 # The critical check happens later under lock, but we calculate
                 # weights based on the state we see *now*.
                 n_neighbors = self._find_vertex_neighbors(n_idx)
@@ -277,7 +338,7 @@ class World:
 
                 # Add base weight (e.g., 1) + count + small random factor (optional)
                 # Ensure non-zero weight to allow assignment even with count=0
-                weight = count + 1.0 + random.uniform(0, 0.5) # Example weighting
+                weight = (opposite_type_count + 1) * count + 1.0 + random.uniform(0, 0.5) # Example weighting
                 weights.append(weight)
                 valid_neighbors_for_assignment.append(n_idx)
 
@@ -330,16 +391,14 @@ class World:
             # Just move on to the next item in this worker's queue for this iteration.
             # The iterative approach handles conflicts implicitly in the next round.
 
-
     def _assign_tectonic_plates(self, num_plates, parallel_threshold_percent=10.0, max_iterations=100):
         num_vertices = len(self.vertices)
         print("Initializing plate assignment (Multiprocessing)...")
 
         # --- Initialize Shared State ---
-        # Shared array for plate IDs (-1 for unassigned)
         plate_id_array = multiprocessing.Array(ctypes.c_int, num_vertices)
         for i in range(num_vertices):
-            plate_id_array[i] = -1 # Initialize all as unassigned
+            plate_id_array[i] = -1  # Initialize all as unassigned
 
         # Master 'unassigned' set (managed only by main process)
         unassigned = set(range(num_vertices))
@@ -348,22 +407,20 @@ class World:
         assignment_lock = multiprocessing.Lock()
 
         # Queue for workers to report successful assignments back to main process
-        # Format: (plate_id, [list_of_assigned_indices])
         manager = multiprocessing.Manager()
-        results_queue = manager.Queue() # Use manager queue for simplicity here
+        results_queue = manager.Queue()
 
         # Plates dictionary (managed only by main process)
         self.plates = {plate_id: Plate(plate_id) for plate_id in range(num_plates)}
 
         # --- Assign Starting Points ---
-        # (Main process modifies shared array and local 'unassigned' set)
         plate_starts = np.random.choice(list(unassigned), size=num_plates, replace=False)
-        with assignment_lock: # Lock needed if multiple ops touch shared state
+        with assignment_lock:
             for plate_id, start_idx in enumerate(plate_starts):
-                if start_idx in unassigned: # Check local set
-                    plate_id_array[start_idx] = plate_id # Update shared array
-                    self.plates[plate_id].add_vertex(start_idx) # Update local Plate obj
-                    unassigned.remove(start_idx) # Update local set
+                if start_idx in unassigned:
+                    plate_id_array[start_idx] = plate_id
+                    self.plates[plate_id].add_vertex(start_idx)
+                    unassigned.remove(start_idx)
 
         print(f"Assigned {num_plates} starting points. Remaining unassigned: {len(unassigned)}")
 
@@ -371,56 +428,47 @@ class World:
         iteration = 0
         parallel_threshold_count = int(num_vertices * (parallel_threshold_percent / 100.0))
 
-        # Precompute or prepare neighbor data if needed by workers in a pickleable way
-        # Example: precomputed_neighbors = {i: self._find_vertex_neighbors(i) for i in range(num_vertices)}
-        # neighbor_getter = lambda idx: precomputed_neighbors[idx]
-        # OR if _get_neighbors_for_worker is sufficient:
-        neighbor_getter = self._get_neighbors_for_worker # Pass instance method carefully or make static
+        neighbor_getter = self._get_neighbors_for_worker
 
         while len(unassigned) > parallel_threshold_count and iteration < max_iterations:
             iteration += 1
             unassigned_count_start_iter = len(unassigned)
-            print(f"\n--- Iteration {iteration} --- Starting | Unassigned: {unassigned_count_start_iter}/{num_vertices}")
+            #print(f"\n--- Iteration {iteration} --- Starting | Unassigned: {unassigned_count_start_iter}/{num_vertices}")
 
-            # 1. Identify Frontier (Main process reads shared array)
+            # 1. Identify Frontier
             plate_frontiers = {plate_id: [] for plate_id in range(num_plates)}
-            current_unassigned_list = list(unassigned) # Iterate over local copy
+            current_unassigned_list = list(unassigned)
 
-            plate_ids_vals = plate_id_array.get_obj() # Efficient access
+            plate_ids_vals = plate_id_array.get_obj()
             for u_idx in current_unassigned_list:
-                 # Optional: Double check if u_idx is *still* unassigned in shared array
-                 if plate_ids_vals[u_idx] != -1:
-                      if u_idx in unassigned: unassigned.remove(u_idx) # Sync local set
-                      continue
+                if plate_ids_vals[u_idx] != -1:
+                    if u_idx in unassigned: unassigned.remove(u_idx)
+                    continue
 
-                 neighbors = self._find_vertex_neighbors(u_idx) # Main process finds neighbors
-                 for n_idx in neighbors:
-                      assigned_plate_id = plate_ids_vals[n_idx]
-                      if assigned_plate_id != -1:
-                           # Add the *assigned* neighbor 'n_idx' to the frontier queue for its plate
-                           if assigned_plate_id in plate_frontiers:
-                                plate_frontiers[assigned_plate_id].append(n_idx)
-                           # Break inner loop if you only need one neighbor, or collect all
-                           # break # Optimization: only need one assigned neighbor to add 'n_idx'
+                neighbors = self._find_vertex_neighbors(u_idx)
+                for n_idx in neighbors:
+                    assigned_plate_id = plate_ids_vals[n_idx]
+                    if assigned_plate_id != -1:
+                        plate_frontiers[assigned_plate_id].append(n_idx)
 
-            # Deduplicate frontier points per plate for this iteration's work queues
+            # Deduplicate frontier points per plate
             work_items = {}
             active_plate_count = 0
             total_frontier_size = 0
             for plate_id, frontier_indices in plate_frontiers.items():
-                unique_indices = list(set(frontier_indices)) # Make unique
+                unique_indices = list(set(frontier_indices))
                 if unique_indices:
                     work_items[plate_id] = unique_indices
                     active_plate_count += 1
                     total_frontier_size += len(unique_indices)
 
-            print(f"Iteration {iteration}: Found {total_frontier_size} frontier points across {active_plate_count} active plates.")
+            #print(f"Iteration {iteration}: Found {total_frontier_size} frontier points across {active_plate_count} active plates.")
 
             if active_plate_count == 0:
-                print(f"Iteration {iteration}: No active plates found. Stopping parallel phase.")
+                #print(f"Iteration {iteration}: No active plates found. Stopping parallel phase.")
                 break
 
-            # 2. Start Worker Processes for this iteration
+            # 2. Start Worker Processes
             processes = []
             for plate_id, indices_to_process in work_items.items():
                 if indices_to_process:
@@ -428,69 +476,138 @@ class World:
                         target=plate_grow_worker_process,
                         args=(
                             plate_id,
-                            indices_to_process, # Work items for this process
-                            plate_id_array,     # Shared
-                            results_queue,      # Shared queue for results
-                            assignment_lock,    # Shared
-                            neighbor_getter     # How worker finds neighbors
+                            indices_to_process,
+                            plate_id_array,
+                            results_queue,
+                            assignment_lock,
+                            neighbor_getter
                         )
                     )
                     processes.append(p)
                     p.start()
 
-            # 3. Wait for Processes to finish & Collect Results from Queue
+            # 3. Wait for Processes to finish & Collect Results
             for p in processes:
-                p.join() # Wait for process completion
+                p.join()
 
             assigned_in_iter = 0
             while not results_queue.empty():
-                 try:
-                     res_plate_id, assigned_indices = results_queue.get_nowait()
-                     newly_assigned_count = 0
-                     # Update master state in main process
-                     for v_idx in assigned_indices:
-                          if v_idx in unassigned: # Check if still considered unassigned locally
-                              unassigned.remove(v_idx)
-                              self.plates[res_plate_id].add_vertex(v_idx)
-                              newly_assigned_count += 1
-                          # else: It was already assigned (e.g., by another process or earlier step)
-                     assigned_in_iter += newly_assigned_count
-                 except queue.Empty: # Should theoretically not happen with qsize check
-                     break
-                 except Exception as e:
-                     print(f"Error processing results queue: {e}")
-
+                try:
+                    res_plate_id, assigned_indices = results_queue.get_nowait()
+                    newly_assigned_count = 0
+                    for v_idx in assigned_indices:
+                        if v_idx in unassigned:
+                            unassigned.remove(v_idx)
+                            self.plates[res_plate_id].add_vertex(v_idx)
+                            newly_assigned_count += 1
+                    assigned_in_iter += newly_assigned_count
+                except queue.Empty:
+                    break
+                except Exception as e:
+                    print(f"Error processing results queue: {e}")
 
             unassigned_count_end_iter = len(unassigned)
             print(f"Iteration {iteration}: Finished | Assigned in iter: {assigned_in_iter} | Remaining Unassigned: {unassigned_count_end_iter}")
 
             if assigned_in_iter == 0 and unassigned_count_start_iter > 0:
-                 print(f"Iteration {iteration}: Stalled. Stopping parallel phase.")
-                 break
+                print(f"Iteration {iteration}: Stalled. Stopping parallel phase.")
+                break
 
         print(f"\nParallel growth phase finished after {iteration} iterations.")
         print(f"Remaining unassigned vertices (local set): {len(unassigned)}")
 
         # --- Sync vertex objects with final plate_id_array state ---
-        # Important if _assign_remaining_vertices_safe relies on vertex.plate_id
-        print("Syncing final plate IDs to vertex objects...")
         final_plate_ids = plate_id_array.get_obj()
         for i, v in enumerate(self.vertices):
-             v.plate_id = final_plate_ids[i]
-             # Optional: Ensure vertex is in the correct Plate object set if not already
-             # if v.plate_id != -1 and i not in self.plates[v.plate_id].vertices:
-             #     self.plates[v.plate_id].add_vertex(i) # Might happen due to sync differences
-
+            v.plate_id = final_plate_ids[i]
 
         # --- Fallback Assignment ---
-        # Make sure fallback uses the up-to-date vertex.plate_id
         remaining_indices_final = [i for i, pid in enumerate(final_plate_ids) if pid == -1]
         if remaining_indices_final:
-             print(f'Passing {len(remaining_indices_final)} remaining vertices to sequential fallback.')
-             self._assign_remaining_vertices_safe(remaining_indices_final) # Ensure this uses vertex.plate_id
+            print(f'Passing {len(remaining_indices_final)} remaining vertices to sequential fallback.')
+            self._assign_remaining_vertices_safe(remaining_indices_final)
         else:
-             print("All vertices assigned during parallel phase.")
+            print("All vertices assigned during parallel phase.")
 
+        # --- Handle Non-Contiguous Vertices ---
+        self._fix_non_contiguous_vertices()
+
+    def _fix_non_contiguous_vertices(self):
+        """
+        Identify and reassign vertices that are not contiguous with their plate's main body.
+        """
+        print("Checking for non-contiguous vertices...")
+        for plate_id, plate in self.plates.items():
+            if not plate.vertices:
+                continue
+
+            # Find the largest contiguous region in the plate
+            main_region = self._find_largest_contiguous_region(plate_id)
+            all_vertices = plate.vertices.copy()
+
+            # Identify orphaned vertices (not in the main region)
+            orphaned_vertices = all_vertices - main_region
+
+            if orphaned_vertices:
+                print(f"Plate {plate_id} has {len(orphaned_vertices)} non-contiguous vertices. Reassigning...")
+
+                for v_idx in orphaned_vertices:
+                    # Find the most common plate among neighbors
+                    neighbor_plates = []
+                    neighbors = self._find_vertex_neighbors(v_idx)
+                    for n_idx in neighbors:
+                        neighbor_plate = self.vertices[n_idx].plate_id
+                        if neighbor_plate != -1 and neighbor_plate != plate_id:
+                            neighbor_plates.append(neighbor_plate)
+
+                    if neighbor_plates:
+                        # Assign to the most common neighboring plate
+                        new_plate_id = max(set(neighbor_plates), key=neighbor_plates.count)
+                        self.vertices[v_idx].plate_id = new_plate_id
+                        self.plates[new_plate_id].add_vertex(v_idx)
+                        plate.vertices.remove(v_idx)
+                    else:
+                        # No neighboring plates found, assign randomly
+                        new_plate_id = random.choice(list(self.plates.keys()))
+                        self.vertices[v_idx].plate_id = new_plate_id
+                        self.plates[new_plate_id].add_vertex(v_idx)
+                        plate.vertices.remove(v_idx)
+
+    def _find_largest_contiguous_region(self, plate_id):
+        """
+        Find the largest contiguous region of vertices in a plate using BFS.
+        Returns a set of vertex indices.
+        """
+        visited = set()
+        largest_region = set()
+        plate_vertices = self.plates[plate_id].vertices.copy()
+
+        while plate_vertices:
+            start_idx = plate_vertices.pop()
+            if start_idx in visited:
+                continue
+
+            queue = deque([start_idx])
+            current_region = set()
+
+            while queue:
+                v_idx = queue.popleft()
+                if v_idx in visited:
+                    continue
+
+                visited.add(v_idx)
+                current_region.add(v_idx)
+
+                neighbors = self._find_vertex_neighbors(v_idx)
+                for n_idx in neighbors:
+                    if self.vertices[n_idx].plate_id == plate_id and n_idx not in visited:
+                        queue.append(n_idx)
+
+            if len(current_region) > len(largest_region):
+                largest_region = current_region
+
+        return largest_region
+    
     def _assign_remaining_vertices_safe(self, remaining_unassigned_indices):
         """
         Assign remaining unassigned vertices sequentially (BFS from orphan).
@@ -672,31 +789,301 @@ class World:
             vertex.elevation = elevation
         print('boundary effects calculated')
 
-    def _add_variations(self):
-        """Add natural elevation variations within plates."""
-        for plate in self.plates.values():
-            # Only add variations to continental plates
-            if plate.type != PLATE_TYPE_CONTINENTAL:
-                continue
-                
-            # Find plate center
-            center_pos = np.mean([self.vertices[v_idx].pos for v_idx in plate.vertices], axis=0)
+    def _build_neighbor_tensors(self, device):
+        """
+        Precomputes neighbor information in a tensor format suitable for PyTorch.
+        (Implementation is the same as before)
+        """
+        num_vertices = len(self.vertices)
+        neighbor_lists = [list(self._find_vertex_neighbors(i)) for i in range(num_vertices)]
+        max_neighbors = max(len(neighbors) for neighbors in neighbor_lists) if neighbor_lists else 0
+        if max_neighbors == 0 and num_vertices > 0 : # Handle case with isolated vertices
+             print("Warning: Some vertices may have no neighbors.")
+             max_neighbors = 1 # Avoid zero-sized tensor dim if possible
+
+        neighbor_indices = torch.full((num_vertices, max_neighbors), 0, # Pad with 0, mask handles it
+                                      dtype=torch.long, device=device)
+        neighbor_mask = torch.zeros((num_vertices, max_neighbors),
+                                    dtype=torch.bool, device=device)
+
+        for i, neighbors in enumerate(neighbor_lists):
+            if neighbors:
+                num_n = len(neighbors)
+                # Ensure indices are within bounds if padding with 0
+                safe_neighbors = [n for n in neighbors if 0 <= n < num_vertices]
+                if len(safe_neighbors) < num_n:
+                    print(f"Warning: Vertex {i} had invalid neighbor indices removed.")
+
+                num_n = len(safe_neighbors) # Update count
+                if num_n > 0:
+                    neighbor_indices[i, :num_n] = torch.tensor(safe_neighbors, dtype=torch.long, device=device)
+                    neighbor_mask[i, :num_n] = True
+
+        return neighbor_indices, neighbor_mask, max_neighbors
+  
+    def _add_variations(self, iterations=5, device=None, subdivisions=1): # Added subdivisions param if used
+            """
+            Add natural elevation variations using PyTorch for GPU acceleration.
+            Allows for both increases (hills/peaks) and decreases (valleys).
+            """
+            print("--- Starting PyTorch Elevation Variation (with Valley Formation) ---")
+            start_total_time = time.time()
+
+            if device is None:
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Using device: {device}")
+
+            num_vertices = len(self.vertices)
+            if num_vertices == 0:
+                print("No vertices to process.")
+                return
+
+            # --- 1. Data Preparation (CPU -> GPU Tensors) ---
+            print("Preparing data for GPU...")
+            prep_start_time = time.time()
+
+            # Basic vertex data
+            positions = torch.tensor([v.pos for v in self.vertices], dtype=torch.float32, device=device)
+            elevations = torch.tensor([v.elevation for v in self.vertices], dtype=torch.float32, device=device)
+            plate_ids = torch.tensor([v.plate_id for v in self.vertices], dtype=torch.long, device=device)
+
+            # --- Apply initial 5% noise to all elevations ---
+            noise_scale = 0.05  # 5% noise
+            noise = (torch.rand_like(elevations) * 2.0 - 1.0) * noise_scale * elevations
+            elevations += noise
             
-            for v_idx in plate.vertices:
-                vertex = self.vertices[v_idx]
-                distance_to_center = np.linalg.norm(vertex.pos - center_pos)
-                
-                # Add random hills/mountains that fade toward plate edges
-                if random.random() < 0.8:  # 20% chance of a feature
-                    feature_size = random.uniform(0.05, 0.3)
-                    # Scale by distance to center (stronger features near center)
-                    feature_strength = feature_size * (1 - distance_to_center/2)
-                    vertex.elevation += feature_strength
-                    
-        # Ensure elevations stay within bounds
-        for vertex in self.vertices:
-            vertex.elevation = max(self.minheight, min(self.maxheight, vertex.elevation))
-        print('randomized elevations')
+            # Identify continental vertices
+            is_continental = torch.zeros(num_vertices, dtype=torch.bool, device=device)
+            continental_plate_ids = set()
+            for plate_id, plate in self.plates.items():
+                if plate.type == PLATE_TYPE_CONTINENTAL:
+                    continental_plate_ids.add(plate_id)
+            # Vectorized check for continental plates
+            continental_mask_per_plate = torch.zeros_like(plate_ids, dtype=torch.bool)
+            for p_id in continental_plate_ids:
+                continental_mask_per_plate |= (plate_ids == p_id)
+            is_continental = continental_mask_per_plate
+            continental_indices = torch.where(is_continental)[0]
+            num_continental_vertices = len(continental_indices)
+
+            if num_continental_vertices == 0:
+                print("No continental vertices found. Skipping variation.")
+                return
+
+            # Precompute neighbors
+            neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors(device)
+
+            # Identify high points (peaks)
+            # (Peak identification logic remains largely the same as before)
+            all_peaks_indices = []
+            plate_peak_elevs = {}
+            for plate_id in continental_plate_ids:
+                plate = self.plates[plate_id]
+                if not hasattr(plate, 'vertices') or not plate.vertices: continue # Skip if no vertices attr or empty
+                plate_v_indices_list = list(plate.vertices)
+                if not plate_v_indices_list: continue
+
+                # Filter out invalid indices before using them
+                valid_plate_v_indices = [idx for idx in plate_v_indices_list if 0 <= idx < num_vertices]
+                if not valid_plate_v_indices: continue
+
+                plate_v_indices = torch.tensor(valid_plate_v_indices, dtype=torch.long, device=device)
+
+                # Check if plate_v_indices is empty after filtering
+                if plate_v_indices.numel() == 0: continue
+
+                plate_elevs_tensor = elevations[plate_v_indices]
+                num_peaks = max(1, int(len(valid_plate_v_indices) * 0.05))
+                num_peaks = min(num_peaks, len(valid_plate_v_indices)) # Cannot request more peaks than vertices
+
+                if num_peaks > 0:
+                    _, top_indices_in_plate = torch.topk(plate_elevs_tensor, k=num_peaks)
+                    plate_peaks_indices = plate_v_indices[top_indices_in_plate].tolist() # Use filtered indices tensor
+                    all_peaks_indices.extend(plate_peaks_indices)
+                    if plate_peaks_indices:
+                        plate_peak_elevs[plate_id] = torch.max(elevations[plate_peaks_indices]).item()
+                    else:
+                        plate_peak_elevs[plate_id] = CONTINENTAL_CRUST_THICKNESS
+                else:
+                    plate_peak_elevs[plate_id] = CONTINENTAL_CRUST_THICKNESS # Default if no peaks calculated
+
+
+            if not all_peaks_indices:
+                print("Warning: No peaks found on any continental plate.")
+                has_peaks = False
+                peaks_pos = torch.empty((0, 3), dtype=torch.float32, device=device) # Ensure it's defined
+            else:
+                peaks_indices_tensor = torch.tensor(list(set(all_peaks_indices)), dtype=torch.long, device=device)
+                # Final check for valid indices in peaks_indices_tensor
+                valid_peak_indices = peaks_indices_tensor[(peaks_indices_tensor >= 0) & (peaks_indices_tensor < num_vertices)]
+                if len(valid_peak_indices) < len(peaks_indices_tensor):
+                    print(f"Warning: Removed {len(peaks_indices_tensor) - len(valid_peak_indices)} invalid peak indices.")
+                if len(valid_peak_indices) == 0:
+                    print("Warning: All peak indices were invalid.")
+                    has_peaks = False
+                    peaks_pos = torch.empty((0, 3), dtype=torch.float32, device=device)
+                else:
+                    peaks_pos = positions[valid_peak_indices]
+                    # peaks_plate_id = plate_ids[valid_peak_indices] # We don't use this directly later
+                    has_peaks = True
+
+
+            # Map plate_id to its max peak elevation
+            max_peak_elev_map = torch.full_like(elevations, CONTINENTAL_CRUST_THICKNESS)
+            for i in range(num_vertices):
+                p_id = plate_ids[i].item()
+                if p_id in plate_peak_elevs:
+                    max_peak_elev_map[i] = plate_peak_elevs[p_id]
+
+
+            # Simulation parameters
+            # Use subdivisions parameter if it exists, otherwise default to 1
+            #effective_subdivisions = getattr(self, 'subdivisions', 1) if subdivisions is None else subdivisions
+            
+            total_iterations = self.subdivisions * iterations # Match original logic if subdivisions exist
+
+            # Ensure minheight/maxheight are available
+            min_elev_val = getattr(self, 'minheight', torch.min(elevations).item() - 1.0) # Provide fallback
+            max_elev_val = getattr(self, 'maxheight', torch.max(elevations).item() + 1.0) # Provide fallback
+            elev_range = max_elev_val - min_elev_val if max_elev_val > min_elev_val else 1.0
+            significant_change_threshold = 0.001 * elev_range
+
+            # --- Tunable Parameters ---
+            peak_force_scale = 0.5    # Weight of the upward push from peaks
+            neighbor_push_scale = 0.1  # Max random factor for pushing towards higher neighbors
+            neighbor_pull_scale = 0.05 # Max random factor for pulling away from slightly lower neighbors
+            slump_scale = 0.15        # Factor for downward force when higher than average neighbor (NEW)
+            noise_scale = 0.3         # Increased weight for random up/down noise
+            damping_factor = 0.5      # Overall damping rate per iteration
+
+            print(f"Data preparation took {time.time() - prep_start_time:.2f}s")
+            print(f"Running {total_iterations} iterations. Min/Max Elev: {min_elev_val:.2f}/{max_elev_val:.2f}")
+            print(f"Tunable Factors: Peak={peak_force_scale}, NeighborPush={neighbor_push_scale}, NeighborPull={neighbor_pull_scale}, Slump={slump_scale}, Noise={noise_scale}, Damp={damping_factor}")
+
+
+            # --- 2. Simulation Loop (on GPU) ---
+            for iteration in range(total_iterations):
+                iter_start_time = time.time()
+                #if continental_indices.numel() == 0: break # Exit if no continental vertices left
+
+                # Only process continental vertices
+                current_elev = elevations[continental_indices]
+                current_pos = positions[continental_indices]
+                current_plate_ids = plate_ids[continental_indices]
+
+                # --- Neighbor Calculations ---
+                cont_neighbor_indices = neighbor_indices[continental_indices]
+                cont_neighbor_mask = neighbor_mask[continental_indices]
+
+                # Gather neighbor data using full tensors
+                neighbor_elevs = elevations[cont_neighbor_indices]
+                neighbor_pos = positions[cont_neighbor_indices]
+                neighbor_plate_ids = plate_ids[cont_neighbor_indices]
+
+                # Mask out invalid neighbors and neighbors from different plates
+                same_plate_mask = (neighbor_plate_ids == current_plate_ids.unsqueeze(1))
+                valid_neighbor_mask = cont_neighbor_mask & same_plate_mask
+
+                # Calculate elevation difference and distance for valid neighbors
+                elev_diff = neighbor_elevs - current_elev.unsqueeze(1)
+                dist = torch.norm(current_pos.unsqueeze(1) - neighbor_pos, dim=2)
+                inv_dist = 1.0 / (dist + 0.1) # Add epsilon
+
+                # Calculate original neighbor force components (push/pull)
+                force_from_higher = torch.rand_like(elev_diff) * neighbor_push_scale * elev_diff * inv_dist
+                force_from_lower = -torch.rand_like(elev_diff) * neighbor_pull_scale * inv_dist
+                neighbor_force_contribution = torch.where(
+                    elev_diff > 0,
+                    force_from_higher,
+                    torch.where(
+                        torch.abs(elev_diff) < 0.1 * elev_range, # Condition for small downward push
+                        force_from_lower,
+                        torch.zeros_like(elev_diff)
+                    )
+                )
+                # Apply mask and sum original forces
+                masked_neighbor_force = neighbor_force_contribution * valid_neighbor_mask.float()
+                total_original_neighbor_force = torch.sum(masked_neighbor_force, dim=1)
+
+                # --- NEW: Slumping/Erosion Force based on difference from average ---
+                # Calculate average elevation of *valid* neighbors
+                masked_neighbor_elevs = neighbor_elevs * valid_neighbor_mask.float()
+                num_valid_neighbors = torch.sum(valid_neighbor_mask.float(), dim=1).clamp(min=1) # Avoid div by zero
+                avg_local_elev = torch.sum(masked_neighbor_elevs, dim=1) / num_valid_neighbors
+
+                # Calculate difference: positive if current vertex is higher than average
+                elev_diff_from_avg = current_elev - avg_local_elev
+
+                # Calculate slump force: proportional to how much higher it is, applies downward force
+                # Use relu to only apply slump when elev_diff_from_avg is positive
+                slump_force = -torch.relu(elev_diff_from_avg) * slump_scale * torch.rand_like(current_elev) # Random factor per vertex
+
+                # Combine Neighbor Forces (Original push/pull + Slumping)
+                # Adjust relative weighting if needed, e.g., 0.5 for original, 0.5 for slump
+                total_neighbor_force = (total_original_neighbor_force * 0.7 + slump_force * 0.3)
+
+
+                # --- Peak Force Calculation ---
+                peak_force = torch.zeros_like(current_elev)
+                if has_peaks and peaks_pos.numel() > 0: # Check if peaks_pos is not empty
+                    dist_to_peaks_sq = torch.sum((current_pos.unsqueeze(1) - peaks_pos.unsqueeze(0))**2, dim=2)
+                    min_dist_to_peak_sq, _ = torch.min(dist_to_peaks_sq, dim=1)
+                    min_dist_to_peak = torch.sqrt(min_dist_to_peak_sq + 1e-9)
+
+                    peak_influence = 1.0 / (1.0 + min_dist_to_peak * 5.0)
+
+                    current_max_peak_elev = max_peak_elev_map[continental_indices]
+
+                    # Calculate base peak force (can be negative if point is above peak)
+                    raw_peak_force = (torch.rand_like(current_elev) * 0.2 * # Base random factor
+                                    peak_influence *
+                                    (current_max_peak_elev - current_elev))
+
+                    # Keep the clamp: peaks primarily cause uplift in this model.
+                    # Valleys form from slumping and noise mainly.
+                    peak_force = torch.clamp(raw_peak_force, min=0)
+
+
+                # --- Random Noise ---
+                current_damping = damping_factor * (1.0 - iteration / total_iterations) # Per-iteration damping
+                noise = (torch.rand_like(current_elev) * 2.0 - 1.0) # Noise in range [-1, 1]
+                noise_force = noise * noise_scale * (1.0 - iteration / total_iterations) # Noise decreases over time
+
+                # --- Combine Forces ---
+                # Adjust weights as needed based on experimentation
+                total_force = (peak_force * peak_force_scale +
+                            total_neighbor_force * (1.0 - peak_force_scale - noise_scale) + # Neighbor force takes remaining weight
+                            noise_force * noise_scale) # Apply noise scale here
+                total_force *= current_damping # Apply damping to the combined force
+
+                # --- Update Elevation ---
+                new_elev = current_elev + total_force
+                new_elev_clamped = torch.clamp(new_elev, min=min_elev_val, max=max_elev_val)
+
+                changes_mask = torch.abs(new_elev_clamped - current_elev) > significant_change_threshold
+                num_changes = torch.sum(changes_mask).item()
+
+                elevations[continental_indices] = new_elev_clamped
+
+                print(f"\rIteration {iteration + 1}/{total_iterations} | Changes: {num_changes} | Time: {time.time() - iter_start_time:.3f}s | Elev Range: {torch.min(elevations[continental_indices]):.2f}-{torch.max(elevations[continental_indices]):.2f}", end="")
+
+            print(f"\nCompleted {total_iterations} PyTorch variation iterations.")
+
+            # --- 3. Data Synchronization (GPU -> CPU) ---
+            print("Synchronizing data back to CPU objects...")
+            sync_start_time = time.time()
+
+            final_elevations_cpu = elevations.cpu().numpy()
+            for i in range(num_vertices):
+                # Check if vertex index is valid before assignment
+                if 0 <= i < len(self.vertices):
+                    self.vertices[i].elevation = final_elevations_cpu[i]
+                else:
+                    print(f"Warning: Skipping synchronization for invalid vertex index {i}")
+
+
+            print(f"Data synchronization took {time.time() - sync_start_time:.2f}s")
+            print(f"--- PyTorch Elevation Variation Finished (Total Time: {time.time() - start_total_time:.2f}s) ---")
 
     def _smooth_elevations(self, iterations=2):
         """Smooth elevation values with plate-aware smoothing."""
@@ -722,6 +1109,162 @@ class World:
             for i, elevation in enumerate(new_elevations):
                 self.vertices[i].elevation = elevation
         print('smoothed elevations')
+
+    #### fluids
+
+    def _simulate_water(self, iterations=5):
+        """Simulate water distribution based on elevation.
+        Water is measured in teraliters (TL) for easier tracking of lakes and rivers."""
+        print("Simulating water distribution...")
+        
+        # First pass: identify ocean basins and initial water placement
+        for vertex in self.vertices:
+            if vertex.elevation <= self.sea_level:
+                # Ocean gets full water (simplified)
+                vertex.water = (self.sea_level - vertex.elevation) * 10.0  # In TL
+            else:
+                vertex.water = 0.0
+                
+        # Second pass: simulate rainfall and river flow
+        for _ in range(iterations):
+            new_water = [0.0] * len(self.vertices)
+            
+            for i, vertex in enumerate(self.vertices):
+                if vertex.elevation > self.sea_level:
+                    # Land can receive rainfall (0.01-0.05 TL per iteration)
+                    rainfall = random.uniform(0.01, 0.05)
+                    new_water[i] += rainfall
+                    
+                    # Find lowest neighbor for runoff
+                    neighbors = self._find_vertex_neighbors(i)
+                    if neighbors:
+                        lowest_neighbor = min(neighbors, 
+                                            key=lambda n: self.vertices[n].elevation)
+                        if self.vertices[lowest_neighbor].elevation < vertex.elevation:
+                            # Move some water downhill (20% of current water or max 0.5 TL)
+                            flow_amount = min(vertex.water * 0.2, 0.5)
+                            new_water[i] -= flow_amount
+                            new_water[lowest_neighbor] += flow_amount
+        
+            # Apply changes
+            for i in range(len(self.vertices)):
+                self.vertices[i].water = max(0.0, self.vertices[i].water + new_water[i])
+        
+        # Generate rivers based on water flow accumulation
+        self._generate_rivers()
+        
+        print("Water simulation complete")
+
+    def _generate_rivers(self, min_flow=1.0):
+        """Identify and mark rivers based on accumulated water flow.
+        min_flow: minimum flow rate in TL/iteration to be considered a river."""
+        print("Generating rivers...")
+        
+        # Reset river flags
+        for vertex in self.vertices:
+            vertex.is_river = False
+        
+        # Track flow accumulation for each vertex
+        flow_accumulation = [0.0] * len(self.vertices)
+        
+        # Calculate flow accumulation (simplified approach)
+        for i, vertex in enumerate(self.vertices):
+            if vertex.elevation > self.sea_level:
+                neighbors = self._find_vertex_neighbors(i)
+                if neighbors:
+                    # Count how many cells flow into this one
+                    for neighbor in neighbors:
+                        if self.vertices[neighbor].elevation > vertex.elevation:
+                            # Neighbor is higher and would flow to this vertex
+                            flow_accumulation[i] += self.vertices[neighbor].water
+        
+        # Mark rivers based on flow accumulation
+        for i, flow in enumerate(flow_accumulation):
+            if flow >= min_flow:
+                self.vertices[i].is_river = True
+                # Scale river size based on flow (could be used for rendering)
+                self.vertices[i].river_size = min(3, int(flow / min_flow))
+        
+        # Connect river segments to form continuous rivers
+        self._connect_river_segments()
+        
+        print(f"Generated {sum(1 for v in self.vertices if v.is_river)} river segments")
+
+    def _connect_river_segments(self):
+        """Ensure rivers form continuous paths from source to ocean/lake."""
+        # This is a simplified approach - more sophisticated methods could be used
+        for i, vertex in enumerate(self.vertices):
+            if vertex.is_river:
+                # Find the downstream path
+                current = i
+                path = [current]
+                while True:
+                    neighbors = self._find_vertex_neighbors(current)
+                    if not neighbors:
+                        break
+                    
+                    # Find the lowest neighbor (natural flow direction)
+                    lowest_neighbor = min(neighbors,
+                                        key=lambda n: self.vertices[n].elevation)
+                    
+                    # Stop if we've reached sea level or a lake
+                    if (self.vertices[lowest_neighbor].elevation <= self.sea_level or
+                        self.vertices[lowest_neighbor].water > 5.0):  # 5 TL threshold for lakes
+                        break
+                    
+                    # If we're going uphill, stop (shouldn't happen)
+                    if self.vertices[lowest_neighbor].elevation >= self.vertices[current].elevation:
+                        break
+                    
+                    # Mark the neighbor as river and continue
+                    self.vertices[lowest_neighbor].is_river = True
+                    self.vertices[lowest_neighbor].river_size = max(
+                        self.vertices[lowest_neighbor].river_size,
+                        self.vertices[current].river_size - 0.5
+                    )
+                    current = lowest_neighbor
+                    path.append(current)
+                    
+                    # Prevent infinite loops
+                    if current in path[:-1]:
+                        break
+
+    def _find_lakes(self, min_size=3.0):
+        """Identify lakes (standing water bodies above sea level).
+        min_size: minimum water volume in TL to be considered a lake."""
+        lakes = []
+        visited = set()
+        
+        for i, vertex in enumerate(self.vertices):
+            if (vertex.elevation > self.sea_level and 
+                vertex.water >= min_size and 
+                i not in visited):
+                
+                # Flood fill to find connected lake cells
+                lake_cells = []
+                queue = [i]
+                while queue:
+                    current = queue.pop()
+                    if current not in visited:
+                        visited.add(current)
+                        lake_cells.append(current)
+                        
+                        # Add unvisited neighbors with sufficient water
+                        neighbors = self._find_vertex_neighbors(current)
+                        for neighbor in neighbors:
+                            if (self.vertices[neighbor].water >= min_size and
+                                neighbor not in visited):
+                                queue.append(neighbor)
+                
+                if len(lake_cells) >= 3:  # Minimum 3 cells to form a lake
+                    total_volume = sum(self.vertices[idx].water for idx in lake_cells)
+                    lakes.append({
+                        'cells': lake_cells,
+                        'volume': total_volume,
+                        'average_depth': total_volume / len(lake_cells)  # Simplified
+                    })
+        
+        return lakes
 
     def _get_midpoint_vertex(self, v1_idx, v2_idx, midpoint_cache, next_level_vertices, radius):
         """
@@ -769,45 +1312,23 @@ class World:
         return new_idx
 
     def _compute_face_centroid(self, v_indices, vertices, radius):
-        # centroid = Vertex(0, 0, 0)
-        # for idx in v_indices:
-        #     v = vertices[idx]
-        #     centroid.pos[0] += v.pos[0]
-        #     centroid.pos[1] += v.pos[1]
-        #     centroid.pos[2] += v.pos[2]
-        # n = len(v_indices)
-        # centroid.pos[0] /= n
-        # centroid.pos[1] /= n
-        # centroid.pos[2] /= n
-        # centroid.normalize(radius)
-        # return centroid
         face_vertex_positions = np.array([vertices[idx].pos for idx in v_indices], dtype=float)
         centroid_pos = np.mean(face_vertex_positions, axis=0)
         norm = np.linalg.norm(centroid_pos)
         normalized_centroid_pos = centroid_pos * (radius / norm)
         return Vertex(*normalized_centroid_pos)
     
-    def _find_vertex_neighbors(self, vertex_idx):
-        """Find all neighboring vertices (shared faces) for a given vertex."""
-        neighbors = set()
-        for face in self.faces:
-            if vertex_idx in face.v_indices:
-                for v_idx in face.v_indices:
-                    if v_idx != vertex_idx:
-                        neighbors.add(v_idx)
-        return list(neighbors)
-        
     def plot(self, fig=None, ax=None, cmap='terrain', edge_color=None, alpha=1):
-        """Plots the shape with interactive radio toggle for elevation/plate visualization."""
+        """Plots the shape with interactive radio toggle for elevation/plate/water visualization."""
         if fig is None or ax is None:
             fig = plt.figure(figsize=(10, 8))
             ax = fig.add_subplot(111, projection='3d')
         
         # Create radio button axes
         rax = plt.axes([0.05, 0.7, 0.15, 0.15])
-        radio = RadioButtons(rax, ('Elevation', 'Plates'))
+        radio = RadioButtons(rax, ('Elevation', 'Plates', 'Water'))
         
-        # Store data needed for both visualization modes
+        # Store data needed for visualization modes
         plot_data = {
             'fig': fig,
             'ax': ax,
@@ -817,7 +1338,8 @@ class World:
             'polygons': [],
             'face_elevations': [],
             'face_plates': [],
-            'cbar_ax': None  # Store the colorbar axis separately
+            'face_water': [],
+            'cbar_ax': None
         }
         
         # Precompute face data
@@ -828,9 +1350,12 @@ class World:
                 # Elevation data
                 elevs = face.get_vertices_elevation(self.vertices)
                 plot_data['face_elevations'].append(np.mean(elevs))
-                # Plate data (use most common plate in face)
+                # Plate data
                 plates = [self.vertices[i].plate_id for i in face.v_indices]
                 plot_data['face_plates'].append(max(set(plates), key=plates.count))
+                # Water data
+                water = face.get_vertices_water(self.vertices)
+                plot_data['face_water'].append(np.mean(water))
         
         # Initial plot (elevation)
         collection = self._create_collection(plot_data, mode='elevation')
@@ -882,11 +1407,18 @@ class World:
             )
             cmap = plt.get_cmap(plot_data['cmap'])
             face_colors = cmap(norm(plot_data['face_elevations']))
-        else:  # plates
+        elif mode == 'plates':
             unique_plates = list(set(plot_data['face_plates']))
-            plate_cmap = plt.get_cmap('tab20')  # Good for categorical data
+            plate_cmap = plt.get_cmap('tab20')
             norm = plt.Normalize(vmin=0, vmax=len(unique_plates))
-            face_colors = plate_cmap(norm([unique_plates.index(p) for p in plot_data['face_plates']]))
+            face_colors = plate_cmap(norm([unique_plates.index(p)] for p in plot_data['face_plates']))
+        else:
+            water_cmap = plt.get_cmap('Blues')
+            norm = plt.Normalize(
+                vmin=0,
+                vmax=max(plot_data['face_water'])
+            )
+            face_colors = water_cmap(norm(plot_data['face_water']))
         
         return Poly3DCollection(
             plot_data['polygons'],
@@ -897,7 +1429,6 @@ class World:
         )
     
     def _add_colorbar(self, plot_data, ax, mode='elevation'):
-        """Add appropriate colorbar based on visualization mode."""
         fig = plot_data['fig']
         cbar_ax = fig.add_axes([0.85, 0.15, 0.03, 0.7])
         if mode == 'elevation':
@@ -909,7 +1440,7 @@ class World:
             mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
             mappable.set_array(plot_data['face_elevations'])
             cbar = fig.colorbar(mappable, cax=cbar_ax, label='Elevation')
-        else:  # plates
+        elif mode == 'plates':
             unique_plates = sorted(list(set(plot_data['face_plates'])))
             plate_cmap = plt.get_cmap('tab20')
             norm = plt.Normalize(vmin=0, vmax=len(unique_plates)-1)
@@ -918,6 +1449,15 @@ class World:
             cbar = fig.colorbar(mappable, cax=cbar_ax, label='Plate ID')
             cbar.set_ticks(range(len(unique_plates)))
             cbar.set_ticklabels(unique_plates)
+        else:  # water
+            water_cmap = plt.get_cmap('Blues')
+            norm = plt.Normalize(
+                vmin=0,
+                vmax=max(plot_data['face_water'])
+            )
+            mappable = plt.cm.ScalarMappable(norm=norm, cmap=water_cmap)
+            mappable.set_array(plot_data['face_water'])
+            cbar = fig.colorbar(mappable, cax=cbar_ax, label='Water (Teraliters)')
         
         return cbar
 
@@ -959,6 +1499,7 @@ class Icosahedron(World):
             self.add_face(Face(f))
 
     def subdivide(self, radius=1.0, level = 3):
+        self.subdivisions = level
         for li in range(level):
             print(f"Subdividing Icosahedron with {len(self.faces)} faces...")
             midpoint_cache = {}
@@ -1113,6 +1654,7 @@ class TruncatedIcosahedron(World):
             self.add_face(Face(int_indices))
 
     def subdivide(self, radius=1.0, level=3):
+        self.subdivisions = level
         for li in range(level):
             midpoint_cache = {}
             new_faces = []
@@ -1200,6 +1742,7 @@ class truncatedTetrahedron(World):
 
 
     def subdivide(self, radius=1.0, level=3):
+        self.subdivisions = level
         for li in range(level):
             midpoint_cache = {}
             new_faces = []
@@ -1460,6 +2003,7 @@ class TruncatedIcosidodecahedron(World):
             self.add_face(Face(int_indices))
     
     def subdivide(self, radius=1.0, level=3):
+        self.subdivisions = level
         for li in range(level):
             midpoint_cache = {}
             new_faces = []
@@ -1546,6 +2090,7 @@ class Cube(World):
             self.add_face(Face(f))
 
     def subdivide(self, radius=1.0, level=3):
+        self.subdivisions = level
         """Subdivides faces into quadrilaterals using a Catmull-Clark like approach."""
         
         # Initial normalization check (if create_world didn't normalize)
@@ -1623,7 +2168,7 @@ class Cube(World):
 # --- Main Execution ---
 if __name__ == "__main__":
     shape_type = "cube" # Choose "icosahedron" or "truncated"
-    num_subdivisions = 5     # Adjust level of detail
+    num_subdivisions = 7     # Adjust level of detail
     sphere_radius = 1.0
     plates = 15
     elevationmin = -15000
