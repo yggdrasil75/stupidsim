@@ -1,6 +1,7 @@
 import ctypes
 import queue
 import random
+import copy
 #import threading
 import time
 #from matplotlib.colorbar import Colorbar
@@ -24,7 +25,6 @@ PLATE_TYPE_CONTINENTAL = 1
 # --- Data Holder Classes (Vertex, Face - unchanged) ---
 
 class Vertex:
-    """Represents a 3D vertex."""
     def __init__(self, x, y, z):
         self.pos = np.array([x, y, z], dtype=float)
         self.elevation = 0.0
@@ -34,166 +34,222 @@ class Vertex:
         self.river_size = 0.0
 
     def normalize(self, radius=1.0):
-        """Normalizes the vertex position to be on a sphere of given radius."""
         norm = np.linalg.norm(self.pos)
-        if norm > 1e-9: # Avoid division by zero
+        if norm > 1e-9:
             self.pos = (self.pos / norm) * radius
 
     def __repr__(self):
         return f"Vertex({self.pos[0]:.3f}, {self.pos[1]:.3f}, {self.pos[2]:.3f})"
+    
+    #def get_nearest_neighbor():
+
 
 class Face:
-    """Represents a face defined by vertex indices."""
     def __init__(self, v_indices):
         if len(v_indices) < 3:
             raise ValueError("Face must have at least 3 vertices")
-        self.v_indices = list(v_indices) # Store indices referencing the World's vertex list
+        self.v_indices = list(v_indices)
 
-    def get_vertices_pos(self, vertex_list):
-        """Returns the 3D coordinates of the vertices forming this face."""
+    def get_vertices_pos(self, vertex_list) -> list:
         return [vertex_list[i].pos for i in self.v_indices]
 
-    def get_vertices_elevation(self, vertex_list):
-        """Returns the elevation values of the vertices forming this face."""
+    def get_vertices_elevation(self, vertex_list) -> list:
         return [vertex_list[i].elevation for i in self.v_indices]
 
-    def get_vertices_water(self, vertex_list):
-        """Returns the water values of the vertices forming this face."""
+    def get_vertices_water(self, vertex_list) -> list:
         return [vertex_list[i].water for i in self.v_indices]
     
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Face({self.v_indices})"
 
 class Plate:
-    """Represents a tectonic plate with velocity and associated vertices."""
     def __init__(self, plate_id):
         self.plate_id = plate_id
-        self.velocity = np.random.uniform(-1, 1, 3)  # Angular velocity vector
-        self.vertices = set()  # Indices of vertices belonging to this plate
+        self.velocity = np.random.uniform(low=-1, high=1, size=3)
+        self.vertices = set()
         self.type = random.choice([PLATE_TYPE_OCEANIC, PLATE_TYPE_CONTINENTAL])
         self.base_elevation = (OCEANIC_CRUST_THICKNESS if self.type == PLATE_TYPE_OCEANIC 
                               else CONTINENTAL_CRUST_THICKNESS)
         
-    def add_vertex(self, vertex_idx):
-        """Add a vertex to this plate."""
+    def resetVertices(self):
+        self.vertices.clear()
+
+    def add_vertex(self, vertex_idx, vertices):
+        vertices[vertex_idx].plate_id = self.plate_id
         self.vertices.add(vertex_idx)
         
-    def get_boundary_vertices(self, world):
-        """Return vertices on the boundary of this plate."""
+    def get_boundary_vertices(self, world) -> list:
         boundary = []
         for v_idx in self.vertices:
             neighbors = world._find_vertex_neighbors(v_idx)
             neighbor_plates = {world.vertices[n].plate_id for n in neighbors}
-            if len(neighbor_plates) > 1:  # Boundary vertex
+            if len(neighbor_plates) > 1: 
                 boundary.append(v_idx)
         return boundary
 
 # --- Multiprocessing functions ---
 
 def plate_grow_worker_process(plate_id, work_queue_indices, plate_id_array, unassigned_indices_queue, assignment_lock, vertices_neighbors_getter):
-    """
-    Worker function designed for multiprocessing.
-    Reads shared plate_id_array, attempts assignments, puts successes
-    into a result queue.
-    """
-    assigned_in_this_run = [] # Track (vertex_idx, plate_id)
+    assigned_in_this_run = [] 
 
-    # In a real scenario, efficiently getting neighbors for many vertices might
-    # require passing more precomputed data or using a shared structure if feasible.
-    # Here, using a passed-in getter function/object.
     find_neighbors = vertices_neighbors_getter
 
-    # Process items from the input queue for this iteration
-    local_queue = deque(work_queue_indices) # Process local copy
+    local_queue = deque(work_queue_indices)
 
     while True:
         try:
             current_assigned_idx = local_queue.popleft()
         except IndexError:
-            break # Local queue for this iteration empty
-
-        # --- Perform neighbor finding and weighted selection ---
-        # (Simplified - Adapt your detailed logic here)
-        # Read plate IDs from shared array (no lock needed for read usually)
-        # Needs access to neighbor info (passed via vertices_neighbors_getter)
+            break 
 
         neighbors = find_neighbors(current_assigned_idx)
         potential_unassigned_neighbors = []
 
-        # Check shared array for unassigned status
-        plate_ids_vals = plate_id_array.get_obj() # Get access to array values
+        plate_ids_vals = plate_id_array.get_obj() 
         for n_idx in neighbors:
-             # LOCKLESS READ - might be slightly stale but checked authoritatively later
              if plate_ids_vals[n_idx] == -1:
                  potential_unassigned_neighbors.append(n_idx)
 
         if not potential_unassigned_neighbors:
             continue
 
-        # --- Weighted selection (simplified example) ---
         if potential_unassigned_neighbors:
-            # Replace with your actual weighted logic
             selected_neighbor_idx = random.choice(potential_unassigned_neighbors)
         else:
             continue
 
-        # --- Critical Section: Attempt Assignment ---
         if selected_neighbor_idx != -1:
             with assignment_lock:
-                # *** Authoritative Check & Assignment ***
-                # Re-check using locked access to the shared array
                 current_plate_id_val = plate_id_array[selected_neighbor_idx]
                 if current_plate_id_val == -1:
                     plate_id_array[selected_neighbor_idx] = plate_id
-                    # Signal success by putting index onto result queue
-                    # We don't directly modify the global 'unassigned' set here
                     assigned_in_this_run.append(selected_neighbor_idx)
 
-    # Put all successful assignments from this worker onto the shared result queue
     if assigned_in_this_run:
         unassigned_indices_queue.put((plate_id, assigned_in_this_run))
-
-def get_neighbors_func(idx, precomputed_neighbors):
-    # Example: if neighbors are precomputed in a dict/list
-    return precomputed_neighbors[idx]
-
 
 # --- World Hierarchy ---
 
 class World:
-    """Base class for holding 3D shape data."""
     def __init__(self):
-        self.vertices = [] # List of Vertex objects
-        self.faces = []    # List of Face objects
-        self.plates = {}
+        self.vertices = []
+        self.faces = []
+        self.plates: dict[int, Plate] = {}
         self._neighbor_map_initialized = False
         self.sea_level = 0.0
 
     def add_vertex(self, vertex):
-        """Adds a vertex and returns its index."""
         self.vertices.append(vertex)
         return len(self.vertices) - 1
 
     def add_face(self, face):
-        """Adds a face."""
         self.faces.append(face)
 
-    def create_world(self, radius=1.0):
-        """Abstract method to populate vertices and faces."""
-        raise NotImplementedError("Subclasses must implement create_world()")
+    def create_world(self, radius=1.0, plates = 15, min_height = -15000, max_height = 15000):
+        self.platecount = plates
+        self.elevationMin = min_height
+        self.elevationMax = max_height
+        self._create_world(radius=1.0)
 
-    def subdivide(self, radius=1.0):
-        """Abstract method to subdivide the faces."""
-        raise NotImplementedError("Subclasses must implement subdivide()")
+    def _create_world(self, radius = 1.0):
+        raise NotImplementedError("Subclasses must implement _create_world()")
 
-    def _initialize_neighbor_map(self):
-        """Initialize the neighbor map with weights based on vertex distances."""
+    def subdivide(self, radius=1.0, levels=3):
+        self.subdivisions = levels
+        for level in range(levels):
+            print(f"Starting Subdivision level {level+1}...")
+            if np.floor(levels / 2) == level:
+                self._create_plates()
+                self._assign_tectonic_plates()
+            self._subdivide()
+            print(f"Subdivision level {level+1} complete. Vertices: {len(self.vertices)}, Faces: {len(self.faces)}")
+            self._neighbor_map_initialized = False
+            self._fix_non_contiguous_vertices()
+        self.fixPlates()
+
+    def fixPlates(self):
+        self._neighbor_map_initialized = False
+        for plate in self.plates.values():
+            plate.resetVertices()
+        
+        # First pass: assign plate IDs from immediate neighbors
+        changed = True
+        while changed:  # Keep iterating until no more changes occur
+            changed = False
+            for vidx, vertex in enumerate(self.vertices):
+                if vertex.plate_id == -1:
+                    for vidx2 in self._find_vertex_neighbors(vidx):
+                        neighbor_pid = self.vertices[vidx2].plate_id
+                        if neighbor_pid != -1:
+                            vertex.plate_id = neighbor_pid
+                            changed = True
+                            print(f'Assigned plate {neighbor_pid} to vertex {vidx} from neighbor {vidx2}')
+                            break  # Assign from first valid neighbor found
+        
+        # Second pass: handle remaining unassigned vertices by expanding search radius
+        remaining_unassigned = [vidx for vidx, v in enumerate(self.vertices) if v.plate_id == -1]
+        search_radius = 2  # Start by looking 2 steps away
+        
+        while remaining_unassigned and search_radius < 5:  # Limit how far we search
+            new_unassigned = []
+            for vidx in remaining_unassigned:
+                # Find all vertices within search_radius steps
+                nearby = self._find_vertices_within_radius(vidx, search_radius)
+                for n_vidx in nearby:
+                    if self.vertices[n_vidx].plate_id != -1:
+                        self.vertices[vidx].plate_id = self.vertices[n_vidx].plate_id
+                        print(f'Assigned plate {self.vertices[n_vidx].plate_id} to vertex {vidx} from vertex {n_vidx} (radius {search_radius})')
+                        break
+                else:
+                    new_unassigned.append(vidx)
+            
+            remaining_unassigned = new_unassigned
+            search_radius += 1
+        
+        # Final assignment for any remaining vertices (assign to largest plate or create new plate)
+        if remaining_unassigned:
+            print(f'Warning: {len(remaining_unassigned)} vertices still unassigned after expansion')
+            # Option 1: Assign to largest existing plate
+            largest_plate = max(self.plates.values(), key=lambda p: len(p.vertices))
+            for vidx in remaining_unassigned:
+                self.vertices[vidx].plate_id = largest_plate.plate_id
+                print(f'Assigned remaining vertex {vidx} to largest plate {largest_plate.plate_id}')
+            
+            # Option 2: Alternatively, could create a new plate for these
+        
+        # Update plate vertex assignments
+        for vidx, vertex in enumerate(self.vertices):
+            self.plates[vertex.plate_id].add_vertex(vidx, self.vertices)
+        
+        self._fix_non_contiguous_vertices()
+
+    # def fixPlates(self):
+    #     self._neighbor_map_initialized = False
+    #     for plate in self.plates.values():
+    #         plate.resetVertices()
+    #     for vidx, vertex in enumerate(self.vertices):
+    #         pid = vertex.plate_id
+    #         if pid == -1:
+    #             for vidx2 in self._find_vertex_neighbors(vidx):
+    #                 if self.vertices[vidx2].plate_id != -1:
+    #                     vertex.plate_id = self.vertices[vidx2].plate_id
+    #                     print(f'had to update pid to: {self.vertices[vidx2].plate_id}')
+
+    #         else:
+    #             print(pid)
+    #         self.plates[vertex.plate_id].add_vertex(vidx, self.vertices)
+    #     self._fix_non_contiguous_vertices()
+
+
+    def _subdivide(self):
+        raise NotImplementedError("Subclasses must implement _subdivide()")
+
+    def _initialize_neighbor_map(self) -> None:
         if self._neighbor_map_initialized:
             return
             
         print("Initializing neighbor map...")
         
-        # First pass: find all direct neighbors through shared faces
         neighbor_sets = [set() for _ in range(len(self.vertices))]
         for face in self.faces:
             for i in range(len(face.v_indices)):
@@ -203,61 +259,47 @@ class World:
                     neighbor_sets[v1].add(v2)
                     neighbor_sets[v2].add(v1)
         
-        # Second pass: calculate weights based on distances
         for v_idx, neighbors in enumerate(neighbor_sets):
             for neighbor_idx in neighbors:
-                # Calculate distance between vertices
                 dist = np.linalg.norm(self.vertices[v_idx].pos - self.vertices[neighbor_idx].pos)
-                # Weight is inverse of distance (closer neighbors have higher weight)
-                weight = 1.0 / (dist + 1e-9)  # Small epsilon to avoid division by zero
+                try:
+                    weight = 1.0 / dist
+                except ZeroDivisionError:
+                    weight = 1.0 / (dist + 1e9)
                 self.vertices[v_idx].neighbors[neighbor_idx] = weight
         
         self._neighbor_map_initialized = True
         print("Neighbor map initialized")
 
     def _find_vertex_neighbors(self, vertex_idx):
-        """Get neighbors with weights for a vertex."""
         if not self._neighbor_map_initialized:
             self._initialize_neighbor_map()
         return self.vertices[vertex_idx].neighbors
 
+    #### plates and elevation
+
     def genElevations(self, num_plates=7, min_height=0.0, max_height=1.0):
-        """Generate elevation values with plate tectonics and continental/oceanic plates."""
         if not self.vertices:
             return
             
-        # Reset all elevations to zero first
         for vertex in self.vertices:
             vertex.elevation = 0.0
             vertex.plate_id = -1
             
-        self._create_plates(num_plates)
-        self._assign_base_elevations()  # Set base elevations based on plate type
+        #self._create_plates(num_plates)
+        #self._assign_tectonic_plates(num_plates)
+        self._assign_base_elevations()
         self.minheight = min_height
         self.maxheight = max_height
         self._calculate_boundary_elevations(min_height, max_height)
         self._smooth_elevations(iterations=3)
         self._add_variations()
-        self._simulate_water() 
-
-    #### plates and elevation
-
-    def _assign_base_elevations(self):
-        """Assign base elevations based on plate type."""
-        for plate in self.plates.values():
-            for v_idx in plate.vertices:
-                # Add some random variation to the base elevation
-                variation = np.random.uniform(-0.1, 0.1)
-                self.vertices[v_idx].elevation = plate.base_elevation + variation
     
-    def _create_plates(self, num_plates):
-        """Create plates and assign vertices to them."""
+    def _create_plates(self):
         self.plates = {}
         
         plate_types = []
-        # Create plate objects
-        for _ in range(num_plates):
-            # Bias towards alternating types
+        for _ in range(self.platecount):
             if len(plate_types) > 0 and plate_types[-1] == PLATE_TYPE_CONTINENTAL:
                 next_type = PLATE_TYPE_OCEANIC
             elif len(plate_types) > 0 and plate_types[-1] == PLATE_TYPE_OCEANIC:
@@ -266,59 +308,34 @@ class World:
                 next_type = random.choice([PLATE_TYPE_CONTINENTAL, PLATE_TYPE_OCEANIC])
             plate_types.append(next_type)
             
-        for i in range(num_plates // 3):  # Adjust fraction to control randomness
-            if random.random() < 0.5:  # 50% chance to swap a plate's type
-                plate_types[i] = 1 - plate_types[i]  # Flips the type
+        for i in range(self.platecount // 3):
+            if random.random() < 0.5:
+                plate_types[i] = 1 - plate_types[i]
 
-        # Create plates with assigned types
-        for plate_id in range(num_plates):
+        for plate_id in range(self.platecount):
             self.plates[plate_id] = Plate(plate_id)
             self.plates[plate_id].type = plate_types[plate_id]
             
-        # Assign vertices to plates
-        self._assign_tectonic_plates(num_plates)
-
-    def _get_neighbors_for_worker(self, idx):
-        # Assuming self.vertices or some neighbor structure exists
-        return self._find_vertex_neighbors(idx)
-    
     def _plate_grow_worker(self, plate_id, plate_queue, vertices, unassigned, plates, assignment_lock):
-        """
-        Worker function for a single plate's growth *in one iteration*.
-        Processes its assigned queue until empty.
-        """
         my_plate = plates[plate_id]
-        # num_vertices_total = len(vertices) # Not used currently
 
         while True:
             current_assigned_idx = -1
             try:
-                # Get an *assigned* vertex from this plate's expansion frontier
                 current_assigned_idx = plate_queue.popleft()
-            except IndexError:
-                # Queue for this iteration is empty for this plate
-                break # Exit the loop for this thread for this iteration
+            except IndexError: break
 
-            # Find neighbors (read-only operation)
             neighbors = self._find_vertex_neighbors(current_assigned_idx)
 
-            # --- Find potentially unassigned neighbors ---
-            # Fast check outside lock (might be slightly stale)
             potential_unassigned_neighbors_indices = []
-            # Read unassigned (potentially needs lock if not thread-safe read)
-            # Assuming standard Python set reads are generally safe enough here
             for n_idx in neighbors:
-                # Check vertex plate_id first (atomic read, less likely to be stale than set)
                 if vertices[n_idx].plate_id == -1:
-                     # Optional: Double check against the shared 'unassigned' set
-                     # if n_idx in unassigned: # This read might need the lock
-                     potential_unassigned_neighbors_indices.append(n_idx)
+                    potential_unassigned_neighbors_indices.append(n_idx)
 
             if not potential_unassigned_neighbors_indices:
-                continue # No potential neighbors found from this vertex
+                continue 
 
             # --- Weighted random selection ---
-            # Filter further and calculate weights
             valid_neighbors_for_assignment = []
             weights = []
             for n_idx in potential_unassigned_neighbors_indices:
@@ -328,17 +345,12 @@ class World:
                     if pid in self.plates and self.plates[pid].type != self.plates[plate_id].type:
                         opposite_type_count += 1
 
-                # The critical check happens later under lock, but we calculate
-                # weights based on the state we see *now*.
                 n_neighbors = self._find_vertex_neighbors(n_idx)
 
-                # Weight: count neighbors already in *this* plate + bias
                 count = sum(1 for nn_idx in n_neighbors
                             if nn_idx != current_assigned_idx and vertices[nn_idx].plate_id == plate_id)
 
-                # Add base weight (e.g., 1) + count + small random factor (optional)
-                # Ensure non-zero weight to allow assignment even with count=0
-                weight = (opposite_type_count + 1) * count + 1.0 + random.uniform(0, 0.5) # Example weighting
+                weight = (opposite_type_count + 1) * count + 1.0 + random.uniform(0, 0.5)
                 weights.append(weight)
                 valid_neighbors_for_assignment.append(n_idx)
 
@@ -350,93 +362,65 @@ class World:
             weights = np.array(weights, dtype=float)
             total_weight = weights.sum()
 
-            if total_weight > 1e-9 and len(valid_neighbors_for_assignment) > 0: # Check > 0 and length
+            if total_weight > 1e-9 and len(valid_neighbors_for_assignment) > 0:
                 try:
-                    weights /= total_weight # Normalize
+                    weights /= total_weight 
                     selected_neighbor_idx = np.random.choice(valid_neighbors_for_assignment, p=weights)
                 except ValueError as e:
-                    # print(f"Plate {plate_id}: Weight error {e}. Weights={weights}, Sum={total_weight}. Falling back to random.")
-                    # Fallback to uniform random choice among valid neighbors
                     selected_neighbor_idx = random.choice(valid_neighbors_for_assignment)
             elif valid_neighbors_for_assignment:
-                 # Fallback if weights sum to zero (or close) but neighbors exist
-                 selected_neighbor_idx = random.choice(valid_neighbors_for_assignment)
+                    selected_neighbor_idx = random.choice(valid_neighbors_for_assignment)
             else:
-                 # Should not happen based on earlier checks, but safety first
-                 continue
+                    continue
 
 
             if selected_neighbor_idx == -1:
-                 continue # No neighbor selected
+                continue 
 
-            # --- Critical Section: Attempt Assignment ---
-            # assigned_successfully = False # Not needed with new logic
             with assignment_lock:
-                # *** Authoritative Check ***
-                # Is the selected neighbor STILL unassigned? Check the definitive source.
                 if selected_neighbor_idx in unassigned:
-                    # Assign the selected neighbor
                     vertices[selected_neighbor_idx].plate_id = plate_id
-                    my_plate.add_vertex(selected_neighbor_idx) # Assumes Plate.add_vertex is thread-safe or trivial
+                    my_plate.add_vertex(selected_neighbor_idx)
                     unassigned.remove(selected_neighbor_idx)
 
-                    # NOTE: We DO NOT add the newly assigned vertex back to the queue *within the worker*.
-                    # The queue for this worker is only for processing the initial frontier
-                    # assigned to it *for this iteration*. The main loop will repopulate
-                    # queues for the *next* iteration based on the new global state.
-                    # assigned_successfully = True # Not needed
-                    # print(f"Plate {plate_id} assigned {selected_neighbor_idx}. Remaining: {len(unassigned)}")
-
-            # No need to put current_assigned_idx back in the queue if assignment failed.
-            # Just move on to the next item in this worker's queue for this iteration.
-            # The iterative approach handles conflicts implicitly in the next round.
-
-    def _assign_tectonic_plates(self, num_plates, parallel_threshold_percent=10.0, max_iterations=100):
+    def _assign_tectonic_plates(self, parallel_threshold_percent=10.0, max_iterations=100):
         num_vertices = len(self.vertices)
-        print("Initializing plate assignment (Multiprocessing)...")
+        print("Initializing plate assignment...")
 
         # --- Initialize Shared State ---
         plate_id_array = multiprocessing.Array(ctypes.c_int, num_vertices)
         for i in range(num_vertices):
-            plate_id_array[i] = -1  # Initialize all as unassigned
+            plate_id_array[i] = -1 
 
-        # Master 'unassigned' set (managed only by main process)
         unassigned = set(range(num_vertices))
-
-        # Lock for synchronizing writes to plate_id_array
         assignment_lock = multiprocessing.Lock()
-
-        # Queue for workers to report successful assignments back to main process
         manager = multiprocessing.Manager()
         results_queue = manager.Queue()
-
-        # Plates dictionary (managed only by main process)
-        self.plates = {plate_id: Plate(plate_id) for plate_id in range(num_plates)}
+        self.plates = {plate_id: Plate(plate_id) for plate_id in range(self.platecount)}
 
         # --- Assign Starting Points ---
-        plate_starts = np.random.choice(list(unassigned), size=num_plates, replace=False)
+        plate_starts = np.random.choice(list(unassigned), size=self.platecount, replace=False)
         with assignment_lock:
             for plate_id, start_idx in enumerate(plate_starts):
                 if start_idx in unassigned:
                     plate_id_array[start_idx] = plate_id
-                    self.plates[plate_id].add_vertex(start_idx)
+                    self.plates[plate_id].add_vertex(start_idx, self.vertices)
                     unassigned.remove(start_idx)
 
-        print(f"Assigned {num_plates} starting points. Remaining unassigned: {len(unassigned)}")
+        print(f"Assigned {self.platecount} starting points. Remaining unassigned: {len(unassigned)}")
 
         # --- Iterative Multi-Processing Growth ---
         iteration = 0
         parallel_threshold_count = int(num_vertices * (parallel_threshold_percent / 100.0))
 
-        neighbor_getter = self._get_neighbors_for_worker
+        neighbor_getter = self._find_vertex_neighbors
 
         while len(unassigned) > parallel_threshold_count and iteration < max_iterations:
             iteration += 1
             unassigned_count_start_iter = len(unassigned)
-            #print(f"\n--- Iteration {iteration} --- Starting | Unassigned: {unassigned_count_start_iter}/{num_vertices}")
 
             # 1. Identify Frontier
-            plate_frontiers = {plate_id: [] for plate_id in range(num_plates)}
+            plate_frontiers = {plate_id: [] for plate_id in range(self.platecount)}
             current_unassigned_list = list(unassigned)
 
             plate_ids_vals = plate_id_array.get_obj()
@@ -461,8 +445,6 @@ class World:
                     work_items[plate_id] = unique_indices
                     active_plate_count += 1
                     total_frontier_size += len(unique_indices)
-
-            #print(f"Iteration {iteration}: Found {total_frontier_size} frontier points across {active_plate_count} active plates.")
 
             if active_plate_count == 0:
                 #print(f"Iteration {iteration}: No active plates found. Stopping parallel phase.")
@@ -498,7 +480,7 @@ class World:
                     for v_idx in assigned_indices:
                         if v_idx in unassigned:
                             unassigned.remove(v_idx)
-                            self.plates[res_plate_id].add_vertex(v_idx)
+                            self.plates[res_plate_id].add_vertex(v_idx, self.vertices)
                             newly_assigned_count += 1
                     assigned_in_iter += newly_assigned_count
                 except queue.Empty:
@@ -564,13 +546,13 @@ class World:
                         # Assign to the most common neighboring plate
                         new_plate_id = max(set(neighbor_plates), key=neighbor_plates.count)
                         self.vertices[v_idx].plate_id = new_plate_id
-                        self.plates[new_plate_id].add_vertex(v_idx)
+                        self.plates[new_plate_id].add_vertex(v_idx, self.vertices)
                         plate.vertices.remove(v_idx)
                     else:
                         # No neighboring plates found, assign randomly
                         new_plate_id = random.choice(list(self.plates.keys()))
                         self.vertices[v_idx].plate_id = new_plate_id
-                        self.plates[new_plate_id].add_vertex(v_idx)
+                        self.plates[new_plate_id].add_vertex(v_idx, self.vertices)
                         plate.vertices.remove(v_idx)
 
     def _find_largest_contiguous_region(self, plate_id):
@@ -674,7 +656,7 @@ class World:
                  if found_plate != -1:
                       self.vertices[v_idx].plate_id = found_plate
                       if found_plate in self.plates:
-                           self.plates[found_plate].add_vertex(v_idx)
+                           self.plates[found_plate].add_vertex(v_idx, self.vertices)
                       else:
                            print(f"Warning: Found plate {found_plate} for orphan {v_idx} but plate not in self.plates dict!")
                       assigned_count_in_fallback += 1
@@ -715,7 +697,7 @@ class World:
                       if self.vertices[v_idx].plate_id == -1:
                            chosen_plate_id = random.choice(available_plate_ids)
                            self.vertices[v_idx].plate_id = chosen_plate_id
-                           self.plates[chosen_plate_id].add_vertex(v_idx)
+                           self.plates[chosen_plate_id].add_vertex(v_idx, self.vertices)
                            assigned_count_in_fallback += 1
                            assigned_randomly += 1
                   print(f"Force assigned {assigned_randomly} vertices randomly.")
@@ -723,6 +705,12 @@ class World:
 
         print(f"Fallback phase finished. Total vertices assigned in fallback: {assigned_count_in_fallback}")
 
+    def _assign_base_elevations(self):
+        for plate in self.plates.values():
+            for v_idx in plate.vertices:
+                variation = np.random.uniform(-0.2, 0.2)
+                self.vertices[v_idx].elevation = plate.base_elevation + variation
+        
     def _calculate_boundary_elevations(self, min_height, max_height):
         """Calculate elevations based on plate interactions at boundaries."""
         boundary_vertices = []
@@ -1112,7 +1100,7 @@ class World:
 
     #### fluids
 
-    def _simulate_water(self, iterations=5):
+    def simulate_water(self, iterations=5):
         """Simulate water distribution based on elevation.
         Water is measured in teraliters (TL) for easier tracking of lakes and rivers."""
         print("Simulating water distribution...")
@@ -1410,8 +1398,9 @@ class World:
         elif mode == 'plates':
             unique_plates = list(set(plot_data['face_plates']))
             plate_cmap = plt.get_cmap('tab20')
-            norm = plt.Normalize(vmin=0, vmax=len(unique_plates))
-            face_colors = plate_cmap(norm([unique_plates.index(p)] for p in plot_data['face_plates']))
+            norm = plt.Normalize(vmin=min(unique_plates), vmax=len(unique_plates))
+            #face_colors = plate_cmap(norm([unique_plates.index(p) for p in plot_data['face_plates']]))
+            face_colors = plate_cmap(norm(plot_data['face_plates']))
         else:
             water_cmap = plt.get_cmap('Blues')
             norm = plt.Normalize(
@@ -1443,9 +1432,10 @@ class World:
         elif mode == 'plates':
             unique_plates = sorted(list(set(plot_data['face_plates'])))
             plate_cmap = plt.get_cmap('tab20')
-            norm = plt.Normalize(vmin=0, vmax=len(unique_plates)-1)
+            norm = plt.Normalize(vmin=0, vmax=len(unique_plates))
             mappable = plt.cm.ScalarMappable(norm=norm, cmap=plate_cmap)
-            mappable.set_array([unique_plates.index(p) for p in plot_data['face_plates']])
+            #mappable.set_array([unique_plates.index(p) for p in plot_data['face_plates']])
+            mappable.set_array(plot_data['face_plates'])
             cbar = fig.colorbar(mappable, cax=cbar_ax, label='Plate ID')
             cbar.set_ticks(range(len(unique_plates)))
             cbar.set_ticklabels(unique_plates)
@@ -1466,7 +1456,7 @@ class Icosahedron(World):
     def __init__(self):
         super().__init__()
 
-    def create_world(self, radius=1.0):
+    def _create_world(self, radius=1.0):
         """Creates the vertices and faces for a unit icosahedron."""
         self.vertices = []
         self.faces = []
@@ -1535,7 +1525,7 @@ class TruncatedIcosahedron(World):
     def __init__(self):
         super().__init__()
 
-    def create_world(self, radius=1.0):
+    def _create_world(self, radius=1.0):
         """Creates the vertices and faces for a unit truncated icosahedron."""
 
         C0 = (1 + np.sqrt(5)) / 4
@@ -1700,7 +1690,7 @@ class truncatedTetrahedron(World):
     def __init__(self):
         super().__init__()
 
-    def create_world(self, radius=1):
+    def _create_world(self, radius=1):
         c0 = np.sqrt(2)/4
         c1 = 3 * np.sqrt(2) / 4
 
@@ -1792,7 +1782,7 @@ class TruncatedIcosidodecahedron(World):
     def __init__(self):
         super().__init__()
 
-    def create_world(self, radius=1):
+    def _create_world(self, radius=1):
         C0 = (3 + np.sqrt(5)) / 4
         C1 = (1 + np.sqrt(5)) / 2
         C2 = (5 + np.sqrt(5)) / 4
@@ -2054,7 +2044,7 @@ class Cube(World):
     def __init__(self):
         super().__init__()
 
-    def create_world(self, radius=1.0):
+    def _create_world(self, radius=1.0):
         """Creates the vertices and faces for a unit cube."""
         self.vertices = []
         self.faces = []
@@ -2089,91 +2079,136 @@ class Cube(World):
         for f in f_indices:
             self.add_face(Face(f))
 
-    def subdivide(self, radius=1.0, level=3):
-        self.subdivisions = level
-        """Subdivides faces into quadrilaterals using a Catmull-Clark like approach."""
+    def _subdivide(self, radius=1.0, level=3):
+        midpoint_cache = {}
+        new_faces = []
+        #current_level_vertices = list(self.vertices)
+        current_level_vertices = [copy.deepcopy(v) for v in self.vertices]
         
-        # Initial normalization check (if create_world didn't normalize)
-        # for v in self.vertices:
-        #     v.normalize(radius)
+        next_vertices = list(current_level_vertices) 
+
+        processed_faces = 0
+        for face in self.faces:
+            v_indices = face.v_indices
+            n = len(v_indices)
+
+            if n != 4:
+                print(f"Warning: Skipping non-quad face: {face}")
+                new_faces.append(face)
+                continue
+                
+            face_center_pos = np.zeros(3, dtype=float)
+            face_plates = []
+            for v_idx in v_indices:
+                face_center_pos += current_level_vertices[v_idx].pos
+                if current_level_vertices[v_idx].plate_id != -1:
+                    face_plates.append(current_level_vertices[v_idx].plate_id)
+            face_center_pos /= n
             
-        for li in range(level):
-            print(f"Starting Subdivision level {li+1}...")
-            midpoint_cache = {} # Cache edge midpoints for this level
-            new_faces = []
-            # Important: Make a *copy* of the vertex list at the start of the level
-            # because we will be appending new vertices to it during processing.
-            current_level_vertices = list(self.vertices)
+            center_v = Vertex(*face_center_pos)
+            try:
+                center_v.plate_id = random.choice(face_plates)
+            except:
+                center_v.plate_id = -1
+            center_v.normalize(radius)
             
-            # We will build the next vertex list incrementally
-            next_vertices = list(current_level_vertices) 
+            center_idx = len(next_vertices)
+            next_vertices.append(center_v)
 
-            processed_faces = 0
-            for face in self.faces:
-                v_indices = face.v_indices
-                n = len(v_indices)
-
-                # We only handle quads in this specific subdivision logic
-                # If you start with triangles or other shapes, you'd need different rules
-                if n != 4:
-                    # Keep non-quad faces as they are (or implement different subdivision)
-                    print(f"Warning: Skipping non-quad face: {face}")
-                    new_faces.append(face)
-                    continue
-                    
-                # --- 1. Calculate Face Point ---
-                face_center_pos = np.zeros(3, dtype=float)
-                for v_idx in v_indices:
-                    face_center_pos += current_level_vertices[v_idx].pos
-                face_center_pos /= n
+            mid_indices = []
+            for i in range(n):
+                v1_idx = v_indices[i]
+                v2_idx = v_indices[(i + 1) % n] 
+                mid_idx = self._get_midpoint_vertex(v1_idx, v2_idx, midpoint_cache, next_vertices, radius)
+                mid_indices.append(mid_idx)
+            
+            for i in range(n):
+                v_orig_idx = v_indices[i]
+                mid_curr_idx = mid_indices[i]
+                mid_prev_idx = mid_indices[i - 1]
                 
-                center_v = Vertex(*face_center_pos)
-                center_v.normalize(radius)
+                new_quad = Face((v_orig_idx, mid_curr_idx, center_idx, mid_prev_idx))
+                new_faces.append(new_quad)
+
+            processed_faces += 1
+
+        self.vertices = next_vertices
+        self.faces = new_faces
+
+    def _subdivide_selected(self, faces_to_subdivide, radius=1.0, level=3):
+        midpoint_cache = {}
+        new_faces = []
+        current_level_vertices = [copy.deepcopy(v) for v in self.vertices]
+        next_vertices = list(current_level_vertices) 
+        
+        # Convert single face to list if needed
+        if not isinstance(faces_to_subdivide, list):
+            faces_to_subdivide = [faces_to_subdivide]
+        
+        # Create a set for faster lookups of faces to subdivide
+        faces_to_subdivide_set = set(faces_to_subdivide)
+        
+        processed_faces = 0
+        for face in self.faces:
+            # Skip faces not in our subdivision list
+            if face not in faces_to_subdivide_set:
+                new_faces.append(face)
+                continue
                 
-                # Add face point vertex to the list for the *next* level
-                center_idx = len(next_vertices)
-                next_vertices.append(center_v)
+            v_indices = face.v_indices
+            n = len(v_indices)
 
-                # --- 2. Calculate Edge Midpoints ---
-                mid_indices = []
-                for i in range(n):
-                    v1_idx = v_indices[i]
-                    v2_idx = v_indices[(i + 1) % n] # Handle wrap-around
-                    # Use the _get_midpoint_vertex helper which uses the cache
-                    # Pass next_vertices so new midpoints are added correctly
-                    mid_idx = self._get_midpoint_vertex(v1_idx, v2_idx, midpoint_cache, next_vertices, radius)
-                    mid_indices.append(mid_idx)
+            if n != 4:
+                print(f"Warning: Skipping non-quad face: {face}")
+                new_faces.append(face)
+                continue
                 
-                # --- 3. Create New Quadrilateral Faces ---
-                # Connect original vertex -> edge midpoint -> face center -> previous edge midpoint
-                for i in range(n):
-                    v_orig_idx = v_indices[i] # Original vertex index
-                    mid_curr_idx = mid_indices[i] # Midpoint of edge starting at v_orig_idx
-                    # Midpoint of edge ending at v_orig_idx (handle wrap-around)
-                    mid_prev_idx = mid_indices[i - 1] # Python's negative indexing handles wrap-around nicely
-                    
-                    # Create the new quad face
-                    # Order: Original Corner -> Edge Midpoint -> Face Center -> Previous Edge Midpoint
-                    new_quad = Face((v_orig_idx, mid_curr_idx, center_idx, mid_prev_idx))
-                    new_faces.append(new_quad)
+            face_center_pos = np.zeros(3, dtype=float)
+            face_plates = []
+            for v_idx in v_indices:
+                face_center_pos += current_level_vertices[v_idx].pos
+                if current_level_vertices[v_idx].plate_id != -1:
+                    face_plates.append(current_level_vertices[v_idx].plate_id)
+            face_center_pos /= n
+            
+            center_v = Vertex(*face_center_pos)
+            try:
+                center_v.plate_id = random.choice(face_plates)
+            except:
+                center_v.plate_id = -1
+            center_v.normalize(radius)
+            
+            center_idx = len(next_vertices)
+            next_vertices.append(center_v)
 
-                processed_faces += 1
+            mid_indices = []
+            for i in range(n):
+                v1_idx = v_indices[i]
+                v2_idx = v_indices[(i + 1) % n] 
+                mid_idx = self._get_midpoint_vertex(v1_idx, v2_idx, midpoint_cache, next_vertices, radius)
+                mid_indices.append(mid_idx)
+            
+            for i in range(n):
+                v_orig_idx = v_indices[i]
+                mid_curr_idx = mid_indices[i]
+                mid_prev_idx = mid_indices[i - 1]
+                
+                new_quad = Face((v_orig_idx, mid_curr_idx, center_idx, mid_prev_idx))
+                new_faces.append(new_quad)
 
+            processed_faces += 1
 
-            # Update the world state for the next iteration or final result
-            self.vertices = next_vertices
-            self.faces = new_faces
-            print(f"Subdivision level {li+1} complete. Vertices: {len(self.vertices)}, Faces: {len(self.faces)}")
+        self.vertices = next_vertices
+        self.faces = new_faces
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    shape_type = "cube" # Choose "icosahedron" or "truncated"
-    num_subdivisions = 7     # Adjust level of detail
+    shape_type = "cube"
+    num_subdivisions = 5
     sphere_radius = 1.0
     plates = 15
     elevationmin = -15000
     elevationmax = 15000
-
 
     if shape_type == "icosahedron":
         shape = Icosahedron()
@@ -2198,18 +2233,14 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown shape type: {shape_type}")
 
-
-    # Subdivide the shape
-    shape.subdivide(sphere_radius, num_subdivisions) # Call the correct subdivide
+    shape.subdivide(sphere_radius, num_subdivisions)
 
     shape.genElevations(plates, elevationmin, elevationmax)
+    shape.simulate_water()
 
-    # # --- Plotting ---
-    # fig = plt.figure(figsize=(9, 9))
-    # ax = fig.add_subplot(111, projection='3d')
-
-    # Plot the final shape
-    #shape.plot(ax, cmap='terrain', edge_color='darkgreen', alpha=0.9)
+    # print(f'plates have the following vertex count: ')
+    # for plate in shape.plates.values():
+    #     print(f'{plate.plate_id} has {len(plate.vertices)}')
     fig, ax, radio = shape.plot()
 
     ax.set_title(f'Sphere Approx. ({shape_type.capitalize()} Subdivided {num_subdivisions} Times)')
