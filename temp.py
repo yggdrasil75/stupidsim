@@ -183,7 +183,7 @@ class World:
                         if neighbor_pid != -1:
                             vertex.plate_id = neighbor_pid
                             changed = True
-                            print(f'Assigned plate {neighbor_pid} to vertex {vidx} from neighbor {vidx2}')
+                            #print(f'Assigned plate {neighbor_pid} to vertex {vidx} from neighbor {vidx2}')
                             break  # Assign from first valid neighbor found
         
         # Second pass: handle remaining unassigned vertices by expanding search radius
@@ -291,7 +291,7 @@ class World:
         self._assign_base_elevations()
         self.minheight = min_height
         self.maxheight = max_height
-        self._calculate_boundary_elevations(min_height, max_height)
+        self._calculate_boundary_elevations()
         self._smooth_elevations(iterations=3)
         self._add_variations()
     
@@ -711,7 +711,7 @@ class World:
                 variation = np.random.uniform(-0.2, 0.2)
                 self.vertices[v_idx].elevation = plate.base_elevation + variation
         
-    def _calculate_boundary_elevations(self, min_height, max_height):
+    def _calculate_boundary_elevations(self):
         """Calculate elevations based on plate interactions at boundaries."""
         boundary_vertices = []
         boundary_info = {}  # Store boundary information for each vertex
@@ -766,11 +766,11 @@ class World:
             # Different elevation responses based on plate type interactions
             if plate_type == PLATE_TYPE_CONTINENTAL:
                 # Continental plates create mountains when colliding
-                elevation = CONTINENTAL_CRUST_THICKNESS + (max_height - CONTINENTAL_CRUST_THICKNESS) * (avg_movement + 1)/2
+                elevation = CONTINENTAL_CRUST_THICKNESS + (self.minheight - CONTINENTAL_CRUST_THICKNESS) * (avg_movement + 1)/2
             else:
                 # Oceanic plates create trenches or islands
                 if avg_movement > 0:  # Converging
-                    elevation = OCEANIC_CRUST_THICKNESS - (OCEANIC_CRUST_THICKNESS - min_height) * avg_movement
+                    elevation = OCEANIC_CRUST_THICKNESS - (OCEANIC_CRUST_THICKNESS - self.minheight) * avg_movement
                 else:  # Diverging (mid-ocean ridges)
                     elevation = OCEANIC_CRUST_THICKNESS + (0.5 - OCEANIC_CRUST_THICKNESS) * abs(avg_movement)
             
@@ -809,7 +809,7 @@ class World:
 
         return neighbor_indices, neighbor_mask, max_neighbors
   
-    def _add_variations(self, iterations=5, device=None, subdivisions=1): # Added subdivisions param if used
+    def _add_variations(self, iterations=5, device=None): # Added subdivisions param if used
             """
             Add natural elevation variations using PyTorch for GPU acceleration.
             Allows for both increases (hills/peaks) and decreases (valleys).
@@ -891,9 +891,9 @@ class World:
                     if plate_peaks_indices:
                         plate_peak_elevs[plate_id] = torch.max(elevations[plate_peaks_indices]).item()
                     else:
-                        plate_peak_elevs[plate_id] = CONTINENTAL_CRUST_THICKNESS
+                        plate_peak_elevs[plate_id] = self.maxheight
                 else:
-                    plate_peak_elevs[plate_id] = CONTINENTAL_CRUST_THICKNESS # Default if no peaks calculated
+                    plate_peak_elevs[plate_id] = self.maxheight # Default if no peaks calculated
 
 
             if not all_peaks_indices:
@@ -1450,6 +1450,8 @@ class World:
             cbar = fig.colorbar(mappable, cax=cbar_ax, label='Water (Teraliters)')
         
         return cbar
+
+# --- Shapes ---
 
 class Icosahedron(World):
     """Represents an Icosahedron."""
@@ -2204,7 +2206,7 @@ class Cube(World):
 # --- Main Execution ---
 if __name__ == "__main__":
     shape_type = "cube"
-    num_subdivisions = 5
+    num_subdivisions = 7
     sphere_radius = 1.0
     plates = 15
     elevationmin = -15000
@@ -2241,6 +2243,7 @@ if __name__ == "__main__":
     # print(f'plates have the following vertex count: ')
     # for plate in shape.plates.values():
     #     print(f'{plate.plate_id} has {len(plate.vertices)}')
+    
     fig, ax, radio = shape.plot()
 
     ax.set_title(f'Sphere Approx. ({shape_type.capitalize()} Subdivided {num_subdivisions} Times)')
