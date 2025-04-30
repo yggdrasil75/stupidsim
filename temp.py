@@ -179,6 +179,86 @@ def plate_grow_worker_process(plate_id, work_queue_indices, plate_id_array, unas
     if assigned_in_this_run:
         unassigned_indices_queue.put((plate_id, assigned_in_this_run))
 
+@staticmethod
+def batch_calculate_areas(faces, vertex_list, device='cuda'):
+    """
+    Calculate areas for all faces in parallel using PyTorch on GPU
+    
+    Args:
+        faces: List of Face objects
+        vertex_list: List of vertices with pos attributes
+        device: 'cuda' or 'cpu'
+        
+    Returns:
+        Tensor of areas for all faces
+    """
+    # Extract all vertex positions
+    all_pos = torch.tensor([v.pos for v in vertex_list], dtype=torch.float32, device=device)
+    
+    # Prepare face data
+    max_verts = max(len(face.v_indices) for face in faces)
+    face_indices = []
+    is_tri = []
+    
+    for face in faces:
+        idxs = face.v_indices
+        # For quads, we'll process as two triangles (0,1,2 and 0,2,3)
+        if len(idxs) == 4:
+            face_indices.append(idxs[:3])  # First triangle
+            face_indices.append([idxs[0], idxs[2], idxs[3]])  # Second triangle
+            is_tri.extend([True, True])
+        else:
+            face_indices.append(idxs)
+            is_tri.append(True)
+    
+    # Convert to tensor
+    face_indices = torch.tensor(face_indices, dtype=torch.long, device=device)
+    
+    # Get vertex positions for all faces
+    face_verts = all_pos[face_indices]  # Shape: (n_faces, 3, 3)
+    
+    # Normalize to unit vectors
+    face_verts = face_verts / torch.norm(face_verts, dim=2, keepdim=True)
+    
+    # Calculate cross products
+    a, b, c = face_verts[:,0], face_verts[:,1], face_verts[:,2]
+    cross_ab = torch.cross(a, b)
+    cross_ac = torch.cross(a, c)
+    cross_bc = torch.cross(b, c)
+    
+    # Calculate angles
+    alpha = torch.acos(torch.sum(cross_ab * cross_ac, dim=1) / 
+            (torch.norm(cross_ab, dim=1) * torch.norm(cross_ac, dim=1)))
+    beta = torch.acos(torch.sum(-cross_ab * cross_bc, dim=1) / 
+            (torch.norm(cross_ab, dim=1) * torch.norm(cross_bc, dim=1)))
+    gamma = torch.acos(torch.sum(cross_ac * cross_bc, dim=1) / 
+            (torch.norm(cross_ac, dim=1) * torch.norm(cross_bc, dim=1)))
+    
+    # Spherical excess
+    excess = alpha + beta + gamma - pi
+    areas = excess * (EQUATORIAL_RADIUS ** 2)
+    
+    # Combine areas for quads (first two entries belong to first quad, etc.)
+    is_tri = torch.tensor(is_tri, device=device)
+    quad_areas = torch.zeros(len(faces), device=device)
+    tri_areas = torch.where(is_tri, areas, torch.zeros_like(areas))
+    
+    # This part handles combining triangle areas back into quads
+    # We need to track which triangles belong to which original face
+    face_idx = 0
+    out_idx = 0
+    combined_areas = []
+    
+    for face in faces:
+        if face.is_triangle:
+            combined_areas.append(areas[out_idx])
+            out_idx += 1
+        else:
+            combined_areas.append(areas[out_idx] + areas[out_idx+1])
+            out_idx += 2
+    
+    return torch.tensor(combined_areas, device=device)
+    
 # --- World Hierarchy ---
 
 class World:
@@ -1396,6 +1476,19 @@ class World:
 
     #### utility functions
 
+    def calculate_all_face_areas(self, device='cuda'):
+        if not self.faces:
+            return torch.tensor([], device=device)
+            
+        areas = Face.batch_calculate_areas(self.faces, self.vertices, device)
+        
+        # Update the face objects with their areas
+        areas_cpu = areas.cpu().numpy()
+        for i, face in enumerate(self.faces):
+            face.area = areas_cpu[i]
+            
+        return areas
+
     def _get_midpoint_vertex(self, v1_idx, v2_idx, midpoint_cache, next_level_vertices, radius):
         """
         Helper: Calculates or retrieves the midpoint vertex between two vertices.
@@ -1688,7 +1781,6 @@ class World:
         
         return cbar
     
-
 # --- Shapes ---
 
 class Icosahedron(World):
