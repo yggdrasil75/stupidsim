@@ -13,7 +13,10 @@ import math
 from collections import deque
 #from itertools import permutations
 import multiprocessing
+
+from sympy import acos, asin, atan2, cos, pi, sin, sqrt
 import torch
+from functools import lru_cache
 
 
 OCEANIC_CRUST_THICKNESS = -5000
@@ -21,12 +24,21 @@ CONTINENTAL_CRUST_THICKNESS = 4000
 PLATE_TYPE_OCEANIC = 0
 PLATE_TYPE_CONTINENTAL = 1
 SHAPE = "cube"
-SUBDIVISIONS = 5
+SUBDIVISIONS = 4
 SPHERE_SIZE = 1.0
 PLATES = 15
 ELEVATION_MIN = -15000
 ELEVATION_MAX = 11000
+EQUATORIAL_RADIUS = 6378137.0
+POLAR_RADIUS = 6356752.3 #probably not gonna use this for a while.
 
+# --- generic utilities ---
+
+def cart_to_sphere(p):
+    x, y, z = p
+    lon = atan2(y, x)
+    lat = math.asin(z)
+    return lat, lon
 
 # --- Data Holder Classes (Vertex, Face - unchanged) ---
 
@@ -51,6 +63,7 @@ class Vertex:
 
 class Face:
     def __init__(self, v_indices):
+        self.area = -1
         if len(v_indices) < 3:
             raise ValueError("Face must have at least 3 vertices")
         self.v_indices = list(v_indices)
@@ -67,6 +80,37 @@ class Face:
     def __repr__(self) -> str:
         return f"Face({self.v_indices})"
 
+    def calculate_area(self, vertex_list) -> float:
+        if self.area > 0:
+            return self.area
+            
+        points = [vertex_list[i].pos for i in self.v_indices]
+        
+        if len(points) == 4:  # Quad case
+            # Split quad into two triangles and sum their areas
+            tri1 = [points[0], points[1], points[2]]
+            tri2 = [points[0], points[2], points[3]]
+            
+            def spherical_triangle_area(tri):
+                # Convert to unit vectors
+                a, b, c = [p/np.linalg.norm(p) for p in tri]
+                
+                # Calculate angles using dot products
+                alpha = acos(np.dot(np.cross(a, b), np.cross(a, c)) / 
+                    (np.linalg.norm(np.cross(a, b)) * np.linalg.norm(np.cross(a, c))))
+                beta = acos(np.dot(np.cross(b, a), np.cross(b, c)) / 
+                    (np.linalg.norm(np.cross(b, a)) * np.linalg.norm(np.cross(b, c))))
+                gamma = acos(np.dot(np.cross(c, a), np.cross(c, b)) / 
+                        (np.linalg.norm(np.cross(c, a)) * np.linalg.norm(np.cross(c, b))))
+                
+                # Spherical excess
+                excess = alpha + beta + gamma - pi
+                return excess * EQUATORIAL_RADIUS**2
+                
+        self.area = spherical_triangle_area(tri1) + spherical_triangle_area(tri2)
+        return self.area
+
+    
 class Plate:
     def __init__(self, plate_id, is_minor=False):
         self.plate_id = plate_id
@@ -163,6 +207,9 @@ class World:
 
     def _create_world(self, radius = 1.0):
         raise NotImplementedError("Subclasses must implement _create_world()")
+    
+    def _subdivide_selected(self, faces_to_subdivide, radius=1.0, level=3):
+        raise NotImplementedError("Subclasses must implement _subdivide_selected(faces_to_subdivide, radius, level)")
 
     def subdivide(self, radius=1.0, levels=3):
         self.subdivisions = levels
@@ -235,38 +282,6 @@ class World:
 
     def _subdivide(self):
         raise NotImplementedError("Subclasses must implement _subdivide()")
-
-    def _initialize_neighbor_map(self) -> None:
-        if self._neighbor_map_initialized:
-            return
-            
-        print("Initializing neighbor map...")
-        
-        neighbor_sets = [set() for _ in range(len(self.vertices))]
-        for face in self.faces:
-            for i in range(len(face.v_indices)):
-                v1 = face.v_indices[i]
-                for j in range(i+1, len(face.v_indices)):
-                    v2 = face.v_indices[j]
-                    neighbor_sets[v1].add(v2)
-                    neighbor_sets[v2].add(v1)
-        
-        for v_idx, neighbors in enumerate(neighbor_sets):
-            for neighbor_idx in neighbors:
-                dist = np.linalg.norm(self.vertices[v_idx].pos - self.vertices[neighbor_idx].pos)
-                try:
-                    weight = 1.0 / dist
-                except ZeroDivisionError:
-                    weight = 1.0 / (dist + 1e9)
-                self.vertices[v_idx].neighbors[neighbor_idx] = weight
-        
-        self._neighbor_map_initialized = True
-        print("Neighbor map initialized")
-
-    def _find_vertex_neighbors(self, vertex_idx):
-        if not self._neighbor_map_initialized:
-            self._initialize_neighbor_map()
-        return self.vertices[vertex_idx].neighbors
 
     #### plates and elevation
 
@@ -581,7 +596,7 @@ class World:
                             self.vertices[v_idx].plate_id = neighbor_plate
                             self.plates[neighbor_plate].add_vertex(v_idx, self.vertices)
                             self.plates[plate_id].vertices.discard(v_idx)
-                        print(f"Merged {len(region)} vertices from plate {plate_id} to plate {neighbor_plate}")
+                        #print(f"Merged {len(region)} vertices from plate {plate_id} to plate {neighbor_plate}")
                     else:
                         # No better neighbor found, leave with original plate
                         pass
@@ -673,47 +688,6 @@ class World:
         # Still tied - random choice
         return random.choice(candidates)
     
-    # def _fix_non_contiguous_vertices(self):
-    #     """
-    #     Identify and reassign vertices that are not contiguous with their plate's main body.
-    #     """
-    #     print("Checking for non-contiguous vertices...")
-    #     for plate_id, plate in self.plates.items():
-    #         if not plate.vertices:
-    #             continue
-
-    #         # Find the largest contiguous region in the plate
-    #         main_region = self._find_largest_contiguous_region(plate_id)
-    #         all_vertices = plate.vertices.copy()
-
-    #         # Identify orphaned vertices (not in the main region)
-    #         orphaned_vertices = all_vertices - main_region
-
-    #         if orphaned_vertices:
-    #             print(f"Plate {plate_id} has {len(orphaned_vertices)} non-contiguous vertices. Reassigning...")
-
-    #             for v_idx in orphaned_vertices:
-    #                 # Find the most common plate among neighbors
-    #                 neighbor_plates = []
-    #                 neighbors = self._find_vertex_neighbors(v_idx)
-    #                 for n_idx in neighbors:
-    #                     neighbor_plate = self.vertices[n_idx].plate_id
-    #                     if neighbor_plate != -1 and neighbor_plate != plate_id:
-    #                         neighbor_plates.append(neighbor_plate)
-
-    #                 if neighbor_plates:
-    #                     # Assign to the most common neighboring plate
-    #                     new_plate_id = max(set(neighbor_plates), key=neighbor_plates.count)
-    #                     self.vertices[v_idx].plate_id = new_plate_id
-    #                     self.plates[new_plate_id].add_vertex(v_idx, self.vertices)
-    #                     plate.vertices.remove(v_idx)
-    #                 else:
-    #                     # No neighboring plates found, assign randomly
-    #                     new_plate_id = random.choice(list(self.plates.keys()))
-    #                     self.vertices[v_idx].plate_id = new_plate_id
-    #                     self.plates[new_plate_id].add_vertex(v_idx, self.vertices)
-    #                     plate.vertices.remove(v_idx)
-
     def _find_largest_contiguous_region(self, plate_id):
         """
         Find the largest contiguous region of vertices in a plate using BFS.
@@ -936,38 +910,6 @@ class World:
             vertex.elevation = elevation
         print('boundary effects calculated')
 
-    def _build_neighbor_tensors(self, device):
-        """
-        Precomputes neighbor information in a tensor format suitable for PyTorch.
-        (Implementation is the same as before)
-        """
-        num_vertices = len(self.vertices)
-        neighbor_lists = [list(self._find_vertex_neighbors(i)) for i in range(num_vertices)]
-        max_neighbors = max(len(neighbors) for neighbors in neighbor_lists) if neighbor_lists else 0
-        if max_neighbors == 0 and num_vertices > 0 : # Handle case with isolated vertices
-             print("Warning: Some vertices may have no neighbors.")
-             max_neighbors = 1 # Avoid zero-sized tensor dim if possible
-
-        neighbor_indices = torch.full((num_vertices, max_neighbors), 0, # Pad with 0, mask handles it
-                                      dtype=torch.long, device=device)
-        neighbor_mask = torch.zeros((num_vertices, max_neighbors),
-                                    dtype=torch.bool, device=device)
-
-        for i, neighbors in enumerate(neighbor_lists):
-            if neighbors:
-                num_n = len(neighbors)
-                # Ensure indices are within bounds if padding with 0
-                safe_neighbors = [n for n in neighbors if 0 <= n < num_vertices]
-                if len(safe_neighbors) < num_n:
-                    print(f"Warning: Vertex {i} had invalid neighbor indices removed.")
-
-                num_n = len(safe_neighbors) # Update count
-                if num_n > 0:
-                    neighbor_indices[i, :num_n] = torch.tensor(safe_neighbors, dtype=torch.long, device=device)
-                    neighbor_mask[i, :num_n] = True
-
-        return neighbor_indices, neighbor_mask, max_neighbors
-  
     def _add_variations(self, iterations=5, device=None):
             """
             Add natural elevation variations using PyTorch for GPU acceleration.
@@ -1258,41 +1200,83 @@ class World:
 
     def simulate_water(self, iterations=5):
         """Simulate water distribution based on elevation.
-        Water is measured in teraliters (TL) for easier tracking of lakes and rivers."""
+        Uses water depth in meters and accounts for face areas.
+        Water depth affects effective elevation."""
         print("Simulating water distribution...")
         
         # First pass: identify ocean basins and initial water placement
-        for vertex in self.vertices:
-            if vertex.elevation <= self.sea_level:
-                # Ocean gets full water (simplified)
-                vertex.water = (self.sea_level - vertex.elevation) * 10.0  # In TL
+        for vidx, vertex in enumerate(self.vertices):
+            # Get the average area of adjacent faces for this vertex
+            adjacent_faces = self._get_adjacent_faces(vidx)
+            if adjacent_faces:
+                avg_area = sum(face.calculate_area(self.vertices) for face in adjacent_faces) / len(adjacent_faces)
             else:
-                vertex.water = 0.0
+                avg_area = 1.0  # Default if no faces found (shouldn't happen)
                 
+            if vertex.elevation <= self.sea_level:
+                # Ocean gets water up to sea level
+                # Convert water depth to volume for storage
+                water_depth = max(0, self.sea_level - vertex.elevation)
+                vertex.water_volume = water_depth * avg_area  # m³
+                vertex.water_depth = water_depth
+            else:
+                vertex.water_volume = 0.0
+                vertex.water_depth = 0.0
+                    
         # Second pass: simulate rainfall and river flow
         for _ in range(iterations):
-            new_water = [0.0] * len(self.vertices)
+            new_water_volume = [0.0] * len(self.vertices)
             
             for i, vertex in enumerate(self.vertices):
-                if vertex.elevation > self.sea_level:
-                    # Land can receive rainfall (0.01-0.05 TL per iteration)
-                    rainfall = random.uniform(0.01, 0.05)
-                    new_water[i] += rainfall
+                adjacent_faces = self._get_adjacent_faces(i)
+                avg_area = sum(face.calculate_area(self.vertices) for face in adjacent_faces) / len(adjacent_faces) if adjacent_faces else 1.0
+                
+                effective_elevation = vertex.elevation + vertex.water_depth
+                
+                if effective_elevation > self.sea_level:
+                    # Land receives rainfall (1-5 mm per iteration)
+                    rainfall_depth = random.uniform(0.001, 0.005)  # 1-5 mm in meters
+                    rainfall_volume = rainfall_depth * avg_area
+                    new_water_volume[i] += rainfall_volume
                     
-                    # Find lowest neighbor for runoff
+                    # Find lowest neighbor considering effective elevation
                     neighbors = self._find_vertex_neighbors(i)
                     if neighbors:
-                        lowest_neighbor = min(neighbors, 
-                                            key=lambda n: self.vertices[n].elevation)
-                        if self.vertices[lowest_neighbor].elevation < vertex.elevation:
-                            # Move some water downhill (20% of current water or max 0.5 TL)
-                            flow_amount = min(vertex.water * 0.2, 0.5)
-                            new_water[i] -= flow_amount
-                            new_water[lowest_neighbor] += flow_amount
-        
-            # Apply changes
+                        # Get neighbor data with effective elevations
+                        neighbor_data = []
+                        for n in neighbors:
+                            n_faces = self._get_adjacent_faces(n)
+                            n_area = sum(f.calculate_area(self.vertices) for f in n_faces) / len(n_faces) if n_faces else 1.0
+                            n_depth = self.vertices[n].water_volume / n_area if n_area > 0 else 0
+                            neighbor_data.append({
+                                'index': n,
+                                'effective_elev': self.vertices[n].elevation + n_depth,
+                                'area': n_area
+                            })
+                        
+                        # Find the lowest effective elevation neighbor
+                        lowest_neighbor = min(neighbor_data, key=lambda x: x['effective_elev'])
+                        
+                        if lowest_neighbor['effective_elev'] < effective_elevation:
+                            # Calculate potential energy difference
+                            elev_diff = effective_elevation - lowest_neighbor['effective_elev']
+                            
+                            # Move water based on gradient (more flow with steeper gradient)
+                            max_flow_depth = min(vertex.water_depth * 0.2, 0.5)  # Max 50 cm flow
+                            flow_depth = max_flow_depth * min(1.0, elev_diff)  # Scale by gradient
+                            
+                            # Convert to volume
+                            flow_volume = flow_depth * avg_area
+                            new_water_volume[i] -= flow_volume
+                            new_water_volume[lowest_neighbor['index']] += flow_volume * (avg_area / lowest_neighbor['area'])
+            
+            # Apply changes and update water depths
             for i in range(len(self.vertices)):
-                self.vertices[i].water = max(0.0, self.vertices[i].water + new_water[i])
+                adjacent_faces = self._get_adjacent_faces(i)
+                avg_area = sum(face.calculate_area(self.vertices) for face in adjacent_faces) / len(adjacent_faces) if adjacent_faces else 1.0
+                
+                self.vertices[i].water_volume = max(0.0, self.vertices[i].water_volume + new_water_volume[i])
+                self.vertices[i].water_depth = self.vertices[i].water_volume / avg_area if avg_area > 0 else 0
         
         # Generate rivers based on water flow accumulation
         self._generate_rivers()
@@ -1410,6 +1394,8 @@ class World:
         
         return lakes
 
+    #### utility functions
+
     def _get_midpoint_vertex(self, v1_idx, v2_idx, midpoint_cache, next_level_vertices, radius):
         """
         Helper: Calculates or retrieves the midpoint vertex between two vertices.
@@ -1432,7 +1418,7 @@ class World:
         next_level_vertices.append(new_v)
         midpoint_cache[key] = new_idx # Cache the index in the accumulating list
         return new_idx
-        
+
     def _get_face_center_vertex(self, face, center_cache, next_level_vertices, radius):
         """
         Helper: Calculates or retrieves the center vertex of a face.
@@ -1462,6 +1448,101 @@ class World:
         normalized_centroid_pos = centroid_pos * (radius / norm)
         return Vertex(*normalized_centroid_pos)
     
+    def _initialize_neighbor_map(self) -> None:
+        if self._neighbor_map_initialized:
+            return
+            
+        print("Initializing neighbor map...")
+        
+        vertex_neighbor_sets = [set() for _ in range(len(self.vertices))]
+        vertex_face_map = [[] for _ in range(len(self.vertices))]
+        face_neighbor_sets = [set() for _ in range(len(self.faces))]
+        edge_face_map = {}
+        for fid, face in enumerate(self.faces):
+            for vid in face.v_indices:
+                vertex_face_map[vid].append(fid)
+
+            for i in range(len(face.v_indices)):
+                v1 = face.v_indices[i]
+                v2 = face.v_indices[(i+1) % len(face.v_indices)]    
+                vertex_neighbor_sets[v1].add(v2)
+                vertex_neighbor_sets[v2].add(v1)
+    
+            # Record edge-face relationships
+            edge = tuple(sorted((v1, v2)))
+            if edge in edge_face_map:
+                # This edge is shared with another face - mark as neighbors
+                other_face = edge_face_map[edge]
+                face_neighbor_sets[fid].add(other_face)
+                face_neighbor_sets[other_face].add(fid)
+            else:
+                edge_face_map[edge] = fid
+
+        for v_idx, neighbors in enumerate(vertex_neighbor_sets):
+            for neighbor_idx in neighbors:
+                dist = np.linalg.norm(self.vertices[v_idx].pos - self.vertices[neighbor_idx].pos)
+                try:
+                    weight = 1.0 / dist
+                except ZeroDivisionError:
+                    weight = 1.0 / (dist + 1e9)
+                self.vertices[v_idx].neighbors[neighbor_idx] = weight
+        
+        self._face_neighbors = [list(s) for s in face_neighbor_sets]
+        self._vertex_face_map = vertex_face_map
+        self._neighbor_map_initialized = True
+        print("Neighbor map initialized")
+
+    def _find_vertex_neighbors(self, vertex_idx):
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_map()
+        return self.vertices[vertex_idx].neighbors
+    
+    def _get_adjacent_faces(self, vertex_idx):
+        """Get all faces adjacent to a vertex"""
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_maps()
+        return [self.faces[i] for i in self._vertex_face_map[vertex_idx]]
+
+    def _get_face_neighbors(self, face_idx):
+        """Get faces that share an edge with the given face"""
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_maps()
+        return [self.faces[i] for i in self._face_neighbors[face_idx]]
+
+    def _build_neighbor_tensors(self, device):
+        """
+        Precomputes neighbor information in a tensor format suitable for PyTorch.
+        (Implementation is the same as before)
+        """
+        num_vertices = len(self.vertices)
+        neighbor_lists = [list(self._find_vertex_neighbors(i)) for i in range(num_vertices)]
+        max_neighbors = max(len(neighbors) for neighbors in neighbor_lists) if neighbor_lists else 0
+        if max_neighbors == 0 and num_vertices > 0 : # Handle case with isolated vertices
+             print("Warning: Some vertices may have no neighbors.")
+             max_neighbors = 1 # Avoid zero-sized tensor dim if possible
+
+        neighbor_indices = torch.full((num_vertices, max_neighbors), 0, # Pad with 0, mask handles it
+                                      dtype=torch.long, device=device)
+        neighbor_mask = torch.zeros((num_vertices, max_neighbors),
+                                    dtype=torch.bool, device=device)
+
+        for i, neighbors in enumerate(neighbor_lists):
+            if neighbors:
+                num_n = len(neighbors)
+                # Ensure indices are within bounds if padding with 0
+                safe_neighbors = [n for n in neighbors if 0 <= n < num_vertices]
+                if len(safe_neighbors) < num_n:
+                    print(f"Warning: Vertex {i} had invalid neighbor indices removed.")
+
+                num_n = len(safe_neighbors) # Update count
+                if num_n > 0:
+                    neighbor_indices[i, :num_n] = torch.tensor(safe_neighbors, dtype=torch.long, device=device)
+                    neighbor_mask[i, :num_n] = True
+
+        return neighbor_indices, neighbor_mask, max_neighbors
+  
+    #### display
+
     def plot(self, fig=None, ax=None, cmap='terrain', edge_color=None, alpha=1):
         """Plots the shape with interactive radio toggle for elevation/plate/water visualization."""
         if fig is None or ax is None:
@@ -1606,6 +1687,7 @@ class World:
             cbar = fig.colorbar(mappable, cax=cbar_ax, label='Water (Teraliters)')
         
         return cbar
+    
 
 # --- Shapes ---
 
