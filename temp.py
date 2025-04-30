@@ -80,37 +80,44 @@ class Face:
     def __repr__(self) -> str:
         return f"Face({self.v_indices})"
 
+    def spherical_triangle_area(self, tri):
+        """Calculate area of a spherical triangle given three points"""
+        # Convert to unit vectors
+        a, b, c = [p/np.linalg.norm(p) for p in tri]
+        
+        # Calculate angles using dot products
+        alpha = acos(np.dot(np.cross(a, b), np.cross(a, c)) / 
+                (np.linalg.norm(np.cross(a, b)) * np.linalg.norm(np.cross(a, c))))
+        beta = acos(np.dot(np.cross(b, a), np.cross(b, c)) / 
+               (np.linalg.norm(np.cross(b, a)) * np.linalg.norm(np.cross(b, c))))
+        gamma = acos(np.dot(np.cross(c, a), np.cross(c, b)) / 
+                (np.linalg.norm(np.cross(c, a)) * np.linalg.norm(np.cross(c, b))))
+        
+        # Spherical excess
+        excess = alpha + beta + gamma - pi
+        return excess * EQUATORIAL_RADIUS**2
+
     def calculate_area(self, vertex_list) -> float:
         if self.area > 0:
             return self.area
             
         points = [vertex_list[i].pos for i in self.v_indices]
+        n = len(points)
         
-        if len(points) == 4:  # Quad case
-            # Split quad into two triangles and sum their areas
-            tri1 = [points[0], points[1], points[2]]
-            tri2 = [points[0], points[2], points[3]]
+        if n == 3:
+            self.area = self.spherical_triangle_area(points)
+        else:
+            # Decompose polygon into triangles using a fan triangulation
+            # (works for convex polygons on a sphere)
+            total_area = 0.0
+            center_point = points[0]  # Use first point as center
+            for i in range(1, n-1):
+                triangle = [center_point, points[i], points[i+1]]
+                total_area += self.spherical_triangle_area(triangle)
+            self.area = total_area
             
-            def spherical_triangle_area(tri):
-                # Convert to unit vectors
-                a, b, c = [p/np.linalg.norm(p) for p in tri]
-                
-                # Calculate angles using dot products
-                alpha = acos(np.dot(np.cross(a, b), np.cross(a, c)) / 
-                    (np.linalg.norm(np.cross(a, b)) * np.linalg.norm(np.cross(a, c))))
-                beta = acos(np.dot(np.cross(b, a), np.cross(b, c)) / 
-                    (np.linalg.norm(np.cross(b, a)) * np.linalg.norm(np.cross(b, c))))
-                gamma = acos(np.dot(np.cross(c, a), np.cross(c, b)) / 
-                        (np.linalg.norm(np.cross(c, a)) * np.linalg.norm(np.cross(c, b))))
-                
-                # Spherical excess
-                excess = alpha + beta + gamma - pi
-                return excess * EQUATORIAL_RADIUS**2
-                
-        self.area = spherical_triangle_area(tri1) + spherical_triangle_area(tri2)
         return self.area
 
-    
 class Plate:
     def __init__(self, plate_id, is_minor=False):
         self.plate_id = plate_id
@@ -142,9 +149,7 @@ class Plate:
 
 def plate_grow_worker_process(plate_id, work_queue_indices, plate_id_array, unassigned_indices_queue, assignment_lock, vertices_neighbors_getter):
     assigned_in_this_run = [] 
-
     find_neighbors = vertices_neighbors_getter
-
     local_queue = deque(work_queue_indices)
 
     while True:
@@ -181,96 +186,28 @@ def plate_grow_worker_process(plate_id, work_queue_indices, plate_id_array, unas
 
 @staticmethod
 def batch_calculate_areas(faces, vertex_list, device='cuda'):
-    """
-    Calculate areas for all faces in parallel using PyTorch on GPU
-    
-    Args:
-        faces: List of Face objects
-        vertex_list: List of vertices with pos attributes
-        device: 'cuda' or 'cpu'
+    facearea = []
+    for face in faces:
+        facearea.append(face.calculate_area(vertex_list))
         
-    Returns:
-        Tensor of areas for all faces
-    """
-    # Extract all vertex positions
-    all_pos = torch.tensor([v.pos for v in vertex_list], dtype=torch.float32, device=device)
-    
-    # Prepare face data
-    max_verts = max(len(face.v_indices) for face in faces)
-    face_indices = []
-    is_tri = []
-    
-    for face in faces:
-        idxs = face.v_indices
-        # For quads, we'll process as two triangles (0,1,2 and 0,2,3)
-        if len(idxs) == 4:
-            face_indices.append(idxs[:3])  # First triangle
-            face_indices.append([idxs[0], idxs[2], idxs[3]])  # Second triangle
-            is_tri.extend([True, True])
-        else:
-            face_indices.append(idxs)
-            is_tri.append(True)
-    
-    # Convert to tensor
-    face_indices = torch.tensor(face_indices, dtype=torch.long, device=device)
-    
-    # Get vertex positions for all faces
-    face_verts = all_pos[face_indices]  # Shape: (n_faces, 3, 3)
-    
-    # Normalize to unit vectors
-    face_verts = face_verts / torch.norm(face_verts, dim=2, keepdim=True)
-    
-    # Calculate cross products
-    a, b, c = face_verts[:,0], face_verts[:,1], face_verts[:,2]
-    cross_ab = torch.cross(a, b)
-    cross_ac = torch.cross(a, c)
-    cross_bc = torch.cross(b, c)
-    
-    # Calculate angles
-    alpha = torch.acos(torch.sum(cross_ab * cross_ac, dim=1) / 
-            (torch.norm(cross_ab, dim=1) * torch.norm(cross_ac, dim=1)))
-    beta = torch.acos(torch.sum(-cross_ab * cross_bc, dim=1) / 
-            (torch.norm(cross_ab, dim=1) * torch.norm(cross_bc, dim=1)))
-    gamma = torch.acos(torch.sum(cross_ac * cross_bc, dim=1) / 
-            (torch.norm(cross_ac, dim=1) * torch.norm(cross_bc, dim=1)))
-    
-    # Spherical excess
-    excess = alpha + beta + gamma - pi
-    areas = excess * (EQUATORIAL_RADIUS ** 2)
-    
-    # Combine areas for quads (first two entries belong to first quad, etc.)
-    is_tri = torch.tensor(is_tri, device=device)
-    quad_areas = torch.zeros(len(faces), device=device)
-    tri_areas = torch.where(is_tri, areas, torch.zeros_like(areas))
-    
-    # This part handles combining triangle areas back into quads
-    # We need to track which triangles belong to which original face
-    face_idx = 0
-    out_idx = 0
-    combined_areas = []
-    
-    for face in faces:
-        if face.is_triangle:
-            combined_areas.append(areas[out_idx])
-            out_idx += 1
-        else:
-            combined_areas.append(areas[out_idx] + areas[out_idx+1])
-            out_idx += 2
-    
-    return torch.tensor(combined_areas, device=device)
-    
+
 # --- World Hierarchy ---
 
 class World:
     def __init__(self):
-        self.vertices = []
-        self.faces = []
+        self.vertices: list[Vertex] = []
+        self.faces: list[Face] = []
         self.plates: dict[int, Plate] = {}
-        self._neighbor_map_initialized = False
-        self.sea_level = 0.0
-        self.minheight = -15000
-        self.maxheight  = 15000
-        self.platecount = 15
+        self._neighbor_map_initialized: bool = False
+        self.sea_level: np.float64 = 0.0
+        self.minheight: np.float64 = -15000
+        self.maxheight: np.float64  = 15000
+        self.platecount: np.int8 = 15
+        self.rainfall_rate: float = 0.002  # 2mm per iteration
+        self.evaporation_rate: float = 0.001  # 1mm per iteration
+        self.max_water_flow: float = 0.5  # Max 50cm flow per iteration
+        self.min_river_flow: float = 1.0  # Minimum flow to be considered a river
+        self.min_lake_volume: float = 3.0  # Minimum water volume to form a lake
 
     def add_vertex(self, vertex):
         self.vertices.append(vertex)
@@ -1278,88 +1215,135 @@ class World:
 
     #### fluids
 
-    def simulate_water(self, iterations=5):
-        """Simulate water distribution based on elevation.
-        Uses water depth in meters and accounts for face areas.
-        Water depth affects effective elevation."""
-        print("Simulating water distribution...")
+    def simulate_water(self, iterations: int = 5, device: str = 'cuda'):
+        """Simulate water distribution using PyTorch for better performance.
         
-        # First pass: identify ocean basins and initial water placement
-        for vidx, vertex in enumerate(self.vertices):
-            # Get the average area of adjacent faces for this vertex
-            adjacent_faces = self._get_adjacent_faces(vidx)
-            if adjacent_faces:
-                avg_area = sum(face.calculate_area(self.vertices) for face in adjacent_faces) / len(adjacent_faces)
-            else:
-                avg_area = 1.0  # Default if no faces found (shouldn't happen)
-                
-            if vertex.elevation <= self.sea_level:
-                # Ocean gets water up to sea level
-                # Convert water depth to volume for storage
-                water_depth = max(0, self.sea_level - vertex.elevation)
-                vertex.water_volume = water_depth * avg_area  # m³
-                vertex.water_depth = water_depth
-            else:
-                vertex.water_volume = 0.0
-                vertex.water_depth = 0.0
-                    
-        # Second pass: simulate rainfall and river flow
-        for _ in range(iterations):
-            new_water_volume = [0.0] * len(self.vertices)
-            
-            for i, vertex in enumerate(self.vertices):
-                adjacent_faces = self._get_adjacent_faces(i)
-                avg_area = sum(face.calculate_area(self.vertices) for face in adjacent_faces) / len(adjacent_faces) if adjacent_faces else 1.0
-                
-                effective_elevation = vertex.elevation + vertex.water_depth
-                
-                if effective_elevation > self.sea_level:
-                    # Land receives rainfall (1-5 mm per iteration)
-                    rainfall_depth = random.uniform(0.001, 0.005)  # 1-5 mm in meters
-                    rainfall_volume = rainfall_depth * avg_area
-                    new_water_volume[i] += rainfall_volume
-                    
-                    # Find lowest neighbor considering effective elevation
-                    neighbors = self._find_vertex_neighbors(i)
-                    if neighbors:
-                        # Get neighbor data with effective elevations
-                        neighbor_data = []
-                        for n in neighbors:
-                            n_faces = self._get_adjacent_faces(n)
-                            n_area = sum(f.calculate_area(self.vertices) for f in n_faces) / len(n_faces) if n_faces else 1.0
-                            n_depth = self.vertices[n].water_volume / n_area if n_area > 0 else 0
-                            neighbor_data.append({
-                                'index': n,
-                                'effective_elev': self.vertices[n].elevation + n_depth,
-                                'area': n_area
-                            })
-                        
-                        # Find the lowest effective elevation neighbor
-                        lowest_neighbor = min(neighbor_data, key=lambda x: x['effective_elev'])
-                        
-                        if lowest_neighbor['effective_elev'] < effective_elevation:
-                            # Calculate potential energy difference
-                            elev_diff = effective_elevation - lowest_neighbor['effective_elev']
-                            
-                            # Move water based on gradient (more flow with steeper gradient)
-                            max_flow_depth = min(vertex.water_depth * 0.2, 0.5)  # Max 50 cm flow
-                            flow_depth = max_flow_depth * min(1.0, elev_diff)  # Scale by gradient
-                            
-                            # Convert to volume
-                            flow_volume = flow_depth * avg_area
-                            new_water_volume[i] -= flow_volume
-                            new_water_volume[lowest_neighbor['index']] += flow_volume * (avg_area / lowest_neighbor['area'])
-            
-            # Apply changes and update water depths
-            for i in range(len(self.vertices)):
-                adjacent_faces = self._get_adjacent_faces(i)
-                avg_area = sum(face.calculate_area(self.vertices) for face in adjacent_faces) / len(adjacent_faces) if adjacent_faces else 1.0
-                
-                self.vertices[i].water_volume = max(0.0, self.vertices[i].water_volume + new_water_volume[i])
-                self.vertices[i].water_depth = self.vertices[i].water_volume / avg_area if avg_area > 0 else 0
+        Args:
+            iterations: Number of simulation steps
+            device: 'cuda' or 'cpu' for torch operations
+        """
+        print("Starting water simulation...")
         
-        # Generate rivers based on water flow accumulation
-        self._generate_rivers()
+        # Convert parameters to tensors only when needed
+        sea_level = torch.tensor(self.sea_level, device=device)
+        rainfall_rate = torch.tensor(self.rainfall_rate, device=device)
+        evaporation_rate = torch.tensor(self.evaporation_rate, device=device)
+        max_water_flow = torch.tensor(self.max_water_flow, device=device)
+        min_river_flow = torch.tensor(self.min_river_flow, device=device)
+        min_lake_volume = torch.tensor(self.min_lake_volume, device=device)
+        
+        # Rest of the implementation remains the same, using these tensor versions
+        num_vertices = len(self.vertices)
+        if num_vertices == 0:
+            return
+            
+        # Get neighbor information
+        neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors(device)
+        
+        # Initialize water tensors
+        elevation = torch.tensor([v.elevation for v in self.vertices], device=device)
+        water_volume = torch.zeros(num_vertices, device=device)
+        water_depth = torch.zeros(num_vertices, device=device, dtype=torch.double)
+        
+        # Precompute face areas for each vertex
+        vertex_areas = self._compute_vertex_areas()
+        
+        print("Initializing water distribution...")
+        # Initial water distribution - oceans get water up to sea level
+        ocean_mask = elevation <= sea_level
+        sea_level = sea_level.double()
+        print(f'sealevel: {sea_level.type()}')
+        print(f'oceanmask: {elevation[ocean_mask].type()}')
+        water_depth[ocean_mask] = torch.maximum(
+            sea_level - elevation[ocean_mask], 
+            torch.tensor(0.0, device=device)
+        ).double()
+        water_depth = water_depth.cpu()
+        water_volume = water_depth * self.vertex_areas
+        
+        # Main simulation loop
+        print("Running hydrological cycle...")
+        for iter in range(iterations):
+            print(f"Iteration {iter + 1}/{iterations}")
+            new_water = torch.zeros_like(water_volume)
+            
+            # 1. Precipitation (rainfall on land)
+            land_mask = elevation > sea_level
+            rainfall = torch.where(
+                land_mask,
+                torch.rand(num_vertices, device=device) * rainfall_rate * vertex_areas,
+                torch.tensor(0.0, device=device)
+            )
+            new_water += rainfall
+            
+            # 2. Evaporation (from all water surfaces)
+            evaporation = torch.minimum(
+                water_volume,
+                evaporation_rate * vertex_areas
+            )
+            new_water -= evaporation
+            
+            # 3. Flow between vertices
+            current_water_depth = water_volume / vertex_areas
+            effective_elevation = elevation + current_water_depth
+            
+            # Find downhill flow for each vertex
+            for i in range(num_vertices):
+                if not land_mask[i]:
+                    continue  # Skip ocean cells
+                    
+                neighbors = neighbor_indices[i][neighbor_mask[i]]
+                if len(neighbors) == 0:
+                    continue
+                    
+                # Find lowest neighbor
+                neighbor_eff_elev = effective_elevation[neighbors]
+                min_elev_idx = torch.argmin(neighbor_eff_elev)
+                lowest_neighbor = neighbors[min_elev_idx]
+                
+                if effective_elevation[lowest_neighbor] >= effective_elevation[i]:
+                    continue  # No downhill flow
+                    
+                # Calculate flow amount based on gradient
+                elev_diff = effective_elevation[i] - effective_elevation[lowest_neighbor]
+                gradient = elev_diff / torch.norm(
+                    torch.tensor(self.vertices[i].pos, device=device) - 
+                    torch.tensor(self.vertices[lowest_neighbor].pos, device=device)
+                )
+                
+                max_possible_flow = min(
+                    water_volume[i] * 0.2,  # Max 20% of current water can flow
+                    max_water_flow * vertex_areas[i]  # Absolute max flow
+                )
+                
+                flow_amount = max_possible_flow * torch.sigmoid(
+                    torch.tensor(5.0, device=device) * gradient
+                )
+                
+                # Adjust flow based on areas
+                area_ratio = vertex_areas[i] / vertex_areas[lowest_neighbor]
+                adjusted_flow = flow_amount * area_ratio
+                
+                new_water[i] -= flow_amount
+                new_water[lowest_neighbor] += adjusted_flow
+            
+            # Update water volumes
+            water_volume = torch.maximum(water_volume + new_water, torch.tensor(0.0, device=device))
+        
+        # Update vertex data
+        print("Updating vertex data...")
+        water_depth = water_volume / vertex_areas
+        water_depth_cpu = water_depth.cpu().numpy()
+        water_volume_cpu = water_volume.cpu().numpy()
+        
+        for i in range(num_vertices):
+            self.vertices[i].water_volume = float(water_volume_cpu[i])
+            self.vertices[i].water_depth = float(water_depth_cpu[i])
+        
+        # Generate rivers and lakes
+        print("Generating water features...")
+        self._generate_rivers(device)
+        self._identify_lakes(device)
         
         print("Water simulation complete")
 
@@ -1376,6 +1360,7 @@ class World:
         flow_accumulation = [0.0] * len(self.vertices)
         
         # Calculate flow accumulation (simplified approach)
+        print('flow calculation')
         for i, vertex in enumerate(self.vertices):
             if vertex.elevation > self.sea_level:
                 neighbors = self._find_vertex_neighbors(i)
@@ -1387,6 +1372,7 @@ class World:
                             flow_accumulation[i] += self.vertices[neighbor].water
         
         # Mark rivers based on flow accumulation
+        print('marking rivers')
         for i, flow in enumerate(flow_accumulation):
             if flow >= min_flow:
                 self.vertices[i].is_river = True
@@ -1394,6 +1380,7 @@ class World:
                 self.vertices[i].river_size = min(3, int(flow / min_flow))
         
         # Connect river segments to form continuous rivers
+        print('connecting segments')
         self._connect_river_segments()
         
         print(f"Generated {sum(1 for v in self.vertices if v.is_river)} river segments")
@@ -1476,16 +1463,36 @@ class World:
 
     #### utility functions
 
-    def calculate_all_face_areas(self, device='cuda'):
-        if not self.faces:
-            return torch.tensor([], device=device)
+    def _compute_vertex_areas(self) -> torch.Tensor:
+        """Compute vertex areas by distributing adjacent face areas to vertices.
+        Each vertex gets an equal share of each adjacent face's area."""
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_map()
             
-        areas = Face.batch_calculate_areas(self.faces, self.vertices, device)
+        # Calculate all face areas
+        self.calculate_all_face_areas()
+        
+        # Initialize vertex areas
+        vertex_areas = np.zeros(len(self.vertices))
+        
+        # Distribute each face's area equally to its vertices
+        for face_idx, face in enumerate(self.faces):
+            face_area = face.calculate_area(self.vertices)
+            num_vertices_in_face = len(face.v_indices)
+            vertex_share = face_area / num_vertices_in_face
+            
+            for v_idx in face.v_indices:
+                vertex_areas[v_idx] = vertex_areas[v_idx] + vertex_share
+                
+        # Handle any vertices with zero area (shouldn't happen with proper meshes)
+        vertex_areas[vertex_areas == 0] = 1.0  # Assign default area
+        return vertex_areas
+
+    def calculate_all_face_areas(self, device='cuda'):
+            
+        areas = batch_calculate_areas(self.faces, self.vertices)
         
         # Update the face objects with their areas
-        areas_cpu = areas.cpu().numpy()
-        for i, face in enumerate(self.faces):
-            face.area = areas_cpu[i]
             
         return areas
 
