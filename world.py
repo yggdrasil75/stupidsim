@@ -1,1117 +1,1710 @@
-from collections import defaultdict
+
+from collections import deque
+import ctypes
+from datetime import time
+import multiprocessing
+import queue
 import random
-from typing import Dict, List, Set, Tuple
-
+from matplotlib import pyplot as plt
+from matplotlib.widgets import RadioButtons
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
-from globals import CONTINENTAL_BASE_ELEVATION, CONTINENTAL_PLATE_PROB, ELEVATION_DIFFUSION_FACTOR, ELEVATION_DIFFUSION_PASSES, ELEVATION_MOUNTAIN_BASE, ELEVATION_TRENCH_BASE, MAX_ANGULAR_VELOCITY_RAD_PER_YR, NORM_ELEVATION, OCEANIC_BASE_ELEVATION, PHI, VMAX, VMIN
-from shape import Face, Vertex
-
-
-class Plate:
-	def __init__(self, plate_id):
-		self.plate_id = plate_id
-		self.vertices: List[int] = []
-		self.angular_velocity: np.ndarray = np.zeros(3, dtype=np.float64)
-		self.plate_type: str = 'oceanic' # Default to oceanic, can be 'continental'
-
-	def add_vertex(self, vertex_index):
-		self.vertices.append(vertex_index)
-
-	def __repr__(self):
-		ang_vel_deg_yr = np.degrees(np.linalg.norm(self.angular_velocity)) # Magnitude
-		return (f"Plate(ID: {self.plate_id}, Type: {self.plate_type}, Vertices: {len(self.vertices)}, "
-				f"AngVel: {ang_vel_deg_yr:.2f} deg/yr)")
-
-class worldState:
-	def __init__(self, radius, subdivisions=3):
-		self.vertices: List[Vertex] = []
-		self.faces: List[Face] = []
-		self.radius: float = radius # Physical radius (e.g., in meters or km)
-		self.timestepSeconds: int = 1
-		self.gravity: float = 9.81
-		self.details: int = subdivisions
-		self.elevations: dict[int, float] = {}
-		self.plates: List[Plate] = []
-		self.adjacency_list: defaultdict[int, List[int]] = defaultdict(list)
-		self.vertex_to_plate_id: Dict[int, int] = {}
-		self.boundary_vertices: Set[int] = set()
-		self.boundary_edges: Set[Tuple[int, int]] = set()
-		self.boundary_properties: Dict[Tuple[int, int], Dict] = {}
-		self.total_water_volume_surface: float = 0.0 # Total surface water volume in Petaliters (PL)
-		self.total_water_volume_ground: float = 0.0  # Total groundwater volume in Petaliters (PL)
-		self.total_water_volume_ice: float = 0.0     # Total ice water volume in Petaliters (PL)
-		self.total_water_volume_atmosphere: float = 0.0 # Total atmospheric water in some unit
-
-		# Water dictionaries to store water per vertex ID
-		self.surface_water: Dict[int, float] = {}
-		self.groundwater: Dict[int, float] = {}
-		self.ice_water: Dict[int, float] = {}
-		self.atmospheric_water: Dict[int, float] = {}
-
-		# Cache for subdivision: key=sorted tuple(v_idx1, v_idx2), value=midpoint_idx
-		self._subdivision_cache: Dict[Tuple[int, int], int] = {}
-		self._vertex_pos_cache: Dict[Tuple[float, ...], int] = {}
-
-	def shapeBase(self):
-		#implement in subclass
-		raise NotImplementedError("shapeBase must be implemented in a subclass")
-
-	def timeStepHour(self) -> float: return float(self.timestepSeconds) / 3600.0
-	def timeStepDay(self) -> float: return float(self.timestepSeconds) / 86400.0
-	def timeStepYear(self) -> float: return float(self.timestepSeconds) / 31556952.0
-
-	# This function is for the initial sphere generation, relies on normalized positions
-	def _add_vertex(self, vertex: Vertex) -> int:
-		"""Adds a vertex if unique normalized position, returns index. Assumes vertex is on unit sphere."""
-		norm_vertex = vertex # Assume vertex is already normalized or should be treated as such for caching
-		key = tuple(np.round(norm_vertex.pos, 8)) # Use rounded normalized position as key
-		if key in self._vertex_pos_cache:
-			return self._vertex_pos_cache[key]
-		else:
-			idx = len(self.vertices)
-			self.vertices.append(norm_vertex) # Add the (normalized) vertex
-			self._vertex_pos_cache[key] = idx
-			return idx
-
-	# This function is used during subdivision, creates midpoints
-	def _get_or_create_midpoint(self, v1_idx: int, v2_idx: int) -> int:
-		key = tuple(sorted((v1_idx, v2_idx)))
-		if key in self._subdivision_cache:
-			return self._subdivision_cache[key]
-		v1 = self.vertices[v1_idx]
-		v2 = self.vertices[v2_idx]
-		mid_pos = (v1.pos + v2.pos) / 2.0
-		midpoint_vertex = Vertex(mid_pos[0], mid_pos[1], mid_pos[2])
-		midpoint_vertex.normalize()
-		mid_idx = self._add_vertex(midpoint_vertex)
-		self._subdivision_cache[key] = mid_idx
-		return mid_idx
-
-	def duplicateLayers(self):
-		"""Creates concentric layers of vertices based on the initial subdivided sphere."""
-		if self.details <= 0:
-			print("No subdivisions used (details=0), cannot create layers.")
-			return
-
-		print("Starting layer duplication...")
-		# Keep copies of original data linked to ORIGINAL indices BEFORE duplication
-		# These represent the state of the surface layer (layer 0)
-		original_vertices = self.vertices[:] # Copy vertex objects
-		original_faces = self.faces[:]       # Copy face objects
-		original_vertex_to_plate_id = self.vertex_to_plate_id.copy()
-		original_elevations = self.elevations.copy()
-		original_plates_info = [(p.plate_id, p.angular_velocity.copy(), p.plate_type) for p in self.plates] # Store essential info
-
-		num_original_vertices = len(original_vertices)
-		if num_original_vertices == 0:
-			print("Error: No vertices exist to duplicate.")
-			return
-
-		# Clear instance variables that will be completely rebuilt
-		self.vertices = []
-		self.faces = [] # Faces will ONLY be rebuilt for layer 0
-		self.adjacency_list = defaultdict(list) # Will be rebuilt
-		self.vertex_to_plate_id = {} # Will be rebuilt ONLY for layer 0
-		self.elevations = {}         # Will be rebuilt ONLY for layer 0
-		self.plates = []             # Will be rebuilt with ONLY layer 0 vertices
-		# self._vertex_pos_cache.clear() # Clear this cache as it's for normalized unit sphere vertices
-		# We don't need a position cache for layers as each vertex is unique by definition (orig_idx, layer_id)
-
-		num_layers = self.details * 2 + 1 # e.g., details=1 -> layers -1, 0, 1 (3 layers)
-		layers_vertices = [[] for _ in range(num_layers)] # Stores NEW vertex indices per layer
-		# Relative shift factor: Adjust as needed. 0.05 means layers are 5% of radius apart.
-		layer_shift_factor = 0.01 # Smaller shift to avoid large gaps initially
-
-		# Map original vertex index to the NEW index of that vertex in Layer 0
-		new_vertex_index_map_layer0 = {}
-
-		print(f" Creating {num_layers} layers for {num_original_vertices} original vertices...")
-
-		# --- Create All Vertices for All Layers ---
-		current_new_vertex_index = 0
-		for layer_idx in range(num_layers):
-			# Layer IDs go from -details to +details, with 0 being the surface
-			layer_id = layer_idx - self.details
-			# The scaling factor for radius for this layer
-			radius_multiplier = 1.0 + layer_id * layer_shift_factor
-			# print(f"  Processing Layer {layer_id} (Index {layer_idx}), Radius Multiplier: {radius_multiplier:.4f}")
-
-			layer_new_indices = [] # Store new indices for this specific layer
-			for original_v_idx, original_vertex in enumerate(original_vertices):
-				# Original position should already be normalized unit vector from icosphere generation
-				original_norm_pos = original_vertex.pos # Assuming it's already normalized
-
-				# Calculate the new position for this layer - DO NOT NORMALIZE
-				new_pos = original_norm_pos * radius_multiplier
-
-				# Create the new vertex object WITH the layer position
-				new_vertex = Vertex(new_pos[0], new_pos[1], new_pos[2])
-
-				# Assign attributes BEFORE adding to list
-				new_vertex.layer_id = layer_id
-				new_vertex.original_vertex_index = original_v_idx
-
-				# Add the new vertex to the main list
-				# The index is simply the current length before appending
-				new_vertex_index = current_new_vertex_index
-				self.vertices.append(new_vertex)
-				layer_new_indices.append(new_vertex_index)
-
-				# If this is the surface layer (layer 0), map original index to its new index
-				if layer_id == 0:
-					new_vertex_index_map_layer0[original_v_idx] = new_vertex_index
-
-				current_new_vertex_index += 1
-
-			# Store the list of new indices created for this layer
-			layers_vertices[layer_idx] = layer_new_indices
-
-		print(f" Created {len(self.vertices)} total vertices across {num_layers} layers.")
-		if len(self.vertices) != num_original_vertices * num_layers:
-			print(f" Warning: Vertex count mismatch! Expected {num_original_vertices * num_layers}, got {len(self.vertices)}")
-
-
-		# --- Rebuild Data Structures focusing on Layer 0 (Surface) ---
-		print(" Rebuilding surface layer (Layer 0) specific data...")
-
-		# 1. Rebuild Faces for Layer 0 ONLY
-		# Use the original faces but substitute original vertex indices with their new Layer 0 indices
-		new_faces_layer0 = []
-		if not original_faces:
-			print(" Warning: No original faces found to rebuild for layer 0.")
-		else:
-			for face in original_faces:
-				try:
-					# Map old vertex indices in the face to new indices from layer 0 map
-					new_face_vertices = tuple(new_vertex_index_map_layer0[v_idx] for v_idx in face.vertices)
-					new_faces_layer0.append(Face(*new_face_vertices))
-				except KeyError as e:
-					print(f" Error: Original vertex index {e} not found in new_vertex_index_map_layer0 while rebuilding faces. Original face: {face.vertices}. Skipping face.")
-					continue
-		self.faces = new_faces_layer0 # Assign ONLY layer 0 faces
-		print(f" Rebuilt {len(self.faces)} faces for layer 0.")
-
-
-		# 2. Rebuild vertex_to_plate_id map using NEW indices for Layer 0 vertices ONLY
-		self.vertex_to_plate_id = {}
-		for original_v_idx, plate_id in original_vertex_to_plate_id.items():
-			if original_v_idx in new_vertex_index_map_layer0:
-				new_v_idx_layer0 = new_vertex_index_map_layer0[original_v_idx]
-				self.vertex_to_plate_id[new_v_idx_layer0] = plate_id
-			else:
-				# This should not happen if the mapping was built correctly for all original vertices
-				print(f" Warning: Original vertex index {original_v_idx} not found in new_vertex_index_map_layer0 while rebuilding plate map.")
-		print(f" Rebuilt vertex_to_plate_id map for layer 0 (Size: {len(self.vertex_to_plate_id)}). Should match original number of vertices.")
-
-
-		# 3. Rebuild Plates list (assigning NEW Layer 0 vertex indices ONLY to plate.vertices)
-		self.plates = [] # Start fresh
-		# Create new Plate objects using the stored info
-		new_plates_dict = {pid: Plate(pid) for pid, _, _ in original_plates_info}
-		for pid, ang_vel, ptype in original_plates_info:
-			new_plates_dict[pid].angular_velocity = ang_vel
-			new_plates_dict[pid].plate_type = ptype
-
-		# Assign the correct NEW Layer 0 vertices to each new Plate object
-		for new_v_idx_layer0, plate_id in self.vertex_to_plate_id.items():
-			if plate_id in new_plates_dict:
-				new_plates_dict[plate_id].add_vertex(new_v_idx_layer0)
-			else:
-				print(f" Warning: Plate ID {plate_id} referenced by vertex {new_v_idx_layer0} not found in original plate info.")
-
-		# Sort vertices within plates and add to the final list
-		self.plates = sorted(new_plates_dict.values(), key=lambda p: p.plate_id)
-		for plate in self.plates:
-			plate.vertices.sort() # Keep vertices sorted
-
-		print(f" Rebuilt {len(self.plates)} plates with new vertex indices for layer 0.")
-		# Verify total vertices in plates match layer 0 vertices
-		plate_vertex_count = sum(len(p.vertices) for p in self.plates)
-		if plate_vertex_count != len(new_vertex_index_map_layer0):
-			print(f" Warning: Mismatch between vertices in plates ({plate_vertex_count}) and layer 0 vertices ({len(new_vertex_index_map_layer0)})")
-
-
-		# 4. Rebuild elevations map using NEW indices for Layer 0 vertices ONLY
-		self.elevations = {}
-		for original_v_idx, elevation in original_elevations.items():
-			if original_v_idx in new_vertex_index_map_layer0:
-				new_v_idx_layer0 = new_vertex_index_map_layer0[original_v_idx]
-				self.elevations[new_v_idx_layer0] = elevation
-			else:
-				print(f" Warning: Original vertex index {original_v_idx} not found in new_vertex_index_map_layer0 while rebuilding elevations.")
-		print(f" Rebuilt elevations map for layer 0 (Size: {len(self.elevations)}).")
-
-
-		# --- Build Adjacency List ---
-		print(" Building adjacency list...")
-		# 1. Horizontal connections on Layer 0 (using the rebuilt self.faces)
-		self._build_adjacency_list() # This now correctly uses only Layer 0 faces
-		print(f" Built horizontal adjacency for layer 0 (Entries: {len(self.adjacency_list)}).")
-
-		# 2. Vertical connections between layers
-		print(" Connecting layers vertically...")
-		for layer_idx in range(num_layers):
-			# Connect layer_idx to layer_idx + 1
-			if layer_idx < num_layers - 1:
-				current_layer_new_indices = layers_vertices[layer_idx]
-				upper_layer_new_indices = layers_vertices[layer_idx + 1]
-
-				# The vertices should correspond one-to-one based on the creation order
-				if len(current_layer_new_indices) != len(upper_layer_new_indices):
-					print(f" FATAL Error: Layer size mismatch between layer index {layer_idx} ({len(current_layer_new_indices)}) and {layer_idx+1} ({len(upper_layer_new_indices)}). Cannot connect vertically.")
-					# Depending on severity, you might want to raise an exception or return
-					return # Stop further processing
-
-				for i in range(len(current_layer_new_indices)):
-					v_lower_idx = current_layer_new_indices[i]
-					v_upper_idx = upper_layer_new_indices[i]
-
-					# Add bidirectional connections to the adjacency list
-					if v_upper_idx not in self.adjacency_list[v_lower_idx]:
-						self.adjacency_list[v_lower_idx].append(v_upper_idx)
-					if v_lower_idx not in self.adjacency_list[v_upper_idx]:
-						self.adjacency_list[v_upper_idx].append(v_lower_idx)
-
-		print(f" Added vertical connections between layers.")
-		print(f" Layer duplication complete. Total vertices: {len(self.vertices)}, Faces (layer 0): {len(self.faces)}, Layers: {num_layers}")
-
-		# --- Final Sanity Checks ---
-		num_layer0_vertices_check = len(layers_vertices[self.details])
-		if len(self.elevations) != num_layer0_vertices_check:
-			print(f" Post-Check Warning: Elevation map size ({len(self.elevations)}) != Expected Layer 0 vertices ({num_layer0_vertices_check})")
-		if len(self.vertex_to_plate_id) != num_layer0_vertices_check:
-			print(f" Post-Check Warning: Vertex-to-plate map size ({len(self.vertex_to_plate_id)}) != Expected Layer 0 vertices ({num_layer0_vertices_check})")
-		if len(self.faces) != len(original_faces):
-			print(f" Post-Check Warning: Number of faces ({len(self.faces)}) != Number of original faces ({len(original_faces)})")
-
-
-	def _build_vertex_plate_map(self):
-		"""(Re)Builds the vertex_to_plate_id dictionary from self.plates lists."""
-		self.vertex_to_plate_id.clear()
-		num_vertices = len(self.vertices)
-		if not self.plates: return
-
-		overlapping_vertices = 0
-		invalid_indices = 0
-		mapped_count = 0
-
-		for plate_idx, plate in enumerate(self.plates):
-			for vertex_idx in plate.vertices:
-				if not (0 <= vertex_idx < num_vertices):
-					invalid_indices += 1
-					continue
-				if vertex_idx in self.vertex_to_plate_id:
-					overlapping_vertices += 1
-					# Optional: Resolve overlap, e.g., keep first encountered plate ID
-					# print(f"Warning: Vertex {vertex_idx} in multiple plates ({self.vertex_to_plate_id[vertex_idx]} and {plate_idx}). Keeping {self.vertex_to_plate_id[vertex_idx]}.")
-				else:
-					self.vertex_to_plate_id[vertex_idx] = plate_idx
-					mapped_count +=1
-
-		map_size = len(self.vertex_to_plate_id)
-
-
-	def _identify_boundaries(self):
-		"""Identifies vertices and edges lying on plate boundaries."""
-		print("Identifying plate boundaries...")
-		self.boundary_vertices.clear()
-		self.boundary_edges.clear()
-		if not self.vertex_to_plate_id:
-			print("Error: Cannot identify boundaries without vertex-to-plate map.")
-			return
-		if not self.adjacency_list:
-			print("Error: Cannot identify boundaries without adjacency list.")
-			return
-
-		# Iterate through ONLY the vertices known to be on plates (likely Layer 0)
-		relevant_vertices = list(self.vertex_to_plate_id.keys())
-		print(f" Checking {len(relevant_vertices)} vertices with plate assignments for boundaries...")
-
-		for v1_idx in relevant_vertices:
-			plate1_id = self.vertex_to_plate_id[v1_idx] # Known to exist
-
-			if v1_idx not in self.adjacency_list: continue
-
-			is_boundary_vertex = False
-			# Check neighbors for different plate IDs
-			for v2_idx in self.adjacency_list[v1_idx]:
-				# IMPORTANT: Only consider neighbors that are ALSO on a plate (i.e., likely Layer 0)
-				plate2_id = self.vertex_to_plate_id.get(v2_idx, -1)
-
-				if plate2_id != -1 and plate1_id != plate2_id:
-					# This is a boundary edge between two mapped vertices
-					is_boundary_vertex = True
-					edge = tuple(sorted((v1_idx, v2_idx)))
-					self.boundary_edges.add(edge)
-					# The neighbor v2_idx is also a boundary vertex
-					self.boundary_vertices.add(v2_idx)
-
-			if is_boundary_vertex:
-				# v1_idx is also a boundary vertex
-				self.boundary_vertices.add(v1_idx)
-
-		print(f"Boundaries identified. Boundary Vertices: {len(self.boundary_vertices)}, Boundary Edges: {len(self.boundary_edges)}")
-
-	def assign_random_angular_velocities(self):
-		if not self.plates:
-			print("Warning: No plates exist to assign velocities to.")
-			return
-
-		for plate in self.plates:
-			phi = np.random.uniform(0, 2 * np.pi)
-			costheta = np.random.uniform(-1, 1)
-			theta = np.arccos(costheta)
-			x = np.sin(theta) * np.cos(phi)
-			y = np.sin(theta) * np.sin(phi)
-			z = np.cos(theta)
-			direction = np.array([x, y, z])
-
-			magnitude = np.random.uniform(0, MAX_ANGULAR_VELOCITY_RAD_PER_YR)
-
-			plate.angular_velocity = direction * magnitude
-		print("Angular velocities assigned.")
-
-	def calculate_boundary_motions(self, classification_threshold: float = 0.7) -> bool:
-		self.boundary_properties.clear() # Clear previous properties
-
-		m_per_year_to_m_per_sec = 1.0 / (365.25 * 24 * 3600)
-
-		successful_calculations = 0
-		skipped_edges = 0
-
-		for edge in self.boundary_edges:
-			v1_idx, v2_idx = edge
-
-			plate1_id = self.vertex_to_plate_id.get(v1_idx, -1)
-			plate2_id = self.vertex_to_plate_id.get(v2_idx, -1)
-
-			# Ensure both vertices belong to different, valid plates
-			if not (0 <= plate1_id < len(self.plates) and 0 <= plate2_id < len(self.plates) and plate1_id != plate2_id):
-				# print(f" Skipping edge {edge}: Invalid plate assignments ({plate1_id}, {plate2_id}).")
-				skipped_edges += 1
-				continue
-
-			try:
-				v1 = self.vertices[v1_idx]
-				v2 = self.vertices[v2_idx]
-				plate1 = self.plates[plate1_id]
-				plate2 = self.plates[plate2_id]
-			except IndexError:
-				print(f" Skipping edge {edge}: Vertex index out of bounds.")
-				skipped_edges += 1
-				continue
-
-			# Angular velocities (radians per year)
-			omega1 = plate1.angular_velocity
-			omega2 = plate2.angular_velocity
-
-			p_mid = (v1.pos + v2.pos) / 2.0
-			p_mid_norm = np.linalg.norm(p_mid)
-			if p_mid_norm < 1e-9:
-				continue
-			p_mid /= p_mid_norm # Normalized direction
-			p_mid_world = p_mid * self.radius # Position vector in meters
-
-			# Linear velocities v = omega x r (result in meters per year)
-			vel1_myr = np.cross(omega1, p_mid_world)
-			vel2_myr = np.cross(omega2, p_mid_world)
-			v_rel_myr = vel2_myr - vel1_myr # Relative velocity in meters per year
-
-			# --- Classify Boundary ---
-			# Local coordinate system at p_mid_world:
-			# Radial: p_mid_unit
-			# Tangent 1 (along edge approx): Vector from v1 to v2, projected onto tangent plane
-			edge_vec_unit = v2.pos - v1.pos # Vector along edge on unit sphere
-			if np.linalg.norm(edge_vec_unit) < 1e-9: continue
-			# Project edge_vec onto tangent plane at p_mid_unit
-			tangent_edge_vec = edge_vec_unit - np.dot(edge_vec_unit, p_mid) * p_mid
-			norm_tangent_edge = np.linalg.norm(tangent_edge_vec)
-			if norm_tangent_edge < 1e-9: continue
-			tangent_edge_unit = tangent_edge_vec / norm_tangent_edge # Unit vector along boundary tangent
-
-			# Tangent 2 (normal to boundary): Cross radial with tangent_edge_unit
-			boundary_normal_local = np.cross(p_mid, tangent_edge_unit) # Unit vector normal to boundary
-
-			# Project relative velocity onto the tangent plane (remove radial component)
-			v_rel_tangent_myr = v_rel_myr - np.dot(v_rel_myr, p_mid) * p_mid
-
-			# Decompose tangent velocity into components
-			# Convergence component: Projection onto boundary_normal_local
-			# Negative value means convergence (moving opposite to the normal)
-			# Positive value means divergence (moving along the normal)
-			convergence_component_scalar_myr = np.dot(v_rel_tangent_myr, boundary_normal_local)
-
-			# Transform component: Projection onto tangent_edge_unit
-			transform_component_scalar_myr = np.dot(v_rel_tangent_myr, tangent_edge_unit)
-
-			# Magnitudes (m/yr)
-			convergence_mag_myr = abs(convergence_component_scalar_myr)
-			transform_mag_myr = abs(transform_component_scalar_myr)
-			total_mag_myr = np.linalg.norm(v_rel_tangent_myr)
-
-			# Classify based on magnitudes and sign of convergence
-			boundary_type = "undefined"
-			# Use a small threshold for 'passive' based on meters per year (e.g., < 1 mm/yr)
-			passive_threshold_myr = 0.001
-			if total_mag_myr < passive_threshold_myr:
-				boundary_type = "passive"
-			else:
-				# Ratios for classification
-				conv_ratio = convergence_mag_myr / total_mag_myr
-				trans_ratio = transform_mag_myr / total_mag_myr
-
-				# Check dominant component against threshold
-				if conv_ratio >= classification_threshold:
-					boundary_type = "convergent" if convergence_component_scalar_myr < 0 else "divergent"
-				elif trans_ratio >= classification_threshold:
-					boundary_type = "transform"
-				else:
-					# Oblique motion - classify by the more dominant component
-					if convergence_mag_myr > transform_mag_myr:
-						boundary_type = "convergent" if convergence_component_scalar_myr < 0 else "divergent"
-					else:
-						boundary_type = "transform"
-
-			# Store properties in m/s
-			self.boundary_properties[edge] = {
-				"type": boundary_type,
-				"relative_velocity_mps": v_rel_myr * m_per_year_to_m_per_sec,
-				"convergence_rate_mps": convergence_component_scalar_myr * m_per_year_to_m_per_sec, # Negative=Convergent
-				"transform_rate_mps": transform_component_scalar_myr * m_per_year_to_m_per_sec, # Signed slip rate
-				"total_rate_mps": total_mag_myr * m_per_year_to_m_per_sec # Magnitude of slip
-			}
-			successful_calculations += 1
-
-		print(f"Boundary motion calculation complete. Processed {successful_calculations}/{len(self.boundary_edges)} edges. Skipped {skipped_edges}.")
-		if successful_calculations == 0 and len(self.boundary_edges) > 0:
-			print(" Warning: No boundary motions could be calculated.")
-			return False
-		return True
-
-	def assign_elevations_from_boundaries(self):
-		"""Assigns vertex elevations (Layer 0) based on plate type and boundary influence, then smooths."""
-		print("Assigning elevations (Layer 0)...")
-
-		# Ensure elevations dict exists, default to 0 or base value
-		# Operate ONLY on vertices that have plate assignments (Layer 0)
-		layer0_vertices = list(self.vertex_to_plate_id.keys())
-		if not layer0_vertices:
-			print("Warning: No Layer 0 vertices found with plate assignments. Cannot assign elevations.")
-			return
-
-		# Initialize elevations ONLY for Layer 0 vertices based on plate type
-		self.elevations = {} # Clear previous elevations
-		print(" Assigning base elevations based on plate type...")
-		for v_idx in layer0_vertices:
-			plate_id = self.vertex_to_plate_id[v_idx]
-			try:
-				plate_type = self.plates[plate_id].plate_type
-				if plate_type == 'continental':
-					self.elevations[v_idx] = CONTINENTAL_BASE_ELEVATION
-				elif plate_type == 'oceanic':
-					self.elevations[v_idx] = OCEANIC_BASE_ELEVATION
-				else: # Default case if plate type is somehow invalid
-					self.elevations[v_idx] = OCEANIC_BASE_ELEVATION
-			except IndexError:
-				print(f"Warning: Plate ID {plate_id} invalid for vertex {v_idx}. Assigning default elevation.")
-				self.elevations[v_idx] = OCEANIC_BASE_ELEVATION # Default fallback
-
-		# --- Apply boundary influence ---
-		print(" Applying boundary influences...")
-		# Use m/s rates from boundary_properties
-		# Convert bases to be comparable (or adjust scaling factor)
-		base_convergent: float = ELEVATION_MOUNTAIN_BASE # meters (positive)
-		base_divergent: float = ELEVATION_TRENCH_BASE # meters (negative)
-		base_transform: float = 200.0 # Small positive bump for transforms
-
-		# Scaling factor to convert velocity (m/s) to elevation impact (m)
-		# Example: 1 cm/yr = 1e-2 m / (3.15e7 s) ~= 3e-10 m/s
-		# If we want 1 cm/yr convergence (~3e-10 m/s) to add, say, 1000m elevation:
-		# Scaling factor = 1000m / 3e-10 m/s ~= 3e12 s
-		# Let's try a large scaling factor and see
-		rate_scaling_factor: float = 3.0e12 # Units: seconds (so rate_mps * factor -> meters)
-
-		elevation_updates = defaultdict(lambda: {'sum_influence': 0.0, 'count': 0})
-
-		if not self.boundary_properties:
-			print(" No boundary properties calculated, skipping boundary influence.")
-		else:
-			for edge, props in self.boundary_properties.items():
-				v1_idx, v2_idx = edge
-				boundary_type = props.get("type", "undefined")
-				# Use absolute convergence rate for magnitude, sign determines type
-				conv_rate_mps = props.get("convergence_rate_mps", 0.0) # Negative = convergence
-				trans_rate_mps = props.get("transform_rate_mps", 0.0) # Signed rate
-
-				influence = 0.0
-				if boundary_type == "convergent": # conv_rate_mps is negative
-					magnitude_mps = abs(conv_rate_mps)
-					influence = base_convergent * (magnitude_mps * rate_scaling_factor / abs(base_convergent)) # Scale uplift by rate
-				elif boundary_type == "divergent": # conv_rate_mps is positive
-					magnitude_mps = conv_rate_mps
-					# Make trench deeper based on rate (less negative)
-					# Start from base_divergent (e.g., -10000) and add positive influence scaled by rate
-					# This addition will make the number less negative (shallower trench for faster spreading?)
-					# Or should faster spreading make a deeper rift? Let's assume deeper.
-					# Influence = base_divergent * (magnitude_mps * rate_scaling_factor / abs(base_divergent))
-					# Example: base=-10k. rate=1cm/yr -> mag=3e-10. factor=3e12. infl = -10k * (3e-10 * 3e12 / 10k) = -10k * (0.9 / 10k) = -0.9 ??? Needs rethink.
-					# Let's make influence proportional to rate, added to base.
-					# A positive rate means divergence. We want more negative elevation.
-					influence = base_divergent * (magnitude_mps * rate_scaling_factor / 1.0 ) # Scale downward pull by rate? Needs tuning. Let's try simpler: make proportional.
-					influence = -abs(base_divergent) * (magnitude_mps * rate_scaling_factor) # More negative for faster divergence
-
-				elif boundary_type == "transform":
-					magnitude_mps = abs(trans_rate_mps)
-					influence = base_transform * (magnitude_mps * rate_scaling_factor / 1.0) # Small bump scaled by slip rate
-
-				# Apply influence to both vertices of the edge
-				# Ensure these vertices are actually in Layer 0 and have elevations initialized
-				if boundary_type != "passive" and boundary_type != "undefined":
-					if v1_idx in self.elevations:
-						elevation_updates[v1_idx]['sum_influence'] += influence
-						elevation_updates[v1_idx]['count'] += 1
-					if v2_idx in self.elevations:
-						elevation_updates[v2_idx]['sum_influence'] += influence
-						elevation_updates[v2_idx]['count'] += 1
-
-			# Add the averaged influence to the base elevations
-			for v_idx, data in elevation_updates.items():
-				if data['count'] > 0 and v_idx in self.elevations:
-					avg_influence = data['sum_influence'] / data['count']
-					self.elevations[v_idx] += avg_influence
-
-
-		# --- Diffusion/Smoothing ---
-		diffusion_passes: int = ELEVATION_DIFFUSION_PASSES
-		diffusion_factor: float = ELEVATION_DIFFUSION_FACTOR
-
-		if diffusion_passes > 0 and diffusion_factor > 0 and len(self.elevations) > 1:
-			print(f" Performing {diffusion_passes} elevation diffusion passes (Factor: {diffusion_factor}) on {len(self.elevations)} vertices...")
-			# Operate only on the vertices that have elevations (Layer 0)
-			current_elevations = self.elevations # Work directly on the dict
-			vertices_to_smooth = list(current_elevations.keys())
-
-			for i_pass in range(diffusion_passes):
-				next_elevations = current_elevations.copy() # Create copy for next state
-
-				for v_idx in vertices_to_smooth:
-					if v_idx not in self.adjacency_list or not self.adjacency_list[v_idx]:
-						continue # Isolated vertex
-
-					neighbor_indices = self.adjacency_list[v_idx]
-					sum_neighbor_elev = 0.0
-					sum_weights = 0.0
-					num_valid_neighbors = 0
-
-					# Only consider neighbors that are ALSO in Layer 0 (have elevations)
-					for n_idx in neighbor_indices:
-						if n_idx in current_elevations:
-							neighbor_elev = current_elevations[n_idx]
-							# Simple average (weight=1)
-							weight = 1.0
-							# # Optional: Distance weighting (more complex)
-							# dist_sq = np.sum((self.vertices[v_idx].pos - self.vertices[n_idx].pos)**2)
-							# weight = 1.0 / (dist_sq + 1e-6) # Inverse distance weight
-
-							sum_neighbor_elev += neighbor_elev * weight
-							sum_weights += weight
-							num_valid_neighbors += 1
-
-					if num_valid_neighbors > 0 and sum_weights > 1e-9:
-						avg_neighbor_elev = sum_neighbor_elev / sum_weights
-						current_elev = current_elevations[v_idx]
-
-						# Weighted average: (1-f)*current + f*average_neighbor
-						smoothed_elev = (1.0 - diffusion_factor) * current_elev + diffusion_factor * avg_neighbor_elev
-						next_elevations[v_idx] = smoothed_elev
-					# else: keep original elevation next_elevations[v_idx] = current_elevations[v_idx]
-
-				# Update current_elevations for the next pass
-				current_elevations = next_elevations # Point to the results of this pass
-				# Optional: Print min/max elevation after each pass
-				# if i_pass % 1 == 0 and current_elevations:
-				#    min_el = min(current_elevations.values())
-				#    max_el = max(current_elevations.values())
-				#    print(f"    Pass {i_pass+1} Elev Range: {min_el:.0f} to {max_el:.0f}")
-
-			# Assign the final smoothed elevations back
-			self.elevations = current_elevations
-			print(" Elevation diffusion complete.")
-		else:
-			print(" Skipping elevation diffusion.")
-
-		if not self.elevations:
-			print("Warning: No elevations were assigned.")
-			return
-
-		# Update normalization range based on actual data or keep fixed
-		# Using fixed range based on globals VMIN, VMAX
-		NORM_ELEVATION.vmin = VMIN
-		NORM_ELEVATION.vmax = VMAX
-		final_min = min(self.elevations.values())
-		final_max = max(self.elevations.values())
-		print(f"Final Elevation Range (Layer 0): {final_min:.0f}m to {final_max:.0f}m (Colorbar range: {VMIN} to {VMAX})")
-
-	def distribute_water(self, total_water_zettaliters: float):
-		"""Distributes water over the world layers based on elevation and layer type."""
-		total_water_petaliters = total_water_zettaliters * 1e6 # 1 ZL = 10^6 PL
-		print(f"Distributing {total_water_zettaliters:.3f} ZL ({total_water_petaliters:.0f} PL) of water...")
-
-		num_vertices = len(self.vertices)
-		if num_vertices == 0:
-			print("Warning: No vertices to distribute water to.")
-			return
-
-		# Initialize water dictionaries for ALL vertices
-		self.surface_water = {i: 0.0 for i in range(num_vertices)}
-		self.groundwater = {i: 0.0 for i in range(num_vertices)}
-		self.ice_water = {i: 0.0 for i in range(num_vertices)}
-		self.atmospheric_water = {i: 0.0 for i in range(num_vertices)}
-		self.total_water_volume_surface = 0.0
-		self.total_water_volume_ground = 0.0
-		self.total_water_volume_ice = 0.0
-		self.total_water_volume_atmosphere = 0.0
-
-		# Define fractions (adjust these to sum to 1.0)
-		surface_water_fraction = 0.90  # Majority on the surface
-		groundwater_fraction = 0.08 # Below surface
-		ice_water_fraction = 0.015 # Surface, high/cold places
-		atmosphere_water_fraction = 0.005 # Above surface
-
-		# --- 1. Surface Water (Layer 0) ---
-		total_surface_water_volume = total_water_petaliters * surface_water_fraction
-		layer0_vertices = []
-		potential_well_vertices = [] # Vertices below sea level (0 elevation)
-		total_potential = 0.0
-
-		for v_idx in range(num_vertices):
-			if self.vertices[v_idx].layer_id == 0:
-				layer0_vertices.append(v_idx)
-				elevation = self.elevations.get(v_idx, 0.0) # Get elevation for Layer 0 vertices
-				if elevation <= 0:
-					# Calculate potential based on depth (larger positive number for deeper)
-					potential = -elevation + 1.0 # Add 1 to give sea level some potential
-					potential_well_vertices.append((v_idx, potential))
-					total_potential += potential
-
-		if not layer0_vertices:
-			print("Warning: No Layer 0 vertices found for surface water distribution.")
-		elif total_potential > 0:
-			print(f" Distributing {total_surface_water_volume:.1f} PL surface water based on elevation potential...")
-			distributed_surface = 0.0
-			for v_idx, potential in potential_well_vertices:
-				fraction = potential / total_potential
-				water_vol = total_surface_water_volume * fraction
-				self.surface_water[v_idx] = water_vol
-				distributed_surface += water_vol
-			self.total_water_volume_surface = distributed_surface
-			print(f"  -> Assigned {distributed_surface:.1f} PL to {len(potential_well_vertices)} vertices below sea level.")
-			# Distribute remaining water evenly? Or let it flow later? For now, only fill depressions.
-			remaining_surface_water = total_surface_water_volume - distributed_surface
-			if remaining_surface_water > 1e-3 and len(layer0_vertices) > 0:
-				print(f"  -> Distributing remaining {remaining_surface_water:.1f} PL evenly over all {len(layer0_vertices)} surface vertices.")
-				per_vertex_extra = remaining_surface_water / len(layer0_vertices)
-				for v_idx in layer0_vertices:
-					self.surface_water[v_idx] += per_vertex_extra
-				self.total_water_volume_surface = total_surface_water_volume # Update total assigned
-		elif len(layer0_vertices) > 0: # If no potential wells, distribute evenly
-				print(f" Distributing {total_surface_water_volume:.1f} PL surface water evenly...")
-				per_vertex = total_surface_water_volume / len(layer0_vertices)
-				for v_idx in layer0_vertices:
-					self.surface_water[v_idx] = per_vertex
-				self.total_water_volume_surface = total_surface_water_volume
-
-
-		# --- 2. Groundwater (Layers < 0) ---
-		total_groundwater_volume = total_water_petaliters * groundwater_fraction
-		ground_vertices = [v_idx for v_idx in range(num_vertices) if self.vertices[v_idx].layer_id < 0]
-		if not ground_vertices:
-			print("Warning: No ground layers found for groundwater distribution.")
-			self.total_water_volume_surface += total_groundwater_volume # Add to surface if no ground layers
-		else:
-			print(f" Distributing {total_groundwater_volume:.1f} PL groundwater evenly over {len(ground_vertices)} ground vertices...")
-			per_vertex = total_groundwater_volume / len(ground_vertices)
-			for v_idx in ground_vertices:
-				self.groundwater[v_idx] = per_vertex
-			self.total_water_volume_ground = total_groundwater_volume
-
-
-		# --- 3. Ice/Glaciers (High Latitude/Elevation on Layer 0) ---
-		total_ice_water_volume = total_water_petaliters * ice_water_fraction
-		ice_candidates = []
-		total_ice_potential = 0.0
-		# Define conditions for ice formation (example thresholds)
-		min_latitude_for_ice = 0.7 # Corresponds to ~45 degrees (sin(45) ~ 0.707)
-		min_elevation_for_ice = 3000.0 # Meters
-
-		for v_idx in layer0_vertices: # Only consider surface layer for ice
-			vertex = self.vertices[v_idx]
-			elevation = self.elevations.get(v_idx, 0.0)
-			# Use z-coordinate normalized as proxy for |sin(latitude)|
-			abs_z_norm = abs(vertex.pos[2] / np.linalg.norm(vertex.pos)) if np.linalg.norm(vertex.pos) > 0 else 0
-
-			is_high_latitude = abs_z_norm >= min_latitude_for_ice
-			is_high_elevation = elevation >= min_elevation_for_ice
-
-			if is_high_latitude or is_high_elevation:
-				# Simple potential: 1 point for meeting condition, more if both met?
-				potential = 0
-				if is_high_latitude: potential += 1
-				if is_high_elevation: potential += (elevation / min_elevation_for_ice) # Scale by how high
-				ice_candidates.append((v_idx, potential))
-				total_ice_potential += potential
-
-		if not ice_candidates:
-			print("Warning: No suitable locations found for ice distribution.")
-			self.total_water_volume_surface += total_ice_water_volume # Add to surface
-		elif total_ice_potential > 0:
-			print(f" Distributing {total_ice_water_volume:.1f} PL ice water based on potential over {len(ice_candidates)} locations...")
-			distributed_ice = 0.0
-			for v_idx, potential in ice_candidates:
-				fraction = potential / total_ice_potential
-				water_vol = total_ice_water_volume * fraction
-				self.ice_water[v_idx] = water_vol
-				distributed_ice += water_vol
-			self.total_water_volume_ice = distributed_ice
-		# Handle case where total_ice_potential is 0 but candidates exist? Distribute evenly.
-		elif len(ice_candidates) > 0:
-			per_vertex = total_ice_water_volume / len(ice_candidates)
-			for v_idx, _ in ice_candidates:
-				self.ice_water[v_idx] = per_vertex
-			self.total_water_volume_ice = total_ice_water_volume
-
-
-		# --- 4. Atmospheric Water (Layers > 0) ---
-		total_atmospheric_water_volume = total_water_petaliters * atmosphere_water_fraction
-		atmosphere_vertices = [v_idx for v_idx in range(num_vertices) if self.vertices[v_idx].layer_id > 0]
-		if not atmosphere_vertices:
-			print("Warning: No atmospheric layers found for atmospheric water distribution.")
-			self.total_water_volume_surface += total_atmospheric_water_volume # Add to surface
-		else:
-			print(f" Distributing {total_atmospheric_water_volume:.1f} PL atmospheric water evenly over {len(atmosphere_vertices)} atmosphere vertices...")
-			per_vertex = total_atmospheric_water_volume / len(atmosphere_vertices)
-			for v_idx in atmosphere_vertices:
-				self.atmospheric_water[v_idx] = per_vertex
-			self.total_water_volume_atmosphere = total_atmospheric_water_volume
-
-		# --- Final Summary ---
-		total_distributed = (self.total_water_volume_surface +
-							 self.total_water_volume_ground +
-							 self.total_water_volume_ice +
-							 self.total_water_volume_atmosphere)
-		print(f"Water distribution complete.")
-		print(f"  Surface Water: {self.total_water_volume_surface:.3f} PL")
-		print(f"  Groundwater:   {self.total_water_volume_ground:.3f} PL")
-		print(f"  Ice Water:     {self.total_water_volume_ice:.3f} PL")
-		print(f"  Atmosphere:    {self.total_water_volume_atmosphere:.3f} PL")
-		print(f"  ---------------------------------")
-		print(f"  Total Distributed: {total_distributed:.3f} PL")
-		if abs(total_distributed - total_water_petaliters) > 1e-3:
-			print(f"Warning: Distributed water ({total_distributed:.3f} PL) does not match target ({total_water_petaliters:.3f} PL). Difference: {total_distributed - total_water_petaliters:.3f} PL")
-
-	def _build_adjacency_list(self):
-		"""Builds an adjacency list for vertices based ONLY on self.faces."""
-		# self.adjacency_list.clear() # Clearing should happen in the caller if needed
-		num_face_edges = 0
-		for face in self.faces:
-			# Assumes face.vertices is a tuple of 3 indices (v0, v1, v2)
-			v0, v1, v2 = face.vertices
-			# Add edges (v0,v1), (v1,v2), (v2,v0)
-			# Check validity of indices just in case
-			max_idx = max(v0, v1, v2)
-			if max_idx >= len(self.vertices):
-				print(f"Error building adjacency: Face {face.vertices} contains invalid index {max_idx} (max vertex index: {len(self.vertices)-1}). Skipping face.")
-				continue
-
-			if v1 not in self.adjacency_list[v0]: self.adjacency_list[v0].append(v1); num_face_edges+=1
-			if v0 not in self.adjacency_list[v1]: self.adjacency_list[v1].append(v0) # No double count edges
-
-			if v2 not in self.adjacency_list[v1]: self.adjacency_list[v1].append(v2); num_face_edges+=1
-			if v1 not in self.adjacency_list[v2]: self.adjacency_list[v2].append(v1)
-
-			if v0 not in self.adjacency_list[v2]: self.adjacency_list[v2].append(v0); num_face_edges+=1
-			if v2 not in self.adjacency_list[v0]: self.adjacency_list[v0].append(v0)
-		# print(f" Built adjacency from {len(self.faces)} faces, added {num_face_edges} unique face edges.")
-
-
-
-
-class icosphere(worldState):
-	def __init__(self, radius, subdivisions):
-		# Call superclass init first
-		super().__init__(radius, subdivisions)
-		# Now call shapeBase which requires self.details to be set
-		print(f"Initializing icosphere with radius {radius}, subdivisions {self.details}")
-		self.shapeBase()
-		print(f"Icosphere base created. Vertices: {len(self.vertices)}, Faces: {len(self.faces)}")
-		# Build adjacency list for the base sphere
-		self._build_adjacency_list()
-		print(f"Initial adjacency list built.")
-
-
-	def shapeBase(self):
-		"""Creates the base icosahedron and subdivides it."""
-		self.vertices = [] # Ensure lists are clear
-		self.faces = []
-		self._vertex_pos_cache = {} # Clear cache for new shape
-		self._subdivision_cache = {}
-
-		# Create 12 base vertices of icosahedron
-		vertices_raw = [
-			(-1, PHI, 0), (1, PHI, 0), (-1, -PHI, 0), (1, -PHI, 0),
-			(0, -1, PHI), (0, 1, PHI), (0, -1, -PHI), (0, 1, -PHI),
-			(PHI, 0, -1), (PHI, 0, 1), (-PHI, 0, -1), (-PHI, 0, 1)
-		]
-
-		# Normalize and add using _add_vertex to populate self.vertices and cache
-		vertex_indices = []
-		for x, y, z in vertices_raw:
-			v = Vertex(x, y, z)
-			v.normalize() # Normalize before adding
-			idx = self._add_vertex(v) # Use the cache-aware method
-			vertex_indices.append(idx)
-		# print(f" Added {len(self.vertices)} base vertices.")
-
-		# Create 20 base faces using the indices returned by _add_vertex
-		faces_raw = [
-			(0, 11, 5), (0, 5, 1), (0, 1, 7), (0, 7, 10), (0, 10, 11),
-			(1, 5, 9), (5, 11, 4), (11, 10, 2), (10, 7, 6), (7, 1, 8),
-			(3, 9, 4), (3, 4, 2), (3, 2, 6), (3, 6, 8), (3, 8, 9),
-			(4, 9, 5), (2, 4, 11), (6, 2, 10), (8, 6, 7), (9, 8, 1)
-		]
-
-		self.faces = [Face(v0, v1, v2) for v0, v1, v2 in faces_raw]
-		# print(f" Created {len(self.faces)} base faces.")
-
-		# Subdivide according to self.details
-		self.subdivide()
-		# No need to build adjacency here, it's built after __init__ completes.
-		return self # Return self for potential chaining, though not strictly necessary
-
-
-	def subdivide(self):
-		"""Subdivides faces of the mesh according to self.details."""
-		if self.details <= 0:
-			# print(" No subdivisions requested.")
-			return
-
-		print(f" Starting subdivision for {self.details} level(s)...")
-		for level in range(self.details):
-			new_faces_next_level = []
-			self._subdivision_cache = {} # Clear midpoint cache for each level
-
-			current_faces = self.faces[:] # Operate on a copy
-			if not current_faces:
-				print(" Warning: No faces to subdivide.")
-				break
-
-			# print(f"  Level {level+1}/{self.details}: Subdividing {len(current_faces)} faces...")
-			for face in current_faces:
-				v0_idx, v1_idx, v2_idx = face.vertices
-
-				try:
-					# Get or create midpoints (normalized, using _add_vertex internally)
-					m01_idx = self._get_or_create_midpoint(v0_idx, v1_idx)
-					m12_idx = self._get_or_create_midpoint(v1_idx, v2_idx)
-					m20_idx = self._get_or_create_midpoint(v2_idx, v0_idx)
-				except IndexError as e:
-					print(f"  Error finding vertices for midpoint creation in face {face.vertices}: {e}. Skipping subdivision for this face.")
-					new_faces_next_level.append(face) # Keep original face if error
-					continue
-				except Exception as e:
-					print(f"  Unexpected error during midpoint creation for face {face.vertices}: {e}. Skipping subdivision.")
-					new_faces_next_level.append(face)
-					continue
-
-				# Create the four new faces using the new indices
-				new_faces_next_level.append(Face(v0_idx, m01_idx, m20_idx))
-				new_faces_next_level.append(Face(v1_idx, m12_idx, m01_idx))
-				new_faces_next_level.append(Face(v2_idx, m20_idx, m12_idx))
-				new_faces_next_level.append(Face(m01_idx, m12_idx, m20_idx)) # Center face
-
-			self.faces = new_faces_next_level # Update faces list for the next level or final result
-			# print(f"  Level {level+1} complete. Vertices: {len(self.vertices)}, Faces: {len(self.faces)}")
-
-		print(f"Subdivision complete. Final Vertices: {len(self.vertices)}, Final Faces: {len(self.faces)}")
-
-
-	def assign_icosphere_vertices_to_plates(self, num_plates: int) -> List[Plate]:
-		"""Assigns vertices to plates using a proximity-biased random walk with recycling."""
-		plates = [Plate(i) for i in range(num_plates)]
-
-		# Randomly assign plate types (continental/oceanic)
-		for plate in plates:
-			if random.random() < CONTINENTAL_PLATE_PROB:
-				plate.plate_type = 'continental'
-			else:
-				plate.plate_type = 'oceanic'
-
-		unassigned_vertices = set(range(len(self.vertices)))
-		self.vertex_to_plate_id = {} # Reset map
-		if not unassigned_vertices:
-			print("Warning: No vertices to assign to plates.")
-			return []
-
-		if num_plates > len(unassigned_vertices):
-			print(f"Warning: More plates ({num_plates}) requested than vertices ({len(unassigned_vertices)}). Reducing plates.")
-			num_plates = len(unassigned_vertices)
-			plates = plates[:num_plates]
-		if num_plates == 0:
-			print("Warning: Number of plates is zero.")
-			return []
-
-		start_vertices_indices = random.sample(list(unassigned_vertices), num_plates)
-
-		# Assign starting vertices
-		for i in range(num_plates):
-			start_vertex_index = start_vertices_indices[i]
-			plates[i].add_vertex(start_vertex_index)
-			self.vertex_to_plate_id[start_vertex_index] = i
-			unassigned_vertices.remove(start_vertex_index)
-
-		iteration_count = 0
-		max_iterations = len(self.vertices) * 10
-
-		while unassigned_vertices and iteration_count < max_iterations:
-			iteration_count += 1
-
-			# Pick a plate to potentially grow (can bias towards smaller plates later if needed)
-			plate_index = random.randrange(num_plates)
-			current_plate = plates[plate_index]
-
-			# Find unassigned neighbors of the current plate's vertices
-			possible_expansion_vertices = set()
-			# Use a sample of plate vertices for performance on large plates
-			sample_size = min(len(current_plate.vertices), 100 + int(np.sqrt(len(current_plate.vertices))))
-			sampled_plate_vertices = random.sample(current_plate.vertices, sample_size)
-
-			for plate_vertex_index in sampled_plate_vertices: # current_plate.vertices:
-				# Check if vertex index is valid in adjacency list
-				if plate_vertex_index in self.adjacency_list:
-					for neighbor_idx in self.adjacency_list[plate_vertex_index]:
-						if neighbor_idx in unassigned_vertices:
-							possible_expansion_vertices.add(neighbor_idx)
-
-
-			if not possible_expansion_vertices:
-				# If this plate can't expand from the sample, try another one next iteration
-				# Could add a check here to see if *any* vertex has unassigned neighbors
-				continue
-
-			expansion_candidates = list(possible_expansion_vertices)
-
-			# --- Proximity Biased Selection ---
-			# Simplified: Just pick a random candidate for now
-			# The proximity bias adds complexity and may not be strictly needed for initial assignment
-			next_vertex_index = random.choice(expansion_candidates)
-
-
-			# Assign the chosen vertex to the current plate
-			current_plate.add_vertex(next_vertex_index)
-			self.vertex_to_plate_id[next_vertex_index] = plate_index
-			unassigned_vertices.remove(next_vertex_index)
-
-		# --- Handle Leftovers ---
-		if unassigned_vertices:
-			print(f"Warning: {len(unassigned_vertices)} vertices remained unassigned after walk. Assigning randomly.")
-			remaining_unassigned = list(unassigned_vertices)
-			random.shuffle(remaining_unassigned)
-			for idx, vertex_idx in enumerate(remaining_unassigned):
-				target_plate_index = idx % num_plates # Distribute somewhat evenly
-				plates[target_plate_index].add_vertex(vertex_idx)
-				self.vertex_to_plate_id[vertex_idx] = target_plate_index
-				# unassigned_vertices.remove(vertex_idx) # Not needed, just iterating
-
-		# --- Recycling/Smoothing Pass ---
-		recycling_iterations = 5 # Smooth boundaries
-		print(f" Starting {recycling_iterations} plate boundary smoothing passes...")
-		for recycle_iter in range(recycling_iterations):
-			vertices_to_reassign = []
-			# Identify vertices potentially worth reassigning (near borders)
-			for plate_idx, plate in enumerate(plates):
-				for vertex_index in plate.vertices:
-					if vertex_index not in self.adjacency_list: continue
-					is_border = False
-					neighbor_plate_ids = set()
-					for neighbor_index in self.adjacency_list[vertex_index]:
-						neighbor_plate_id = self.vertex_to_plate_id.get(neighbor_index, -1)
-						if neighbor_plate_id != -1 and neighbor_plate_id != plate_idx:
-							is_border = True
-							neighbor_plate_ids.add(neighbor_plate_id)
-					# Reassign if it's on a border and has diverse neighbors? Simpler: reassign all border nodes.
-					if is_border:
-						vertices_to_reassign.append(vertex_index)
-
-			if not vertices_to_reassign:
-				print("  No border vertices found to reassign, stopping smoothing early.")
-				break
-
-			unique_vertices_to_reassign = list(set(vertices_to_reassign))
-			random.shuffle(unique_vertices_to_reassign)
-			reassigned_count = 0
-
-			for vertex_index in unique_vertices_to_reassign:
-				current_plate_id = self.vertex_to_plate_id.get(vertex_index, -1)
-				if current_plate_id == -1: continue
-
-				neighboring_plate_counts = defaultdict(int)
-				if vertex_index not in self.adjacency_list: continue
-
-				for neighbor_idx in self.adjacency_list[vertex_index]:
-					neighbor_plate_id = self.vertex_to_plate_id.get(neighbor_idx, -1)
-					if neighbor_plate_id != -1:
-						neighboring_plate_counts[neighbor_plate_id] += 1
-
-				if not neighboring_plate_counts: continue
-
-				# Assign to the plate with the most neighbors
-				# (Could add proximity weighting here too)
-				best_plate_id = max(neighboring_plate_counts, key=neighboring_plate_counts.get)
-
-				if best_plate_id != current_plate_id:
-					# Remove from old plate (if valid)
-					if 0 <= current_plate_id < len(plates):
-						try:
-							plates[current_plate_id].vertices.remove(vertex_index)
-						except ValueError:
-							pass # Wasn't in the list, maybe already moved
-					# Add to new plate (if valid)
-					if 0 <= best_plate_id < len(plates):
-						plates[best_plate_id].add_vertex(vertex_index)
-						self.vertex_to_plate_id[vertex_index] = best_plate_id
-						reassigned_count += 1
-					else:
-						# Put back in old plate if new one is invalid
-						if 0 <= current_plate_id < len(plates):
-							plates[current_plate_id].add_vertex(vertex_index)
-							self.vertex_to_plate_id[vertex_index] = current_plate_id
-
-			print(f"  Smoothing Pass {recycle_iter + 1}: Reassigned {reassigned_count} vertices.")
-
-
-		# Final cleanup and validation
-		final_v_count = 0
-		assigned_verts_check = set()
-		# Ensure vertex_to_plate_id matches plate.vertices lists
-		temp_map = {}
-		for i, p in enumerate(plates):
-			p.vertices = sorted(list(set(p.vertices))) # Ensure unique and sorted
-			for v_idx in p.vertices:
-				if v_idx in temp_map:
-					print(f"Warning: Vertex {v_idx} found in multiple plates ({temp_map[v_idx]} and {i}) after smoothing.")
-					# Decide how to handle - e.g., keep first assignment or assign randomly
-				temp_map[v_idx] = i
-				assigned_verts_check.add(v_idx)
-			final_v_count += len(p.vertices)
-
-		self.vertex_to_plate_id = temp_map # Update map based on final plate lists
-
-		if len(self.vertex_to_plate_id) != len(self.vertices):
-			print(f"ERROR: Plate assignment incomplete! {len(self.vertices) - len(self.vertex_to_plate_id)} vertices unmapped.")
-		elif final_v_count != len(self.vertices):
-			print(f"ERROR: Vertex count mismatch in plates! Sum of plate vertices ({final_v_count}) != total vertices ({len(self.vertices)}).")
-
-
-		self.plates = plates
-		print(f"Plate assignment complete. {len(plates)} plates assigned.")
-		return plates
+import torch
+from holder.face import Face
+from holder.globals import CONTINENTAL_CRUST_THICKNESS, OCEANIC_CRUST_THICKNESS, PLATE_TYPE_CONTINENTAL, PLATE_TYPE_OCEANIC
+from holder.vertex import Vertex
+from plate import Plate
+from util import batch_calculate_areas, plate_grow_worker_process
+
+
+class World:
+    def __init__(self):
+        self.vertices: list[Vertex] = []
+        self.faces: list[Face] = []
+        self.plates: dict[int, Plate] = {}
+        self._neighbor_map_initialized: bool = False
+        self.sea_level: np.float64 = 0.0
+        self.minheight: np.float64 = -15000
+        self.maxheight: np.float64  = 15000
+        self.platecount: np.int8 = 15
+        self.rainfall_rate: float = 0.002  # 2mm per iteration
+        self.evaporation_rate: float = 0.001  # 1mm per iteration
+        self.max_water_flow: float = 0.5  # Max 50cm flow per iteration
+        self.min_river_flow: float = 1.0  # Minimum flow to be considered a river
+        self.min_lake_volume: float = 3.0  # Minimum water volume to form a lake
+
+    def add_vertex(self, vertex):
+        self.vertices.append(vertex)
+        return len(self.vertices) - 1
+
+    def add_face(self, face):
+        self.faces.append(face)
+
+    def create_world(self, radius=1.0, plates = 15, min_height = -15000, max_height = 15000):
+        self.platecount = plates
+        self.elevationMin = min_height
+        self.elevationMax = max_height
+        self._create_world(radius=1.0)
+
+    def _create_world(self, radius = 1.0):
+        raise NotImplementedError("Subclasses must implement _create_world()")
+    
+    def _subdivide_selected(self, faces_to_subdivide, radius=1.0, level=3):
+        raise NotImplementedError("Subclasses must implement _subdivide_selected(faces_to_subdivide, radius, level)")
+
+    def subdivide(self, radius=1.0, levels=3):
+        self.subdivisions = levels
+        for level in range(levels):
+            print(f"Starting Subdivision level {level+1}...")
+            if np.floor(levels / 2) == level:
+                self._create_plates()
+                self._assign_tectonic_plates()
+            self._subdivide()
+            print(f"Subdivision level {level+1} complete. Vertices: {len(self.vertices)}, Faces: {len(self.faces)}")
+            self._neighbor_map_initialized = False
+            self._fix_non_contiguous_vertices()
+        self.fixPlates()
+
+    def _subdivide(self):
+        raise NotImplementedError("Subclasses must implement _subdivide()")
+
+    #### plates and elevation
+
+    def fixPlates(self):
+        self._neighbor_map_initialized = False
+        for plate in self.plates.values():
+            plate.resetVertices()
+        
+        # First pass: assign plate IDs from immediate neighbors
+        changed = True
+        while changed:  # Keep iterating until no more changes occur
+            changed = False
+            for vidx, vertex in enumerate(self.vertices):
+                if vertex.plate_id == -1:
+                    for vidx2 in self._find_vertex_neighbors(vidx):
+                        neighbor_pid = self.vertices[vidx2].plate_id
+                        if neighbor_pid != -1:
+                            vertex.plate_id = neighbor_pid
+                            changed = True
+                            #print(f'Assigned plate {neighbor_pid} to vertex {vidx} from neighbor {vidx2}')
+                            break  # Assign from first valid neighbor found
+        
+        # Second pass: handle remaining unassigned vertices by expanding search radius
+        remaining_unassigned = [vidx for vidx, v in enumerate(self.vertices) if v.plate_id == -1]
+        search_radius = 2  # Start by looking 2 steps away
+        
+        while remaining_unassigned and search_radius < 5:  # Limit how far we search
+            new_unassigned = []
+            for vidx in remaining_unassigned:
+                # Find all vertices within search_radius steps
+                nearby = self._find_vertices_within_radius(vidx, search_radius)
+                for n_vidx in nearby:
+                    if self.vertices[n_vidx].plate_id != -1:
+                        self.vertices[vidx].plate_id = self.vertices[n_vidx].plate_id
+                        print(f'Assigned plate {self.vertices[n_vidx].plate_id} to vertex {vidx} from vertex {n_vidx} (radius {search_radius})')
+                        break
+                else:
+                    new_unassigned.append(vidx)
+            
+            remaining_unassigned = new_unassigned
+            search_radius += 1
+        
+        # Final assignment for any remaining vertices (assign to largest plate or create new plate)
+        if remaining_unassigned:
+            print(f'Warning: {len(remaining_unassigned)} vertices still unassigned after expansion')
+            # Option 1: Assign to largest existing plate
+            largest_plate = max(self.plates.values(), key=lambda p: len(p.vertices))
+            for vidx in remaining_unassigned:
+                self.vertices[vidx].plate_id = largest_plate.plate_id
+                print(f'Assigned remaining vertex {vidx} to largest plate {largest_plate.plate_id}')
+            
+            # Option 2: Alternatively, could create a new plate for these
+        
+        # Update plate vertex assignments
+        for vidx, vertex in enumerate(self.vertices):
+            self.plates[vertex.plate_id].add_vertex(vidx, self.vertices)
+        
+        self._fix_non_contiguous_vertices()
+
+    def genElevations(self, num_plates=7, min_height=0.0, max_height=1.0):
+        if not self.vertices:
+            return
+            
+        #self._create_plates(num_plates)
+        #self._assign_tectonic_plates(num_plates)
+        self._assign_base_elevations()
+        self.minheight = min_height
+        self.maxheight = max_height
+        self._calculate_boundary_elevations()
+        #self._smooth_elevations(iterations=3)
+        #self._add_variations()
+    
+    def _create_plates(self):
+        self.plates = {}
+        
+        total_plates = self.platecount
+        minor_plate_count = max(1, int(total_plates * random.uniform(0.2, 0.3)))
+        minor_plate_ids = set(random.sample(range(total_plates), minor_plate_count))
+        plate_types = []
+        for _ in range(self.platecount):
+            if len(plate_types) > 0 and plate_types[-1] == PLATE_TYPE_CONTINENTAL:
+                next_type = PLATE_TYPE_OCEANIC
+            elif len(plate_types) > 0 and plate_types[-1] == PLATE_TYPE_OCEANIC:
+                next_type = PLATE_TYPE_CONTINENTAL
+            else:
+                next_type = random.choice([PLATE_TYPE_CONTINENTAL, PLATE_TYPE_OCEANIC])
+            plate_types.append(next_type)
+            
+        for i in range(self.platecount // 3):
+            if random.random() < 0.5:
+                plate_types[i] = 1 - plate_types[i]
+
+        for plate_id in range(self.platecount):
+            self.plates[plate_id] = Plate(plate_id)
+            self.plates[plate_id].type = plate_types[plate_id]
+            
+    def _plate_grow_worker(self, plate_id, plate_queue, vertices, unassigned, plates, assignment_lock):
+        my_plate = plates[plate_id]
+
+        while True:
+            current_assigned_idx = -1
+            try:
+                current_assigned_idx = plate_queue.popleft()
+            except IndexError: break
+
+            neighbors = self._find_vertex_neighbors(current_assigned_idx)
+
+            potential_unassigned_neighbors_indices = []
+            for n_idx in neighbors:
+                if vertices[n_idx].plate_id == -1:
+                    potential_unassigned_neighbors_indices.append(n_idx)
+
+            if not potential_unassigned_neighbors_indices:
+                continue 
+
+            # --- Weighted random selection ---
+            valid_neighbors_for_assignment = []
+            weights = []
+            for n_idx in potential_unassigned_neighbors_indices:
+                neighbor_plate_ids = [self.vertices[nn_idx].plate_id for nn_idx in self._find_vertex_neighbors(n_idx) if self.vertices[nn_idx].plate_id != -1]
+                opposite_type_count = 0
+                for pid in neighbor_plate_ids:
+                    if pid in self.plates and self.plates[pid].type != self.plates[plate_id].type:
+                        opposite_type_count += 1
+
+                n_neighbors = self._find_vertex_neighbors(n_idx)
+
+                count = sum(1 for nn_idx in n_neighbors
+                            if nn_idx != current_assigned_idx and vertices[nn_idx].plate_id == plate_id)
+
+                weight = (opposite_type_count + 1) * count + 1.0 + random.uniform(0, 0.5)
+                weights.append(weight)
+                valid_neighbors_for_assignment.append(n_idx)
+
+            if not valid_neighbors_for_assignment:
+                continue
+
+            # --- Select one neighbor based on weights ---
+            selected_neighbor_idx = -1
+            weights = np.array(weights, dtype=float)
+            total_weight = weights.sum()
+
+            if total_weight > 1e-9 and len(valid_neighbors_for_assignment) > 0:
+                try:
+                    weights /= total_weight 
+                    selected_neighbor_idx = np.random.choice(valid_neighbors_for_assignment, p=weights)
+                except ValueError as e:
+                    selected_neighbor_idx = random.choice(valid_neighbors_for_assignment)
+            elif valid_neighbors_for_assignment:
+                    selected_neighbor_idx = random.choice(valid_neighbors_for_assignment)
+            else:
+                    continue
+
+
+            if selected_neighbor_idx == -1:
+                continue 
+
+            with assignment_lock:
+                if selected_neighbor_idx in unassigned:
+                    vertices[selected_neighbor_idx].plate_id = plate_id
+                    my_plate.add_vertex(selected_neighbor_idx)
+                    unassigned.remove(selected_neighbor_idx)
+
+    def _assign_tectonic_plates(self, parallel_threshold_percent=10.0, max_iterations=100):
+        num_vertices = len(self.vertices)
+        print("Initializing plate assignment...")
+
+        # --- Initialize Shared State ---
+        plate_id_array = multiprocessing.Array(ctypes.c_int, num_vertices)
+        for i in range(num_vertices):
+            plate_id_array[i] = -1 
+
+        unassigned = set(range(num_vertices))
+        assignment_lock = multiprocessing.Lock()
+        manager = multiprocessing.Manager()
+        results_queue = manager.Queue()
+        self.plates = {plate_id: Plate(plate_id) for plate_id in range(self.platecount)}
+
+        # --- Assign Starting Points ---
+        plate_starts = np.random.choice(list(unassigned), size=self.platecount, replace=False)
+        with assignment_lock:
+            for plate_id, start_idx in enumerate(plate_starts):
+                if start_idx in unassigned:
+                    plate_id_array[start_idx] = plate_id
+                    self.plates[plate_id].add_vertex(start_idx, self.vertices)
+                    unassigned.remove(start_idx)
+
+        print(f"Assigned {self.platecount} starting points. Remaining unassigned: {len(unassigned)}")
+
+        # --- Iterative Multi-Processing Growth ---
+        iteration = 0
+        parallel_threshold_count = int(num_vertices * (parallel_threshold_percent / 100.0))
+
+        neighbor_getter = self._find_vertex_neighbors
+
+        while len(unassigned) > parallel_threshold_count and iteration < max_iterations:
+            iteration += 1
+            unassigned_count_start_iter = len(unassigned)
+
+            # 1. Identify Frontier
+            plate_frontiers = {plate_id: [] for plate_id in range(self.platecount)}
+            current_unassigned_list = list(unassigned)
+
+            plate_ids_vals = plate_id_array.get_obj()
+            for u_idx in current_unassigned_list:
+                if plate_ids_vals[u_idx] != -1:
+                    if u_idx in unassigned: unassigned.remove(u_idx)
+                    continue
+
+                neighbors = self._find_vertex_neighbors(u_idx)
+                for n_idx in neighbors:
+                    assigned_plate_id = plate_ids_vals[n_idx]
+                    if assigned_plate_id != -1:
+                        plate_frontiers[assigned_plate_id].append(n_idx)
+
+            # Deduplicate frontier points per plate
+            work_items = {}
+            active_plate_count = 0
+            total_frontier_size = 0
+            for plate_id, frontier_indices in plate_frontiers.items():
+                unique_indices = list(set(frontier_indices))
+                if unique_indices:
+                    work_items[plate_id] = unique_indices
+                    active_plate_count += 1
+                    total_frontier_size += len(unique_indices)
+
+            if active_plate_count == 0:
+                #print(f"Iteration {iteration}: No active plates found. Stopping parallel phase.")
+                break
+
+            # 2. Start Worker Processes
+            processes = []
+            for plate_id, indices_to_process in work_items.items():
+                if indices_to_process:
+                    p = multiprocessing.Process(
+                        target=plate_grow_worker_process,
+                        args=(
+                            plate_id,
+                            indices_to_process,
+                            plate_id_array,
+                            results_queue,
+                            assignment_lock,
+                            neighbor_getter
+                        )
+                    )
+                    processes.append(p)
+                    p.start()
+
+            # 3. Wait for Processes to finish & Collect Results
+            for p in processes:
+                p.join()
+
+            assigned_in_iter = 0
+            while not results_queue.empty():
+                try:
+                    res_plate_id, assigned_indices = results_queue.get_nowait()
+                    newly_assigned_count = 0
+                    for v_idx in assigned_indices:
+                        if v_idx in unassigned:
+                            unassigned.remove(v_idx)
+                            self.plates[res_plate_id].add_vertex(v_idx, self.vertices)
+                            newly_assigned_count += 1
+                    assigned_in_iter += newly_assigned_count
+                except queue.Empty:
+                    break
+                except Exception as e:
+                    print(f"Error processing results queue: {e}")
+
+            unassigned_count_end_iter = len(unassigned)
+            print(f"Iteration {iteration}: Finished | Assigned in iter: {assigned_in_iter} | Remaining Unassigned: {unassigned_count_end_iter}")
+
+            if assigned_in_iter == 0 and unassigned_count_start_iter > 0:
+                print(f"Iteration {iteration}: Stalled. Stopping parallel phase.")
+                break
+
+        print(f"\nParallel growth phase finished after {iteration} iterations.")
+        print(f"Remaining unassigned vertices (local set): {len(unassigned)}")
+
+        # --- Sync vertex objects with final plate_id_array state ---
+        final_plate_ids = plate_id_array.get_obj()
+        for i, v in enumerate(self.vertices):
+            v.plate_id = final_plate_ids[i]
+
+        # --- Fallback Assignment ---
+        remaining_indices_final = [i for i, pid in enumerate(final_plate_ids) if pid == -1]
+        if remaining_indices_final:
+            print(f'Passing {len(remaining_indices_final)} remaining vertices to sequential fallback.')
+            self._assign_remaining_vertices_safe(remaining_indices_final)
+        else:
+            print("All vertices assigned during parallel phase.")
+
+        # --- Handle Non-Contiguous Vertices ---
+        self._fix_non_contiguous_vertices()
+
+    def _fix_non_contiguous_vertices(self, min_plate_size=5, minor_plate_ratio=0.2):
+        min_plate_size *= min_plate_size * self.subdivisions
+        """
+        Identify and handle non-contiguous vertices, potentially creating minor plates.
+        
+        Args:
+            min_plate_size: Minimum number of vertices to consider creating a new minor plate
+            minor_plate_ratio: Ratio of main plate size to consider creating a minor plate
+        """
+        print("Checking for non-contiguous vertices...")
+        
+        # First pass: Identify all contiguous regions in all plates
+        all_regions = []
+        plate_regions = {}  # {plate_id: [region1, region2, ...]}
+        
+        for plate_id, plate in self.plates.items():
+            if not plate.vertices:
+                continue
+                
+            regions = self._find_all_contiguous_regions(plate_id)
+            plate_regions[plate_id] = regions
+            all_regions.extend([(plate_id, region) for region in regions])
+        
+        # Second pass: Process regions and potentially create minor plates
+        new_plates = {}
+        next_plate_id = max(self.plates.keys()) + 1 if self.plates else 0
+        
+        for plate_id, regions in plate_regions.items():
+            if len(regions) <= 1:
+                continue  # Only one region - nothing to fix
+                
+            # Sort regions by size (descending)
+            regions.sort(key=lambda r: len(r), reverse=True)
+            main_region = regions[0]
+            main_region_size = len(main_region)
+            
+            for region in regions[1:]:
+                region_size = len(region)
+                
+                # Decision: Merge to neighbor or create new minor plate?
+                if (region_size >= min_plate_size and 
+                    region_size >= main_region_size * minor_plate_ratio):
+                    # Significant region - make it a new minor plate
+                    new_plate_id = next_plate_id
+                    next_plate_id += 1
+                    
+                    # Determine plate type (same as parent or opposite)
+                    parent_type = self.plates[plate_id].type
+                    if random.random() < 0.7:  # 70% chance same type
+                        new_type = parent_type
+                    else:
+                        new_type = 1 - parent_type
+                    
+                    # Create new minor plate
+                    new_plate = Plate(new_plate_id)
+                    new_plate.type = new_type
+                    new_plate.is_minor = True
+                    
+                    # Assign vertices
+                    for v_idx in region:
+                        self.vertices[v_idx].plate_id = new_plate_id
+                        new_plate.add_vertex(v_idx, self.vertices)
+                        self.plates[plate_id].vertices.discard(v_idx)
+                    
+                    new_plates[new_plate_id] = new_plate
+                    print(f"Created minor plate {new_plate_id} (type {'continental' if new_type == PLATE_TYPE_CONTINENTAL else 'oceanic'}) with {region_size} vertices")
+                    
+                else:
+                    # Small region - merge to neighboring plate
+                    neighbor_plate = self._find_best_neighbor_plate(region)
+                    if neighbor_plate is not None and neighbor_plate != plate_id:
+                        # Merge to neighbor
+                        for v_idx in region:
+                            self.vertices[v_idx].plate_id = neighbor_plate
+                            self.plates[neighbor_plate].add_vertex(v_idx, self.vertices)
+                            self.plates[plate_id].vertices.discard(v_idx)
+                        #print(f"Merged {len(region)} vertices from plate {plate_id} to plate {neighbor_plate}")
+                    else:
+                        # No better neighbor found, leave with original plate
+                        pass
+        
+        # Add any new minor plates to main plates dictionary
+        self.plates.update(new_plates)
+        
+        # Update plate count if we created new plates
+        if new_plates:
+            self.platecount = len(self.plates)
+            print(f"Total plates now: {self.platecount} ({len(new_plates)} new minor plates)")
+
+    def _find_all_contiguous_regions(self, plate_id):
+        """
+        Find all contiguous regions in a plate using BFS.
+        Returns a list of sets, each containing vertex indices for a region.
+        """
+        visited = set()
+        regions = []
+        plate_vertices = self.plates[plate_id].vertices.copy()
+        
+        while plate_vertices:
+            start_idx = plate_vertices.pop()
+            if start_idx in visited:
+                continue
+                
+            # Start new region
+            queue = deque([start_idx])
+            current_region = set()
+            
+            while queue:
+                v_idx = queue.popleft()
+                if v_idx in visited:
+                    continue
+                    
+                visited.add(v_idx)
+                current_region.add(v_idx)
+                
+                neighbors = self._find_vertex_neighbors(v_idx)
+                for n_idx in neighbors:
+                    if self.vertices[n_idx].plate_id == plate_id and n_idx not in visited:
+                        queue.append(n_idx)
+            
+            regions.append(current_region)
+            # Remove found vertices from working set
+            plate_vertices -= current_region
+        
+        return regions
+
+    def _find_best_neighbor_plate(self, region_vertices):
+        """
+        Find the best neighboring plate for a region based on:
+        1. Most common neighboring plate
+        2. Plate type compatibility
+        3. Random choice if ties
+        """
+        neighbor_counts = {}
+        type_matches = {}
+        
+        for v_idx in region_vertices:
+            neighbors = self._find_vertex_neighbors(v_idx)
+            for n_idx in neighbors:
+                n_plate = self.vertices[n_idx].plate_id
+                if n_plate != -1 and n_plate != self.vertices[v_idx].plate_id:
+                    neighbor_counts[n_plate] = neighbor_counts.get(n_plate, 0) + 1
+                    
+                    # Check type compatibility
+                    if n_plate in self.plates:
+                        if self.plates[n_plate].type == self.plates[self.vertices[v_idx].plate_id].type:
+                            type_matches[n_plate] = type_matches.get(n_plate, 0) + 1
+        
+        if not neighbor_counts:
+            return None
+            
+        # Find plates with max neighbor count
+        max_count = max(neighbor_counts.values())
+        candidates = [p for p, cnt in neighbor_counts.items() if cnt == max_count]
+        
+        if len(candidates) == 1:
+            return candidates[0]
+            
+        # Break ties by type matches
+        if type_matches:
+            max_type_matches = max(type_matches.get(p, 0) for p in candidates)
+            candidates = [p for p in candidates if type_matches.get(p, 0) == max_type_matches]
+            if len(candidates) == 1:
+                return candidates[0]
+        
+        # Still tied - random choice
+        return random.choice(candidates)
+    
+    def _find_largest_contiguous_region(self, plate_id):
+        """
+        Find the largest contiguous region of vertices in a plate using BFS.
+        Returns a set of vertex indices.
+        """
+        visited = set()
+        largest_region = set()
+        plate_vertices = self.plates[plate_id].vertices.copy()
+
+        while plate_vertices:
+            start_idx = plate_vertices.pop()
+            if start_idx in visited:
+                continue
+
+            queue = deque([start_idx])
+            current_region = set()
+
+            while queue:
+                v_idx = queue.popleft()
+                if v_idx in visited:
+                    continue
+
+                visited.add(v_idx)
+                current_region.add(v_idx)
+
+                neighbors = self._find_vertex_neighbors(v_idx)
+                for n_idx in neighbors:
+                    if self.vertices[n_idx].plate_id == plate_id and n_idx not in visited:
+                        queue.append(n_idx)
+
+            if len(current_region) > len(largest_region):
+                largest_region = current_region
+
+        return largest_region
+    
+    def _assign_remaining_vertices_safe(self, remaining_unassigned_indices):
+        """
+        Assign remaining unassigned vertices sequentially (BFS from orphan).
+        Operates on the provided list and modifies self.vertices/self.plates.
+        Relies on vertex.plate_id, not the global `unassigned` set.
+        """
+        print(f"Assigning {len(remaining_unassigned_indices)} remaining vertices sequentially using BFS...")
+        assigned_count_in_fallback = 0
+        still_unassigned_after_bfs = []
+        processed_indices = set() # Track which of the input list we've handled
+
+        # Make multiple passes if necessary, as assigning one orphan might
+        # make a previously isolated orphan reachable.
+        pass_num = 0
+        indices_to_process = list(remaining_unassigned_indices)
+
+        while indices_to_process:
+             pass_num += 1
+             print(f"Fallback Pass {pass_num}: Processing {len(indices_to_process)} indices...")
+             next_indices_to_process = []
+             assigned_in_pass = 0
+
+             queue = deque()
+             visited_bfs = set()
+
+             for v_idx in indices_to_process:
+                 # Check if already processed or assigned by another orphan's BFS in this pass
+                 if v_idx in processed_indices or self.vertices[v_idx].plate_id != -1:
+                      continue
+
+                 processed_indices.add(v_idx) # Mark as processed for this fallback run
+
+                 # Start BFS from this orphan
+                 queue.clear()
+                 visited_bfs.clear()
+                 queue.append(v_idx)
+                 visited_bfs.add(v_idx)
+                 found_plate = -1
+                 closest_assigned_neighbor_idx = -1
+
+                 while queue:
+                      current_bfs = queue.popleft()
+                      neighbors = self._find_vertex_neighbors(current_bfs)
+
+                      # Check neighbors first for an assigned plate
+                      for n_idx in neighbors:
+                           neighbor_plate = self.vertices[n_idx].plate_id
+                           if neighbor_plate != -1:
+                                found_plate = neighbor_plate
+                                closest_assigned_neighbor_idx = n_idx # Record who we found it from
+                                # print(f"Orphan {v_idx} found plate {found_plate} via neighbor {n_idx}")
+                                break # Found the nearest plate
+
+                      if found_plate != -1:
+                           break # Exit BFS loop for this orphan
+
+                      # If no assigned neighbor found yet, expand BFS to unassigned neighbors
+                      for n_idx in neighbors:
+                           if n_idx not in visited_bfs and self.vertices[n_idx].plate_id == -1:
+                                visited_bfs.add(n_idx)
+                                queue.append(n_idx)
+
+                 # Assign the original orphan v_idx if a plate was found
+                 if found_plate != -1:
+                      self.vertices[v_idx].plate_id = found_plate
+                      if found_plate in self.plates:
+                           self.plates[found_plate].add_vertex(v_idx, self.vertices)
+                      else:
+                           print(f"Warning: Found plate {found_plate} for orphan {v_idx} but plate not in self.plates dict!")
+                      assigned_count_in_fallback += 1
+                      assigned_in_pass += 1
+                 else:
+                      # BFS completed without finding an assigned neighbor this pass
+                      next_indices_to_process.append(v_idx)
+                      # print(f"Vertex {v_idx} remains unassigned after BFS pass {pass_num}.")
+
+             print(f"Fallback Pass {pass_num}: Assigned {assigned_in_pass} vertices.")
+             if not next_indices_to_process:
+                 print(f"Fallback Pass {pass_num}: No remaining unassigned after BFS.")
+                 break # All processed or assigned
+             if not assigned_in_pass and next_indices_to_process:
+                 # If a pass assigned nothing but vertices remain, they are truly isolated
+                 print(f"Fallback Pass {pass_num}: Stalled. Moving to random assignment for remaining.")
+                 still_unassigned_after_bfs = next_indices_to_process
+                 break
+
+             indices_to_process = next_indices_to_process # Prepare for next pass
+
+             if pass_num > 10: # Safety break for infinite loops
+                 print("Warning: Exceeded fallback pass limit.")
+                 still_unassigned_after_bfs = indices_to_process
+                 break
+
+
+        # Force-assign any vertices that are still unassigned (truly isolated components)
+        if still_unassigned_after_bfs:
+             print(f"Warning: {len(still_unassigned_after_bfs)} vertices remain unassigned after BFS. Force assigning randomly.")
+             available_plate_ids = list(self.plates.keys())
+             if not available_plate_ids:
+                  print("Error: No plates available to assign remaining vertices!")
+             else:
+                  assigned_randomly = 0
+                  for v_idx in still_unassigned_after_bfs:
+                      # Double check it wasn't assigned somehow
+                      if self.vertices[v_idx].plate_id == -1:
+                           chosen_plate_id = random.choice(available_plate_ids)
+                           self.vertices[v_idx].plate_id = chosen_plate_id
+                           self.plates[chosen_plate_id].add_vertex(v_idx, self.vertices)
+                           assigned_count_in_fallback += 1
+                           assigned_randomly += 1
+                  print(f"Force assigned {assigned_randomly} vertices randomly.")
+
+
+        print(f"Fallback phase finished. Total vertices assigned in fallback: {assigned_count_in_fallback}")
+
+    def _assign_base_elevations(self):
+        for plate in self.plates.values():
+            for v_idx in plate.vertices:
+                variation = np.random.uniform(-0.1, 0.1)
+                self.vertices[v_idx].elevation = plate.base_elevation + (variation * plate.base_elevation)
+
+    def _calculate_boundary_elevations(self):
+        """Calculate elevations based on plate interactions at boundaries."""
+        boundary_vertices = []
+        boundary_info = {}  # Store boundary information for each vertex
+        
+        # First pass: identify boundary vertices and calculate interactions
+        for plate in self.plates.values():
+            for v_idx in plate.get_boundary_vertices(self):
+                vertex = self.vertices[v_idx]
+                neighbors = self._find_vertex_neighbors(v_idx)
+                
+                # Find all adjacent plates
+                adjacent_plates = set()
+                for n in neighbors:
+                    adjacent_plates.add(self.vertices[n].plate_id)
+                adjacent_plates.add(vertex.plate_id)
+                
+                # Calculate relative movement vectors
+                movement_vectors = []
+                current_plate = self.plates[vertex.plate_id]
+                
+                for plate_id in adjacent_plates:
+                    if plate_id == vertex.plate_id:
+                        continue
+                        
+                    other_plate = self.plates[plate_id]
+                    rel_velocity = current_plate.velocity - other_plate.velocity
+                    
+                    # Project onto vertex normal
+                    normal = vertex.pos / np.linalg.norm(vertex.pos)
+                    movement = np.dot(rel_velocity, normal)
+                    movement_vectors.append(movement)
+                
+                boundary_info[v_idx] = {
+                    'movements': movement_vectors,
+                    'adjacent_plates': adjacent_plates,
+                    'plate_type': current_plate.type
+                }
+                boundary_vertices.append(v_idx)
+
+        # Second pass: assign elevations based on boundary interactions
+        for v_idx in boundary_vertices:
+            vertex = self.vertices[v_idx]
+            info = boundary_info[v_idx]
+            movements = info['movements']
+            plate_type = info['plate_type']
+            
+            if not movements:
+                continue
+                
+            avg_movement = np.mean(movements)
+            
+            # Different elevation responses based on plate type interactions
+            if plate_type == PLATE_TYPE_CONTINENTAL:
+                # Continental plates create mountains when colliding
+                elevation = CONTINENTAL_CRUST_THICKNESS + (self.maxheight * (avg_movement + 1)/2)
+            else:
+                # Oceanic plates create trenches or islands
+                if avg_movement > 0:  # Converging
+                    elevation = OCEANIC_CRUST_THICKNESS - (OCEANIC_CRUST_THICKNESS - self.minheight) * avg_movement
+                else:  # Diverging (mid-ocean ridges)
+                    elevation = OCEANIC_CRUST_THICKNESS + (0.5 - OCEANIC_CRUST_THICKNESS) * abs(avg_movement)
+            
+            vertex.elevation = elevation
+        print('boundary effects calculated')
+
+    def _add_variations(self, iterations=5, device=None):
+            """
+            Add natural elevation variations using PyTorch for GPU acceleration.
+            Allows for both increases (hills/peaks) and decreases (valleys).
+            """
+            print("--- Starting PyTorch Elevation Variation (with Valley Formation) ---")
+            start_total_time = time.time()
+
+            if device is None:
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            print(f"Using device: {device}")
+
+            num_vertices = len(self.vertices)
+            if num_vertices == 0:
+                print("No vertices to process.")
+                return
+
+            # --- 1. Data Preparation (CPU -> GPU Tensors) ---
+            print("Preparing data for GPU...")
+            prep_start_time = time.time()
+
+            # Basic vertex data
+            positions = torch.tensor([v.pos for v in self.vertices], dtype=torch.float32, device=device)
+            elevations = torch.tensor([v.elevation for v in self.vertices], dtype=torch.float32, device=device)
+            plate_ids = torch.tensor([v.plate_id for v in self.vertices], dtype=torch.long, device=device)
+
+            # --- Apply initial 5% noise to all elevations ---
+            noise_scale = 0.05  # 5% noise
+            noise = (torch.rand_like(elevations) * 2.0 - 1.0) * noise_scale * (self.maxheight - self.minheight) #elevations
+            elevations += noise
+            
+            # Identify continental vertices
+            is_continental = torch.zeros(num_vertices, dtype=torch.bool, device=device)
+            continental_plate_ids = set()
+            for plate_id, plate in self.plates.items():
+                if plate.type == PLATE_TYPE_CONTINENTAL:
+                    continental_plate_ids.add(plate_id)
+            # Vectorized check for continental plates
+            continental_mask_per_plate = torch.zeros_like(plate_ids, dtype=torch.bool)
+            for p_id in continental_plate_ids:
+                continental_mask_per_plate |= (plate_ids == p_id)
+            is_continental = continental_mask_per_plate
+            continental_indices = torch.where(is_continental)[0]
+            num_continental_vertices = len(continental_indices)
+
+            if num_continental_vertices == 0:
+                print("No continental vertices found. Skipping variation.")
+                return
+
+            # Precompute neighbors
+            neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors(device)
+
+            # Identify high points (peaks)
+            # (Peak identification logic remains largely the same as before)
+            all_peaks_indices = []
+            plate_peak_elevs = {}
+            for plate_id in continental_plate_ids:
+                plate = self.plates[plate_id]
+                if not hasattr(plate, 'vertices') or not plate.vertices: continue # Skip if no vertices attr or empty
+                plate_v_indices_list = list(plate.vertices)
+                if not plate_v_indices_list: continue
+
+                # Filter out invalid indices before using them
+                valid_plate_v_indices = [idx for idx in plate_v_indices_list if 0 <= idx < num_vertices]
+                if not valid_plate_v_indices: continue
+
+                plate_v_indices = torch.tensor(valid_plate_v_indices, dtype=torch.long, device=device)
+
+                # Check if plate_v_indices is empty after filtering
+                if plate_v_indices.numel() == 0: continue
+
+                plate_elevs_tensor = elevations[plate_v_indices]
+                num_peaks = max(1, int(len(valid_plate_v_indices) * 0.05))
+                num_peaks = min(num_peaks, len(valid_plate_v_indices)) # Cannot request more peaks than vertices
+
+                if num_peaks > 0:
+                    _, top_indices_in_plate = torch.topk(plate_elevs_tensor, k=num_peaks)
+                    plate_peaks_indices = plate_v_indices[top_indices_in_plate].tolist() # Use filtered indices tensor
+                    all_peaks_indices.extend(plate_peaks_indices)
+                    if plate_peaks_indices:
+                        plate_peak_elevs[plate_id] = torch.max(elevations[plate_peaks_indices]).item()
+                    else:
+                        plate_peak_elevs[plate_id] = self.maxheight
+                else:
+                    plate_peak_elevs[plate_id] = self.maxheight # Default if no peaks calculated
+
+
+            if not all_peaks_indices:
+                print("Warning: No peaks found on any continental plate.")
+                has_peaks = False
+                peaks_pos = torch.empty((0, 3), dtype=torch.float32, device=device) # Ensure it's defined
+            else:
+                peaks_indices_tensor = torch.tensor(list(set(all_peaks_indices)), dtype=torch.long, device=device)
+                # Final check for valid indices in peaks_indices_tensor
+                valid_peak_indices = peaks_indices_tensor[(peaks_indices_tensor >= 0) & (peaks_indices_tensor < num_vertices)]
+                if len(valid_peak_indices) < len(peaks_indices_tensor):
+                    print(f"Warning: Removed {len(peaks_indices_tensor) - len(valid_peak_indices)} invalid peak indices.")
+                if len(valid_peak_indices) == 0:
+                    print("Warning: All peak indices were invalid.")
+                    has_peaks = False
+                    peaks_pos = torch.empty((0, 3), dtype=torch.float32, device=device)
+                else:
+                    peaks_pos = positions[valid_peak_indices]
+                    # peaks_plate_id = plate_ids[valid_peak_indices] # We don't use this directly later
+                    has_peaks = True
+
+
+            # Map plate_id to its max peak elevation
+            max_peak_elev_map = torch.full_like(elevations, self.maxheight)
+            for i in range(num_vertices):
+                p_id = plate_ids[i].item()
+                if p_id in plate_peak_elevs:
+                    max_peak_elev_map[i] = plate_peak_elevs[p_id]
+
+
+            # Simulation parameters
+            # Use subdivisions parameter if it exists, otherwise default to 1
+            #effective_subdivisions = getattr(self, 'subdivisions', 1) if subdivisions is None else subdivisions
+            
+            total_iterations = self.subdivisions * iterations # Match original logic if subdivisions exist
+
+            elev_range = self.maxheight - self.minheight if self.maxheight > self.minheight else 1.0
+            significant_change_threshold = 0.001 * elev_range
+
+            # --- Tunable Parameters ---
+            peak_force_scale = 0.5    # Weight of the upward push from peaks
+            neighbor_push_scale = 0.1  # Max random factor for pushing towards higher neighbors
+            neighbor_pull_scale = 0.05 # Max random factor for pulling away from slightly lower neighbors
+            slump_scale = 0.15        # Factor for downward force when higher than average neighbor (NEW)
+            noise_scale = 0.3         # Increased weight for random up/down noise
+            damping_factor = 0.5      # Overall damping rate per iteration
+
+            print(f"Data preparation took {time.time() - prep_start_time:.2f}s")
+            print(f"Running {total_iterations} iterations. Min/Max Elev: {self.minheight:.2f}/{self.maxheight:.2f}")
+            print(f"Tunable Factors: Peak={peak_force_scale}, NeighborPush={neighbor_push_scale}, NeighborPull={neighbor_pull_scale}, Slump={slump_scale}, Noise={noise_scale}, Damp={damping_factor}")
+
+
+            # --- 2. Simulation Loop (on GPU) ---
+            for iteration in range(total_iterations):
+                iter_start_time = time.time()
+                #if continental_indices.numel() == 0: break # Exit if no continental vertices left
+
+                # Only process continental vertices
+                current_elev = elevations[continental_indices]
+                current_pos = positions[continental_indices]
+                current_plate_ids = plate_ids[continental_indices]
+
+                # --- Neighbor Calculations ---
+                cont_neighbor_indices = neighbor_indices[continental_indices]
+                cont_neighbor_mask = neighbor_mask[continental_indices]
+
+                # Gather neighbor data using full tensors
+                neighbor_elevs = elevations[cont_neighbor_indices]
+                neighbor_pos = positions[cont_neighbor_indices]
+                neighbor_plate_ids = plate_ids[cont_neighbor_indices]
+
+                # Mask out invalid neighbors and neighbors from different plates
+                same_plate_mask = (neighbor_plate_ids == current_plate_ids.unsqueeze(1))
+                valid_neighbor_mask = cont_neighbor_mask & same_plate_mask
+
+                # Calculate elevation difference and distance for valid neighbors
+                elev_diff = neighbor_elevs - current_elev.unsqueeze(1)
+                dist = torch.norm(current_pos.unsqueeze(1) - neighbor_pos, dim=2)
+                inv_dist = 1.0 / (dist + 0.1) # Add epsilon
+
+                # Calculate original neighbor force components (push/pull)
+                force_from_higher = torch.rand_like(elev_diff) * neighbor_push_scale * elev_diff * inv_dist
+                force_from_lower = -torch.rand_like(elev_diff) * neighbor_pull_scale * inv_dist
+                neighbor_force_contribution = torch.where(
+                    elev_diff > 0,
+                    force_from_higher,
+                    torch.where(
+                        torch.abs(elev_diff) < 0.1 * elev_range, # Condition for small downward push
+                        force_from_lower,
+                        torch.zeros_like(elev_diff)
+                    )
+                )
+                # Apply mask and sum original forces
+                masked_neighbor_force = neighbor_force_contribution * valid_neighbor_mask.float()
+                total_original_neighbor_force = torch.sum(masked_neighbor_force, dim=1)
+
+                # --- NEW: Slumping/Erosion Force based on difference from average ---
+                # Calculate average elevation of *valid* neighbors
+                masked_neighbor_elevs = neighbor_elevs * valid_neighbor_mask.float()
+                num_valid_neighbors = torch.sum(valid_neighbor_mask.float(), dim=1).clamp(min=1) # Avoid div by zero
+                avg_local_elev = torch.sum(masked_neighbor_elevs, dim=1) / num_valid_neighbors
+
+                # Calculate difference: positive if current vertex is higher than average
+                elev_diff_from_avg = current_elev - avg_local_elev
+
+                # Calculate slump force: proportional to how much higher it is, applies downward force
+                # Use relu to only apply slump when elev_diff_from_avg is positive
+                slump_force = -torch.relu(elev_diff_from_avg) * slump_scale * torch.rand_like(current_elev) # Random factor per vertex
+
+                # Combine Neighbor Forces (Original push/pull + Slumping)
+                # Adjust relative weighting if needed, e.g., 0.5 for original, 0.5 for slump
+                total_neighbor_force = (total_original_neighbor_force * 0.7 + slump_force * 0.3)
+
+
+                # --- Peak Force Calculation ---
+                peak_force = torch.zeros_like(current_elev)
+                if has_peaks and peaks_pos.numel() > 0: # Check if peaks_pos is not empty
+                    dist_to_peaks_sq = torch.sum((current_pos.unsqueeze(1) - peaks_pos.unsqueeze(0))**2, dim=2)
+                    min_dist_to_peak_sq, _ = torch.min(dist_to_peaks_sq, dim=1)
+                    min_dist_to_peak = torch.sqrt(min_dist_to_peak_sq + 1e-9)
+
+                    peak_influence = 1.0 / (1.0 + min_dist_to_peak * 5.0)
+
+                    current_max_peak_elev = max_peak_elev_map[continental_indices]
+
+                    # Calculate base peak force (can be negative if point is above peak)
+                    raw_peak_force = (torch.rand_like(current_elev) * 0.2 * # Base random factor
+                                    peak_influence *
+                                    (current_max_peak_elev - current_elev))
+
+                    # Keep the clamp: peaks primarily cause uplift in this model.
+                    # Valleys form from slumping and noise mainly.
+                    peak_force = torch.clamp(raw_peak_force, min=0)
+
+
+                # --- Random Noise ---
+                current_damping = damping_factor * (1.0 - iteration / total_iterations) # Per-iteration damping
+                noise = (torch.rand_like(current_elev) * 2.0 - 1.0) # Noise in range [-1, 1]
+                noise_force = noise * noise_scale * (1.0 - iteration / total_iterations) # Noise decreases over time
+
+                # --- Combine Forces ---
+                # Adjust weights as needed based on experimentation
+                total_force = (peak_force * peak_force_scale +
+                            total_neighbor_force * (1.0 - peak_force_scale - noise_scale) + # Neighbor force takes remaining weight
+                            noise_force * noise_scale) # Apply noise scale here
+                total_force *= current_damping # Apply damping to the combined force
+
+                # --- Update Elevation ---
+                new_elev = current_elev + total_force
+                new_elev_clamped = torch.clamp(new_elev, min=self.minheight, max=self.maxheight)
+
+                changes_mask = torch.abs(new_elev_clamped - current_elev) > significant_change_threshold
+                num_changes = torch.sum(changes_mask).item()
+
+                elevations[continental_indices] = new_elev_clamped
+
+                print(f"\rIteration {iteration + 1}/{total_iterations} | Changes: {num_changes} | Time: {time.time() - iter_start_time:.3f}s | Elev Range: {torch.min(elevations[continental_indices]):.2f}-{torch.max(elevations[continental_indices]):.2f}", end="")
+
+            print(f"\nCompleted {total_iterations} PyTorch variation iterations.")
+
+            # --- 3. Data Synchronization (GPU -> CPU) ---
+            print("Synchronizing data back to CPU objects...")
+            sync_start_time = time.time()
+
+            final_elevations_cpu = elevations.cpu().numpy()
+            for i in range(num_vertices):
+                # Check if vertex index is valid before assignment
+                if 0 <= i < len(self.vertices):
+                    self.vertices[i].elevation = final_elevations_cpu[i]
+                else:
+                    print(f"Warning: Skipping synchronization for invalid vertex index {i}")
+
+
+            print(f"Data synchronization took {time.time() - sync_start_time:.2f}s")
+            print(f"--- PyTorch Elevation Variation Finished (Total Time: {time.time() - start_total_time:.2f}s) ---")
+
+    def _smooth_elevations(self, iterations=2):
+        """Smooth elevation values with plate-aware smoothing."""
+        for _ in range(iterations):
+            new_elevations = []
+            for i, vertex in enumerate(self.vertices):
+                neighbors = self._find_vertex_neighbors(i)
+                if not neighbors:
+                    new_elevations.append(vertex.elevation)
+                    continue
+                    
+                # Get neighbors from the same plate
+                same_plate_neighbors = [n for n in neighbors 
+                                       if self.vertices[n].plate_id == vertex.plate_id]
+                
+                # Use all neighbors if no same-plate neighbors found
+                smoothing_neighbors = same_plate_neighbors if same_plate_neighbors else neighbors
+                
+                neighbor_elevations = [self.vertices[n].elevation for n in smoothing_neighbors]
+                avg = np.mean([vertex.elevation] + neighbor_elevations)
+                new_elevations.append(avg)
+                
+            for i, elevation in enumerate(new_elevations):
+                self.vertices[i].elevation = elevation
+        print('smoothed elevations')
+
+    #### fluids
+
+    def simulate_water(self, iterations: int = 5, device: str = 'cuda'):
+        """Simulate water distribution using PyTorch for better performance.
+        
+        Args:
+            iterations: Number of simulation steps
+            device: 'cuda' or 'cpu' for torch operations
+        """
+        print("Starting water simulation...")
+        
+        # Convert parameters to tensors only when needed
+        sea_level = torch.tensor(self.sea_level, device=device)
+        rainfall_rate = torch.tensor(self.rainfall_rate, device=device)
+        evaporation_rate = torch.tensor(self.evaporation_rate, device=device)
+        max_water_flow = torch.tensor(self.max_water_flow, device=device)
+        min_river_flow = torch.tensor(self.min_river_flow, device=device)
+        min_lake_volume = torch.tensor(self.min_lake_volume, device=device)
+        
+        # Rest of the implementation remains the same, using these tensor versions
+        num_vertices = len(self.vertices)
+        if num_vertices == 0:
+            return
+            
+        # Get neighbor information
+        neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors(device)
+        
+        # Initialize water tensors
+        elevation = torch.tensor([v.elevation for v in self.vertices], device=device)
+        water_volume = torch.zeros(num_vertices, device=device)
+        water_depth = torch.zeros(num_vertices, device=device, dtype=torch.double)
+        
+        # Precompute face areas for each vertex
+        vertex_areas = self._compute_vertex_areas()
+        
+        print("Initializing water distribution...")
+        # Initial water distribution - oceans get water up to sea level
+        ocean_mask = elevation <= sea_level
+        sea_level = sea_level.double()
+        print(f'sealevel: {sea_level.type()}')
+        print(f'oceanmask: {elevation[ocean_mask].type()}')
+        water_depth[ocean_mask] = torch.maximum(
+            sea_level - elevation[ocean_mask], 
+            torch.tensor(0.0, device=device)
+        ).double()
+        water_depth = water_depth.cpu()
+        water_volume = water_depth * self.vertex_areas
+        
+        # Main simulation loop
+        print("Running hydrological cycle...")
+        for iter in range(iterations):
+            print(f"Iteration {iter + 1}/{iterations}")
+            new_water = torch.zeros_like(water_volume)
+            
+            # 1. Precipitation (rainfall on land)
+            land_mask = elevation > sea_level
+            rainfall = torch.where(
+                land_mask,
+                torch.rand(num_vertices, device=device) * rainfall_rate * vertex_areas,
+                torch.tensor(0.0, device=device)
+            )
+            new_water += rainfall
+            
+            # 2. Evaporation (from all water surfaces)
+            evaporation = torch.minimum(
+                water_volume,
+                evaporation_rate * vertex_areas
+            )
+            new_water -= evaporation
+            
+            # 3. Flow between vertices
+            current_water_depth = water_volume / vertex_areas
+            effective_elevation = elevation + current_water_depth
+            
+            # Find downhill flow for each vertex
+            for i in range(num_vertices):
+                if not land_mask[i]:
+                    continue  # Skip ocean cells
+                    
+                neighbors = neighbor_indices[i][neighbor_mask[i]]
+                if len(neighbors) == 0:
+                    continue
+                    
+                # Find lowest neighbor
+                neighbor_eff_elev = effective_elevation[neighbors]
+                min_elev_idx = torch.argmin(neighbor_eff_elev)
+                lowest_neighbor = neighbors[min_elev_idx]
+                
+                if effective_elevation[lowest_neighbor] >= effective_elevation[i]:
+                    continue  # No downhill flow
+                    
+                # Calculate flow amount based on gradient
+                elev_diff = effective_elevation[i] - effective_elevation[lowest_neighbor]
+                gradient = elev_diff / torch.norm(
+                    torch.tensor(self.vertices[i].pos, device=device) - 
+                    torch.tensor(self.vertices[lowest_neighbor].pos, device=device)
+                )
+                
+                max_possible_flow = min(
+                    water_volume[i] * 0.2,  # Max 20% of current water can flow
+                    max_water_flow * vertex_areas[i]  # Absolute max flow
+                )
+                
+                flow_amount = max_possible_flow * torch.sigmoid(
+                    torch.tensor(5.0, device=device) * gradient
+                )
+                
+                # Adjust flow based on areas
+                area_ratio = vertex_areas[i] / vertex_areas[lowest_neighbor]
+                adjusted_flow = flow_amount * area_ratio
+                
+                new_water[i] -= flow_amount
+                new_water[lowest_neighbor] += adjusted_flow
+            
+            # Update water volumes
+            water_volume = torch.maximum(water_volume + new_water, torch.tensor(0.0, device=device))
+        
+        # Update vertex data
+        print("Updating vertex data...")
+        water_depth = water_volume / vertex_areas
+        water_depth_cpu = water_depth.cpu().numpy()
+        water_volume_cpu = water_volume.cpu().numpy()
+        
+        for i in range(num_vertices):
+            self.vertices[i].water_volume = float(water_volume_cpu[i])
+            self.vertices[i].water_depth = float(water_depth_cpu[i])
+        
+        # Generate rivers and lakes
+        print("Generating water features...")
+        self._generate_rivers(device)
+        self._identify_lakes(device)
+        
+        print("Water simulation complete")
+
+    def _generate_rivers(self, min_flow=1.0):
+        """Identify and mark rivers based on accumulated water flow.
+        min_flow: minimum flow rate in TL/iteration to be considered a river."""
+        print("Generating rivers...")
+        
+        # Reset river flags
+        for vertex in self.vertices:
+            vertex.is_river = False
+        
+        # Track flow accumulation for each vertex
+        flow_accumulation = [0.0] * len(self.vertices)
+        
+        # Calculate flow accumulation (simplified approach)
+        print('flow calculation')
+        for i, vertex in enumerate(self.vertices):
+            if vertex.elevation > self.sea_level:
+                neighbors = self._find_vertex_neighbors(i)
+                if neighbors:
+                    # Count how many cells flow into this one
+                    for neighbor in neighbors:
+                        if self.vertices[neighbor].elevation > vertex.elevation:
+                            # Neighbor is higher and would flow to this vertex
+                            flow_accumulation[i] += self.vertices[neighbor].water
+        
+        # Mark rivers based on flow accumulation
+        print('marking rivers')
+        for i, flow in enumerate(flow_accumulation):
+            if flow >= min_flow:
+                self.vertices[i].is_river = True
+                # Scale river size based on flow (could be used for rendering)
+                self.vertices[i].river_size = min(3, int(flow / min_flow))
+        
+        # Connect river segments to form continuous rivers
+        print('connecting segments')
+        self._connect_river_segments()
+        
+        print(f"Generated {sum(1 for v in self.vertices if v.is_river)} river segments")
+
+    def _connect_river_segments(self):
+        """Ensure rivers form continuous paths from source to ocean/lake."""
+        # This is a simplified approach - more sophisticated methods could be used
+        for i, vertex in enumerate(self.vertices):
+            if vertex.is_river:
+                # Find the downstream path
+                current = i
+                path = [current]
+                while True:
+                    neighbors = self._find_vertex_neighbors(current)
+                    if not neighbors:
+                        break
+                    
+                    # Find the lowest neighbor (natural flow direction)
+                    lowest_neighbor = min(neighbors,
+                                        key=lambda n: self.vertices[n].elevation)
+                    
+                    # Stop if we've reached sea level or a lake
+                    if (self.vertices[lowest_neighbor].elevation <= self.sea_level or
+                        self.vertices[lowest_neighbor].water > 5.0):  # 5 TL threshold for lakes
+                        break
+                    
+                    # If we're going uphill, stop (shouldn't happen)
+                    if self.vertices[lowest_neighbor].elevation >= self.vertices[current].elevation:
+                        break
+                    
+                    # Mark the neighbor as river and continue
+                    self.vertices[lowest_neighbor].is_river = True
+                    self.vertices[lowest_neighbor].river_size = max(
+                        self.vertices[lowest_neighbor].river_size,
+                        self.vertices[current].river_size - 0.5
+                    )
+                    current = lowest_neighbor
+                    path.append(current)
+                    
+                    # Prevent infinite loops
+                    if current in path[:-1]:
+                        break
+
+    def _find_lakes(self, min_size=3.0):
+        """Identify lakes (standing water bodies above sea level).
+        min_size: minimum water volume in TL to be considered a lake."""
+        lakes = []
+        visited = set()
+        
+        for i, vertex in enumerate(self.vertices):
+            if (vertex.elevation > self.sea_level and 
+                vertex.water >= min_size and 
+                i not in visited):
+                
+                # Flood fill to find connected lake cells
+                lake_cells = []
+                queue = [i]
+                while queue:
+                    current = queue.pop()
+                    if current not in visited:
+                        visited.add(current)
+                        lake_cells.append(current)
+                        
+                        # Add unvisited neighbors with sufficient water
+                        neighbors = self._find_vertex_neighbors(current)
+                        for neighbor in neighbors:
+                            if (self.vertices[neighbor].water >= min_size and
+                                neighbor not in visited):
+                                queue.append(neighbor)
+                
+                if len(lake_cells) >= 3:  # Minimum 3 cells to form a lake
+                    total_volume = sum(self.vertices[idx].water for idx in lake_cells)
+                    lakes.append({
+                        'cells': lake_cells,
+                        'volume': total_volume,
+                        'average_depth': total_volume / len(lake_cells)  # Simplified
+                    })
+        
+        return lakes
+
+    #### utility functions
+
+    def _compute_vertex_areas(self) -> torch.Tensor:
+        """Compute vertex areas by distributing adjacent face areas to vertices.
+        Each vertex gets an equal share of each adjacent face's area."""
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_map()
+            
+        # Calculate all face areas
+        self.calculate_all_face_areas()
+        
+        # Initialize vertex areas
+        vertex_areas = np.zeros(len(self.vertices))
+        
+        # Distribute each face's area equally to its vertices
+        for face_idx, face in enumerate(self.faces):
+            face_area = face.calculate_area(self.vertices)
+            num_vertices_in_face = len(face.v_indices)
+            vertex_share = face_area / num_vertices_in_face
+            
+            for v_idx in face.v_indices:
+                vertex_areas[v_idx] = vertex_areas[v_idx] + vertex_share
+                
+        # Handle any vertices with zero area (shouldn't happen with proper meshes)
+        vertex_areas[vertex_areas == 0] = 1.0  # Assign default area
+        return vertex_areas
+
+    def calculate_all_face_areas(self, device='cuda'):
+            
+        areas = batch_calculate_areas(self.faces, self.vertices)
+        
+        # Update the face objects with their areas
+            
+        return areas
+
+    def _get_midpoint_vertex(self, v1_idx, v2_idx, midpoint_cache, next_level_vertices, radius):
+        """
+        Helper: Calculates or retrieves the midpoint vertex between two vertices.
+        Adds the new vertex if it doesn't exist and normalizes it.
+        Returns the index of the vertex in next_level_vertices.
+        """
+        key = tuple(sorted((v1_idx, v2_idx)))
+        if key in midpoint_cache:
+            # Map cached index (relative to additions) back to next_level_vertices index
+            return midpoint_cache[key]
+
+        v1 = self.vertices[v1_idx]
+        v2 = self.vertices[v2_idx]
+        mid_pos = (v1.pos + v2.pos) / 2.0
+        new_v = Vertex(mid_pos[0], mid_pos[1], mid_pos[2])
+        new_v.normalize(radius)
+
+        # Add to the *accumulating* vertex list for the next level
+        new_idx = len(next_level_vertices)
+        next_level_vertices.append(new_v)
+        midpoint_cache[key] = new_idx # Cache the index in the accumulating list
+        return new_idx
+
+    def _get_face_center_vertex(self, face, center_cache, next_level_vertices, radius):
+        """
+        Helper: Calculates or retrieves the center vertex of a face.
+        Adds the new vertex if it doesn't exist and normalizes it.
+        Returns the index of the vertex in next_level_vertices.
+        """
+        key = tuple(sorted(face.v_indices)) # Use sorted indices as cache key
+        if key in center_cache:
+             return center_cache[key]
+
+        # Calculate geometric center
+        center_pos = np.mean([self.vertices[i].pos for i in face.v_indices], axis=0)
+        
+        new_v = Vertex(center_pos[0], center_pos[1], center_pos[2])
+        new_v.normalize(radius)
+
+        # Add to the *accumulating* vertex list for the next level
+        new_idx = len(next_level_vertices)
+        next_level_vertices.append(new_v)
+        center_cache[key] = new_idx # Cache the index in the accumulating list
+        return new_idx
+
+    def _compute_face_centroid(self, v_indices, vertices, radius):
+        face_vertex_positions = np.array([vertices[idx].pos for idx in v_indices], dtype=float)
+        centroid_pos = np.mean(face_vertex_positions, axis=0)
+        norm = np.linalg.norm(centroid_pos)
+        normalized_centroid_pos = centroid_pos * (radius / norm)
+        return Vertex(*normalized_centroid_pos)
+    
+    def _initialize_neighbor_map(self) -> None:
+        if self._neighbor_map_initialized:
+            return
+            
+        print("Initializing neighbor map...")
+        
+        vertex_neighbor_sets = [set() for _ in range(len(self.vertices))]
+        vertex_face_map = [[] for _ in range(len(self.vertices))]
+        face_neighbor_sets = [set() for _ in range(len(self.faces))]
+        edge_face_map = {}
+        for fid, face in enumerate(self.faces):
+            for vid in face.v_indices:
+                vertex_face_map[vid].append(fid)
+
+            for i in range(len(face.v_indices)):
+                v1 = face.v_indices[i]
+                v2 = face.v_indices[(i+1) % len(face.v_indices)]    
+                vertex_neighbor_sets[v1].add(v2)
+                vertex_neighbor_sets[v2].add(v1)
+    
+            # Record edge-face relationships
+            edge = tuple(sorted((v1, v2)))
+            if edge in edge_face_map:
+                # This edge is shared with another face - mark as neighbors
+                other_face = edge_face_map[edge]
+                face_neighbor_sets[fid].add(other_face)
+                face_neighbor_sets[other_face].add(fid)
+            else:
+                edge_face_map[edge] = fid
+
+        for v_idx, neighbors in enumerate(vertex_neighbor_sets):
+            for neighbor_idx in neighbors:
+                dist = np.linalg.norm(self.vertices[v_idx].pos - self.vertices[neighbor_idx].pos)
+                try:
+                    weight = 1.0 / dist
+                except ZeroDivisionError:
+                    weight = 1.0 / (dist + 1e9)
+                self.vertices[v_idx].neighbors[neighbor_idx] = weight
+        
+        self._face_neighbors = [list(s) for s in face_neighbor_sets]
+        self._vertex_face_map = vertex_face_map
+        self._neighbor_map_initialized = True
+        print("Neighbor map initialized")
+
+    def _find_vertex_neighbors(self, vertex_idx):
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_map()
+        return self.vertices[vertex_idx].neighbors
+    
+    def _get_adjacent_faces(self, vertex_idx):
+        """Get all faces adjacent to a vertex"""
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_maps()
+        return [self.faces[i] for i in self._vertex_face_map[vertex_idx]]
+
+    def _get_face_neighbors(self, face_idx):
+        """Get faces that share an edge with the given face"""
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_maps()
+        return [self.faces[i] for i in self._face_neighbors[face_idx]]
+
+    def _build_neighbor_tensors(self, device):
+        """
+        Precomputes neighbor information in a tensor format suitable for PyTorch.
+        (Implementation is the same as before)
+        """
+        num_vertices = len(self.vertices)
+        neighbor_lists = [list(self._find_vertex_neighbors(i)) for i in range(num_vertices)]
+        max_neighbors = max(len(neighbors) for neighbors in neighbor_lists) if neighbor_lists else 0
+        if max_neighbors == 0 and num_vertices > 0 : # Handle case with isolated vertices
+             print("Warning: Some vertices may have no neighbors.")
+             max_neighbors = 1 # Avoid zero-sized tensor dim if possible
+
+        neighbor_indices = torch.full((num_vertices, max_neighbors), 0, # Pad with 0, mask handles it
+                                      dtype=torch.long, device=device)
+        neighbor_mask = torch.zeros((num_vertices, max_neighbors),
+                                    dtype=torch.bool, device=device)
+
+        for i, neighbors in enumerate(neighbor_lists):
+            if neighbors:
+                num_n = len(neighbors)
+                # Ensure indices are within bounds if padding with 0
+                safe_neighbors = [n for n in neighbors if 0 <= n < num_vertices]
+                if len(safe_neighbors) < num_n:
+                    print(f"Warning: Vertex {i} had invalid neighbor indices removed.")
+
+                num_n = len(safe_neighbors) # Update count
+                if num_n > 0:
+                    neighbor_indices[i, :num_n] = torch.tensor(safe_neighbors, dtype=torch.long, device=device)
+                    neighbor_mask[i, :num_n] = True
+
+        return neighbor_indices, neighbor_mask, max_neighbors
+  
+    #### display
+
+    def plot(self, fig=None, ax=None, cmap='terrain', edge_color=None, alpha=1):
+        """Plots the shape with interactive radio toggle for elevation/plate/water visualization."""
+        if fig is None or ax is None:
+            fig = plt.figure(figsize=(10, 8))
+            ax = fig.add_subplot(111, projection='3d')
+        
+        # Create radio button axes
+        rax = plt.axes([0.05, 0.7, 0.15, 0.15])
+        radio = RadioButtons(rax, ('Elevation', 'Plates', 'Water'))
+        
+        # Store data needed for visualization modes
+        plot_data = {
+            'fig': fig,
+            'ax': ax,
+            'cmap': cmap,
+            'edge_color': edge_color,
+            'alpha': alpha,
+            'polygons': [],
+            'face_elevations': [],
+            'face_plates': [],
+            'face_water': [],
+            'cbar_ax': None
+        }
+        
+        # Precompute face data
+        for face in self.faces:
+            face_verts = face.get_vertices_pos(self.vertices)
+            if len(face_verts) >= 3:
+                plot_data['polygons'].append(face_verts)
+                # Elevation data
+                elevs = face.get_vertices_elevation(self.vertices)
+                plot_data['face_elevations'].append(np.mean(elevs))
+                # Plate data
+                plates = [self.vertices[i].plate_id for i in face.v_indices]
+                plot_data['face_plates'].append(max(set(plates), key=plates.count))
+                # Water data
+                water = face.get_vertices_water(self.vertices)
+                plot_data['face_water'].append(np.mean(water))
+        
+        # Initial plot (elevation)
+        collection = self._create_collection(plot_data, mode='elevation')
+        plot_data['collection'] = collection
+        ax.add_collection3d(collection)
+        
+        # Set axes limits
+        all_positions = np.array([v.pos for v in self.vertices])
+        max_val = np.max(np.abs(all_positions)) * 1.1 if len(all_positions) > 0 else 1.1
+        ax.set_xlim([-max_val, max_val])
+        ax.set_ylim([-max_val, max_val])
+        ax.set_zlim([-max_val, max_val])
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.set_aspect('equal')
+        
+        # Add colorbar
+        plot_data['cbar'] = self._add_colorbar(plot_data, ax, mode='elevation')
+        
+        # Radio button callback
+        def on_radio_change(label):
+            # Remove old elements
+            plot_data['collection'].remove()
+            if plot_data['cbar'] is not None:
+                plot_data['cbar'].remove()
+            if plot_data['cbar_ax'] is not None:
+                plot_data['cbar_ax'].remove()
+            
+            new_collection = self._create_collection(plot_data, mode=label.lower())
+            plot_data['collection'] = new_collection
+            plot_data['ax'].add_collection3d(new_collection)
+            
+            # Add new colorbar
+            plot_data['cbar'] = self._add_colorbar(plot_data, ax, mode=label.lower())
+            
+            fig.canvas.draw_idle()
+        
+        radio.on_clicked(on_radio_change)
+        
+        return fig, ax, radio
+
+    def _create_collection(self, plot_data, mode='elevation'):
+        """Create the appropriate Poly3DCollection based on visualization mode."""
+        if mode == 'elevation':
+            norm = plt.Normalize(
+                vmin=min(plot_data['face_elevations']),
+                vmax=max(plot_data['face_elevations'])
+            )
+            cmap = plt.get_cmap(plot_data['cmap'])
+            face_colors = cmap(norm(plot_data['face_elevations']))
+        elif mode == 'plates':
+            unique_plates = list(set(plot_data['face_plates']))
+            plate_cmap = plt.get_cmap('tab20')
+            norm = plt.Normalize(vmin=min(unique_plates), vmax=len(unique_plates))
+            #face_colors = plate_cmap(norm([unique_plates.index(p) for p in plot_data['face_plates']]))
+            face_colors = plate_cmap(norm(plot_data['face_plates']))
+        else:
+            water_cmap = plt.get_cmap('Blues')
+            norm = plt.Normalize(
+                vmin=0,
+                vmax=max(plot_data['face_water'])
+            )
+            face_colors = water_cmap(norm(plot_data['face_water']))
+        
+        return Poly3DCollection(
+            plot_data['polygons'],
+            facecolors=face_colors,
+            linewidths=0.3 if plot_data['edge_color'] else 0,
+            edgecolors=plot_data['edge_color'],
+            alpha=plot_data['alpha']
+        )
+    
+    def _add_colorbar(self, plot_data, ax, mode='elevation'):
+        fig = plot_data['fig']
+        cbar_ax = fig.add_axes([0.85, 0.15, 0.03, 0.7])
+        if mode == 'elevation':
+            norm = plt.Normalize(
+                vmin=min(plot_data['face_elevations']),
+                vmax=max(plot_data['face_elevations'])
+            )
+            cmap = plt.get_cmap(plot_data['cmap'])
+            mappable = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+            mappable.set_array(plot_data['face_elevations'])
+            cbar = fig.colorbar(mappable, cax=cbar_ax, label='Elevation')
+        elif mode == 'plates':
+            unique_plates = sorted(list(set(plot_data['face_plates'])))
+            plate_cmap = plt.get_cmap('tab20')
+            norm = plt.Normalize(vmin=0, vmax=len(unique_plates))
+            mappable = plt.cm.ScalarMappable(norm=norm, cmap=plate_cmap)
+            #mappable.set_array([unique_plates.index(p) for p in plot_data['face_plates']])
+            mappable.set_array(plot_data['face_plates'])
+            cbar = fig.colorbar(mappable, cax=cbar_ax, label='Plate ID')
+            cbar.set_ticks(range(len(unique_plates)))
+            cbar.set_ticklabels(unique_plates)
+        else:  # water
+            water_cmap = plt.get_cmap('Blues')
+            norm = plt.Normalize(
+                vmin=0,
+                vmax=max(plot_data['face_water'])
+            )
+            mappable = plt.cm.ScalarMappable(norm=norm, cmap=water_cmap)
+            mappable.set_array(plot_data['face_water'])
+            cbar = fig.colorbar(mappable, cax=cbar_ax, label='Water (Teraliters)')
+        
+        return cbar
+
+    def export_to_obj(self, filename, include_attributes=True):
+        """Export the world to an OBJ file format.
+        
+        Args:
+            filename (str): Path to save the OBJ file
+            include_attributes (bool): Whether to include plate/elevation/water data as vertex colors
+        """
+        with open(filename, 'w') as f:
+            # Write header
+            f.write("# Generated by World Simulator\n")
+            f.write(f"# Vertices: {len(self.vertices)}\n")
+            f.write(f"# Faces: {len(self.faces)}\n")
+            f.write(f"# Plates: {len(self.plates)}\n\n")
+            
+            # Write vertices
+            for v in self.vertices:
+                if include_attributes:
+                    # Normalize elevation to 0-1 range for vertex color
+                    normalized_elev = (v.elevation - self.minheight) / (self.maxheight - self.minheight)
+                    # Add plate ID as another color channel (scaled 0-1)
+                    plate_color = (v.plate_id % 20) / 20.0  # Using modulo to keep within reasonable range
+                    # Add water as third color channel
+                    water_color = min(1.0, v.water_depth / 10.0)  # Scale water depth
+                    f.write(f"v {v.pos[0]:.6f} {v.pos[1]:.6f} {v.pos[2]:.6f} {normalized_elev:.3f} {plate_color:.3f} {water_color:.3f}\n")
+                else:
+                    f.write(f"v {v.pos[0]:.6f} {v.pos[1]:.6f} {v.pos[2]:.6f}\n")
+            
+            # Write vertex normals (calculated from adjacent faces)
+            self._calculate_vertex_normals()
+            for v in self.vertices:
+                f.write(f"vn {v.normal[0]:.6f} {v.normal[1]:.6f} {v.normal[2]:.6f}\n")
+            
+            # Write faces (1-based indexing)
+            for face in self.faces:
+                # OBJ format uses 1-based indices, and can include normals
+                face_str = "f"
+                for v_idx in face.v_indices:
+                    face_str += f" {v_idx+1}//{v_idx+1}"  # vertex index//normal index
+                f.write(face_str + "\n")
+            
+            # Write material information if including attributes
+            if include_attributes:
+                f.write("\nmtllib world_materials.mtl\n")
+                f.write("usemtl world_material\n")
+
+        # Create companion MTL file if including attributes
+        if include_attributes:
+            self._write_mtl_file(filename.replace('.obj', '.mtl'))
+
+    def _calculate_vertex_normals(self):
+        """Calculate vertex normals by averaging adjacent face normals."""
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_map()
+        
+        # Reset all normals
+        for v in self.vertices:
+            v.normal = np.zeros(3)
+        
+        # Calculate face normals and accumulate to vertices
+        for face in self.faces:
+            if len(face.v_indices) >= 3:
+                # Get three vertices to calculate face normal
+                v0 = self.vertices[face.v_indices[0]].pos
+                v1 = self.vertices[face.v_indices[1]].pos
+                v2 = self.vertices[face.v_indices[2]].pos
+                
+                # Calculate face normal
+                edge1 = v1 - v0
+                edge2 = v2 - v0
+                normal = np.cross(edge1, edge2)
+                normal_length = np.linalg.norm(normal)
+                if normal_length > 0:
+                    normal /= normal_length
+                
+                # Accumulate to each vertex
+                for v_idx in face.v_indices:
+                    self.vertices[v_idx].normal += normal
+        
+        # Normalize all vertex normals
+        for v in self.vertices:
+            normal_length = np.linalg.norm(v.normal)
+            if normal_length > 0:
+                v.normal /= normal_length
+
+    def _write_mtl_file(self, mtl_filename):
+        """Write a companion material file that uses vertex colors."""
+        with open(mtl_filename, 'w') as f:
+            f.write("# Material file for world export\n")
+            f.write("newmtl world_material\n")
+            f.write("Ka 1.0 1.0 1.0\n")  # Ambient color
+            f.write("Kd 1.0 1.0 1.0\n")  # Diffuse color
+            f.write("Ks 0.2 0.2 0.2\n")  # Specular color
+            f.write("Ns 10.0\n")         # Specular exponent
+            f.write("illum 2\n")         # Illumination model
+            f.write("d 1.0\n")           # Dissolve (opacity)
+            f.write("map_Kd vertex_color.png\n")  # Use vertex colors
