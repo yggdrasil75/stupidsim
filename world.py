@@ -32,6 +32,8 @@ class World:
         self.max_water_flow: float = 0.5  # Max 50cm flow per iteration
         self.min_river_flow: float = 1.0  # Minimum flow to be considered a river
         self.min_lake_volume: float = 3.0  # Minimum water volume to form a lake
+        self.vertex_areas = []
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def add_vertex(self, vertex):
         self.vertices.append(vertex)
@@ -751,7 +753,7 @@ class World:
             vertex.elevation = elevation
         print('boundary effects calculated')
 
-    def _add_variations(self, iterations=5, device=None):
+    def _add_variations(self, iterations=5):
             """
             Add natural elevation variations using PyTorch for GPU acceleration.
             Allows for both increases (hills/peaks) and decreases (valleys).
@@ -759,9 +761,7 @@ class World:
             print("--- Starting PyTorch Elevation Variation (with Valley Formation) ---")
             start_total_time = time.time()
 
-            if device is None:
-                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"Using device: {device}")
+            print(f"Using device: {self.device}")
 
             num_vertices = len(self.vertices)
             if num_vertices == 0:
@@ -773,9 +773,9 @@ class World:
             prep_start_time = time.time()
 
             # Basic vertex data
-            positions = torch.tensor([v.pos for v in self.vertices], dtype=torch.float32, device=device)
-            elevations = torch.tensor([v.elevation for v in self.vertices], dtype=torch.float32, device=device)
-            plate_ids = torch.tensor([v.plate_id for v in self.vertices], dtype=torch.long, device=device)
+            positions = torch.tensor([v.pos for v in self.vertices], dtype=torch.float32, device=self.device)
+            elevations = torch.tensor([v.elevation for v in self.vertices], dtype=torch.float32, device=self.device)
+            plate_ids = torch.tensor([v.plate_id for v in self.vertices], dtype=torch.long, device=self.device)
 
             # --- Apply initial 5% noise to all elevations ---
             noise_scale = 0.05  # 5% noise
@@ -783,7 +783,7 @@ class World:
             elevations += noise
             
             # Identify continental vertices
-            is_continental = torch.zeros(num_vertices, dtype=torch.bool, device=device)
+            is_continental = torch.zeros(num_vertices, dtype=torch.bool, device=self.device)
             continental_plate_ids = set()
             for plate_id, plate in self.plates.items():
                 if plate.type == PLATE_TYPE_CONTINENTAL:
@@ -801,7 +801,7 @@ class World:
                 return
 
             # Precompute neighbors
-            neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors(device)
+            neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors()
 
             # Identify high points (peaks)
             # (Peak identification logic remains largely the same as before)
@@ -817,7 +817,7 @@ class World:
                 valid_plate_v_indices = [idx for idx in plate_v_indices_list if 0 <= idx < num_vertices]
                 if not valid_plate_v_indices: continue
 
-                plate_v_indices = torch.tensor(valid_plate_v_indices, dtype=torch.long, device=device)
+                plate_v_indices = torch.tensor(valid_plate_v_indices, dtype=torch.long, device=self.device)
 
                 # Check if plate_v_indices is empty after filtering
                 if plate_v_indices.numel() == 0: continue
@@ -841,9 +841,9 @@ class World:
             if not all_peaks_indices:
                 print("Warning: No peaks found on any continental plate.")
                 has_peaks = False
-                peaks_pos = torch.empty((0, 3), dtype=torch.float32, device=device) # Ensure it's defined
+                peaks_pos = torch.empty((0, 3), dtype=torch.float32, device=self.device) # Ensure it's defined
             else:
-                peaks_indices_tensor = torch.tensor(list(set(all_peaks_indices)), dtype=torch.long, device=device)
+                peaks_indices_tensor = torch.tensor(list(set(all_peaks_indices)), dtype=torch.long, device=self.device)
                 # Final check for valid indices in peaks_indices_tensor
                 valid_peak_indices = peaks_indices_tensor[(peaks_indices_tensor >= 0) & (peaks_indices_tensor < num_vertices)]
                 if len(valid_peak_indices) < len(peaks_indices_tensor):
@@ -851,7 +851,7 @@ class World:
                 if len(valid_peak_indices) == 0:
                     print("Warning: All peak indices were invalid.")
                     has_peaks = False
-                    peaks_pos = torch.empty((0, 3), dtype=torch.float32, device=device)
+                    peaks_pos = torch.empty((0, 3), dtype=torch.float32, device=self.device)
                 else:
                     peaks_pos = positions[valid_peak_indices]
                     # peaks_plate_id = plate_ids[valid_peak_indices] # We don't use this directly later
@@ -1039,64 +1039,53 @@ class World:
 
     #### fluids
 
-    def simulate_water(self, iterations: int = 5, device: str = 'cuda'):
-        """Simulate water distribution using PyTorch for better performance.
-        
-        Args:
-            iterations: Number of simulation steps
-            device: 'cuda' or 'cpu' for torch operations
-        """
+    def simulate_water(self, iterations: int = 5):
         print("Starting water simulation...")
         
         # Convert parameters to tensors only when needed
-        sea_level = torch.tensor(self.sea_level, device=device)
-        rainfall_rate = torch.tensor(self.rainfall_rate, device=device)
-        evaporation_rate = torch.tensor(self.evaporation_rate, device=device)
-        max_water_flow = torch.tensor(self.max_water_flow, device=device)
-        min_river_flow = torch.tensor(self.min_river_flow, device=device)
-        min_lake_volume = torch.tensor(self.min_lake_volume, device=device)
+        sea_level = torch.tensor(self.sea_level, device=self.device)
+        rainfall_rate = torch.tensor(self.rainfall_rate, device=self.device)
+        evaporation_rate = torch.tensor(self.evaporation_rate, device=self.device)
+        max_water_flow = torch.tensor(self.max_water_flow, device=self.device)
+        min_river_flow = torch.tensor(self.min_river_flow, device=self.device)
+        min_lake_volume = torch.tensor(self.min_lake_volume, device=self.device)
         
         # Rest of the implementation remains the same, using these tensor versions
         num_vertices = len(self.vertices)
-        if num_vertices == 0:
-            return
             
         # Get neighbor information
-        neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors(device)
+        neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors()
         
-        # Initialize water tensors
-        elevation = torch.tensor([v.elevation for v in self.vertices], device=device)
-        water_volume = torch.zeros(num_vertices, device=device)
-        water_depth = torch.zeros(num_vertices, device=device, dtype=torch.double)
+        # Initialize water tensors - ensure all are on the same device
+        elevation = torch.tensor([v.elevation for v in self.vertices], device=self.device)
+        water_volume = torch.zeros(num_vertices, device=self.device)
+        water_depth = torch.zeros(num_vertices, device=self.device, dtype=torch.double)
         
-        # Precompute face areas for each vertex
-        vertex_areas = self._compute_vertex_areas()
+        # Precompute face areas for each vertex and move to device
+        vertex_areas = torch.tensor(self._compute_vertex_areas(), device=self.device)
         
         print("Initializing water distribution...")
         # Initial water distribution - oceans get water up to sea level
         ocean_mask = elevation <= sea_level
         sea_level = sea_level.double()
-        print(f'sealevel: {sea_level.type()}')
-        print(f'oceanmask: {elevation[ocean_mask].type()}')
         water_depth[ocean_mask] = torch.maximum(
             sea_level - elevation[ocean_mask], 
-            torch.tensor(0.0, device=device)
+            torch.tensor(0.0, device=self.device)
         ).double()
-        water_depth = water_depth.cpu()
-        water_volume = water_depth * self.vertex_areas
+        water_volume = water_depth * vertex_areas
         
         # Main simulation loop
         print("Running hydrological cycle...")
         for iter in range(iterations):
             print(f"Iteration {iter + 1}/{iterations}")
-            new_water = torch.zeros_like(water_volume)
+            new_water = torch.zeros_like(water_volume, device=self.device)
             
             # 1. Precipitation (rainfall on land)
             land_mask = elevation > sea_level
             rainfall = torch.where(
                 land_mask,
-                torch.rand(num_vertices, device=device) * rainfall_rate * vertex_areas,
-                torch.tensor(0.0, device=device)
+                torch.rand(num_vertices, device=self.device) * rainfall_rate * vertex_areas,
+                torch.tensor(0.0, device=self.device)
             )
             new_water += rainfall
             
@@ -1131,8 +1120,8 @@ class World:
                 # Calculate flow amount based on gradient
                 elev_diff = effective_elevation[i] - effective_elevation[lowest_neighbor]
                 gradient = elev_diff / torch.norm(
-                    torch.tensor(self.vertices[i].pos, device=device) - 
-                    torch.tensor(self.vertices[lowest_neighbor].pos, device=device)
+                    torch.tensor(self.vertices[i].pos, device=self.device) - 
+                    torch.tensor(self.vertices[lowest_neighbor].pos, device=self.device)
                 )
                 
                 max_possible_flow = min(
@@ -1141,7 +1130,7 @@ class World:
                 )
                 
                 flow_amount = max_possible_flow * torch.sigmoid(
-                    torch.tensor(5.0, device=device) * gradient
+                    torch.tensor(5.0, device=self.device) * gradient
                 )
                 
                 # Adjust flow based on areas
@@ -1152,7 +1141,7 @@ class World:
                 new_water[lowest_neighbor] += adjusted_flow
             
             # Update water volumes
-            water_volume = torch.maximum(water_volume + new_water, torch.tensor(0.0, device=device))
+            water_volume = torch.maximum(water_volume + new_water, torch.tensor(0.0, device=self.device))
         
         # Update vertex data
         print("Updating vertex data...")
@@ -1166,10 +1155,131 @@ class World:
         
         # Generate rivers and lakes
         print("Generating water features...")
-        self._generate_rivers(device)
-        self._identify_lakes(device)
+        self._generate_rivers(min_river_flow)
+        self._find_lakes(self.device)
         
         print("Water simulation complete")
+
+    # def simulate_water(self, iterations: int = 5):
+    #     print("Starting water simulation...")
+        
+    #     # Convert parameters to tensors only when needed
+    #     sea_level = torch.tensor(self.sea_level, device=self.device)
+    #     rainfall_rate = torch.tensor(self.rainfall_rate, device=self.device)
+    #     evaporation_rate = torch.tensor(self.evaporation_rate, device=self.device)
+    #     max_water_flow = torch.tensor(self.max_water_flow, device=self.device)
+    #     min_river_flow = torch.tensor(self.min_river_flow, device=self.device)
+    #     min_lake_volume = torch.tensor(self.min_lake_volume, device=self.device)
+        
+    #     # Rest of the implementation remains the same, using these tensor versions
+    #     num_vertices = len(self.vertices)
+            
+    #     # Get neighbor information
+    #     neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors()
+        
+    #     # Initialize water tensors
+    #     elevation = torch.tensor([v.elevation for v in self.vertices], device=self.device)
+    #     water_volume = torch.zeros(num_vertices, device=self.device)
+    #     water_depth = torch.zeros(num_vertices, device=self.device, dtype=torch.double)
+        
+    #     # Precompute face areas for each vertex
+    #     vertex_areas =  torch.tensor(self._compute_vertex_areas(), device=self.device)
+        
+    #     print("Initializing water distribution...")
+    #     # Initial water distribution - oceans get water up to sea level
+    #     ocean_mask = elevation <= sea_level
+    #     sea_level = sea_level.double()
+    #     print(f'sealevel: {sea_level.type()}')
+    #     print(f'oceanmask: {elevation[ocean_mask].type()}')
+    #     water_depth[ocean_mask] = torch.maximum(
+    #         sea_level - elevation[ocean_mask], 
+    #         torch.tensor(0.0, device=self.device)
+    #     ).double()
+    #     water_depth = water_depth.cpu()
+    #     water_volume = water_depth * self.vertex_areas
+        
+    #     # Main simulation loop
+    #     print("Running hydrological cycle...")
+    #     for iter in range(iterations):
+    #         print(f"Iteration {iter + 1}/{iterations}")
+    #         new_water = torch.zeros_like(water_volume, device=self.device)
+            
+    #         # 1. Precipitation (rainfall on land)
+    #         land_mask = elevation > sea_level
+    #         rainfall = torch.where(
+    #             land_mask,
+    #             torch.rand(num_vertices, device=self.device) * rainfall_rate * vertex_areas,
+    #             torch.tensor(0.0, device=self.device)
+    #         )
+    #         new_water += rainfall
+            
+    #         # 2. Evaporation (from all water surfaces)
+    #         evaporation = torch.minimum(water_volume, evaporation_rate * vertex_areas)
+    #         new_water -= evaporation
+            
+    #         # 3. Flow between vertices
+    #         current_water_depth = water_volume / vertex_areas
+    #         effective_elevation = elevation + current_water_depth
+            
+    #         # Find downhill flow for each vertex
+    #         for i in range(num_vertices):
+    #             if not land_mask[i]:
+    #                 continue  # Skip ocean cells
+                    
+    #             neighbors = neighbor_indices[i][neighbor_mask[i]]
+    #             if len(neighbors) == 0:
+    #                 continue
+                    
+    #             # Find lowest neighbor
+    #             neighbor_eff_elev = effective_elevation[neighbors]
+    #             min_elev_idx = torch.argmin(neighbor_eff_elev)
+    #             lowest_neighbor = neighbors[min_elev_idx]
+                
+    #             if effective_elevation[lowest_neighbor] >= effective_elevation[i]:
+    #                 continue  # No downhill flow
+                    
+    #             # Calculate flow amount based on gradient
+    #             elev_diff = effective_elevation[i] - effective_elevation[lowest_neighbor]
+    #             gradient = elev_diff / torch.norm(
+    #                 torch.tensor(self.vertices[i].pos, device=self.device) - 
+    #                 torch.tensor(self.vertices[lowest_neighbor].pos, device=self.device)
+    #             )
+                
+    #             max_possible_flow = min(
+    #                 water_volume[i] * 0.2,  # Max 20% of current water can flow
+    #                 max_water_flow * vertex_areas[i]  # Absolute max flow
+    #             )
+                
+    #             flow_amount = max_possible_flow * torch.sigmoid(
+    #                 torch.tensor(5.0, device=self.device) * gradient
+    #             )
+                
+    #             # Adjust flow based on areas
+    #             area_ratio = vertex_areas[i] / vertex_areas[lowest_neighbor]
+    #             adjusted_flow = flow_amount * area_ratio
+                
+    #             new_water[i] -= flow_amount
+    #             new_water[lowest_neighbor] += adjusted_flow
+            
+    #         # Update water volumes
+    #         water_volume = torch.maximum(water_volume + new_water, torch.tensor(0.0, device=self.device))
+        
+    #     # Update vertex data
+    #     print("Updating vertex data...")
+    #     water_depth = water_volume / vertex_areas
+    #     water_depth_cpu = water_depth.cpu().numpy()
+    #     water_volume_cpu = water_volume.cpu().numpy()
+        
+    #     for i in range(num_vertices):
+    #         self.vertices[i].water_volume = float(water_volume_cpu[i])
+    #         self.vertices[i].water_depth = float(water_depth_cpu[i])
+        
+    #     # Generate rivers and lakes
+    #     print("Generating water features...")
+    #     self._generate_rivers(self.device)
+    #     self._identify_lakes(self.device)
+        
+    #     print("Water simulation complete")
 
     def _generate_rivers(self, min_flow=1.0):
         """Identify and mark rivers based on accumulated water flow.
@@ -1256,8 +1366,7 @@ class World:
         
         for i, vertex in enumerate(self.vertices):
             if (vertex.elevation > self.sea_level and 
-                vertex.water >= min_size and 
-                i not in visited):
+                vertex.water >= min_size and i not in visited):
                 
                 # Flood fill to find connected lake cells
                 lake_cells = []
@@ -1297,7 +1406,7 @@ class World:
         self.calculate_all_face_areas()
         
         # Initialize vertex areas
-        vertex_areas = np.zeros(len(self.vertices))
+        vertex_areas = torch.zeros(len(self.vertices), device=self.device)
         
         # Distribute each face's area equally to its vertices
         for face_idx, face in enumerate(self.faces):
@@ -1310,9 +1419,10 @@ class World:
                 
         # Handle any vertices with zero area (shouldn't happen with proper meshes)
         vertex_areas[vertex_areas == 0] = 1.0  # Assign default area
+        self.vertex_areas = (vertex_areas).cpu()
         return vertex_areas
 
-    def calculate_all_face_areas(self, device='cuda'):
+    def calculate_all_face_areas(self):
             
         areas = batch_calculate_areas(self.faces, self.vertices)
         
@@ -1433,11 +1543,7 @@ class World:
             self._initialize_neighbor_maps()
         return [self.faces[i] for i in self._face_neighbors[face_idx]]
 
-    def _build_neighbor_tensors(self, device):
-        """
-        Precomputes neighbor information in a tensor format suitable for PyTorch.
-        (Implementation is the same as before)
-        """
+    def _build_neighbor_tensors(self):
         num_vertices = len(self.vertices)
         neighbor_lists = [list(self._find_vertex_neighbors(i)) for i in range(num_vertices)]
         max_neighbors = max(len(neighbors) for neighbors in neighbor_lists) if neighbor_lists else 0
@@ -1445,10 +1551,10 @@ class World:
              print("Warning: Some vertices may have no neighbors.")
              max_neighbors = 1 # Avoid zero-sized tensor dim if possible
 
-        neighbor_indices = torch.full((num_vertices, max_neighbors), 0, # Pad with 0, mask handles it
-                                      dtype=torch.long, device=device)
+        neighbor_indices = torch.full((num_vertices, max_neighbors), 0,
+                                      dtype=torch.long, device=self.device)
         neighbor_mask = torch.zeros((num_vertices, max_neighbors),
-                                    dtype=torch.bool, device=device)
+                                    dtype=torch.bool, device=self.device)
 
         for i, neighbors in enumerate(neighbor_lists):
             if neighbors:
@@ -1460,7 +1566,7 @@ class World:
 
                 num_n = len(safe_neighbors) # Update count
                 if num_n > 0:
-                    neighbor_indices[i, :num_n] = torch.tensor(safe_neighbors, dtype=torch.long, device=device)
+                    neighbor_indices[i, :num_n] = torch.tensor(safe_neighbors, dtype=torch.long, device=self.device)
                     neighbor_mask[i, :num_n] = True
 
         return neighbor_indices, neighbor_mask, max_neighbors

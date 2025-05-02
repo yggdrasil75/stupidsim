@@ -1,3 +1,9 @@
+import numpy as np
+from holder.face import Face
+from holder.vertex import Vertex
+from world import World
+
+
 class TruncatedIcosahedron(World):
     """Represents a Truncated Icosahedron (soccer ball)."""
     def __init__(self):

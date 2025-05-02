@@ -27,11 +27,11 @@ class Face:
         a, b, c = [p/np.linalg.norm(p) for p in tri]
         
         # Calculate angles using dot products
-        alpha = np.acos(np.dot(np.cross(a, b), np.cross(a, c)) / 
+        alpha = np.arccos(np.dot(np.cross(a, b), np.cross(a, c)) / 
                 (np.linalg.norm(np.cross(a, b)) * np.linalg.norm(np.cross(a, c))))
-        beta = np.acos(np.dot(np.cross(b, a), np.cross(b, c)) / 
+        beta = np.arccos(np.dot(np.cross(b, a), np.cross(b, c)) / 
                (np.linalg.norm(np.cross(b, a)) * np.linalg.norm(np.cross(b, c))))
-        gamma = np.acos(np.dot(np.cross(c, a), np.cross(c, b)) / 
+        gamma = np.arccos(np.dot(np.cross(c, a), np.cross(c, b)) / 
                 (np.linalg.norm(np.cross(c, a)) * np.linalg.norm(np.cross(c, b))))
         
         # Spherical excess
