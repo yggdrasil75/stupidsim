@@ -1156,130 +1156,9 @@ class World:
         # Generate rivers and lakes
         print("Generating water features...")
         self._generate_rivers(min_river_flow)
-        self._find_lakes(self.device)
+        self._find_lakes(min_lake_volume)
         
         print("Water simulation complete")
-
-    # def simulate_water(self, iterations: int = 5):
-    #     print("Starting water simulation...")
-        
-    #     # Convert parameters to tensors only when needed
-    #     sea_level = torch.tensor(self.sea_level, device=self.device)
-    #     rainfall_rate = torch.tensor(self.rainfall_rate, device=self.device)
-    #     evaporation_rate = torch.tensor(self.evaporation_rate, device=self.device)
-    #     max_water_flow = torch.tensor(self.max_water_flow, device=self.device)
-    #     min_river_flow = torch.tensor(self.min_river_flow, device=self.device)
-    #     min_lake_volume = torch.tensor(self.min_lake_volume, device=self.device)
-        
-    #     # Rest of the implementation remains the same, using these tensor versions
-    #     num_vertices = len(self.vertices)
-            
-    #     # Get neighbor information
-    #     neighbor_indices, neighbor_mask, max_neighbors = self._build_neighbor_tensors()
-        
-    #     # Initialize water tensors
-    #     elevation = torch.tensor([v.elevation for v in self.vertices], device=self.device)
-    #     water_volume = torch.zeros(num_vertices, device=self.device)
-    #     water_depth = torch.zeros(num_vertices, device=self.device, dtype=torch.double)
-        
-    #     # Precompute face areas for each vertex
-    #     vertex_areas =  torch.tensor(self._compute_vertex_areas(), device=self.device)
-        
-    #     print("Initializing water distribution...")
-    #     # Initial water distribution - oceans get water up to sea level
-    #     ocean_mask = elevation <= sea_level
-    #     sea_level = sea_level.double()
-    #     print(f'sealevel: {sea_level.type()}')
-    #     print(f'oceanmask: {elevation[ocean_mask].type()}')
-    #     water_depth[ocean_mask] = torch.maximum(
-    #         sea_level - elevation[ocean_mask], 
-    #         torch.tensor(0.0, device=self.device)
-    #     ).double()
-    #     water_depth = water_depth.cpu()
-    #     water_volume = water_depth * self.vertex_areas
-        
-    #     # Main simulation loop
-    #     print("Running hydrological cycle...")
-    #     for iter in range(iterations):
-    #         print(f"Iteration {iter + 1}/{iterations}")
-    #         new_water = torch.zeros_like(water_volume, device=self.device)
-            
-    #         # 1. Precipitation (rainfall on land)
-    #         land_mask = elevation > sea_level
-    #         rainfall = torch.where(
-    #             land_mask,
-    #             torch.rand(num_vertices, device=self.device) * rainfall_rate * vertex_areas,
-    #             torch.tensor(0.0, device=self.device)
-    #         )
-    #         new_water += rainfall
-            
-    #         # 2. Evaporation (from all water surfaces)
-    #         evaporation = torch.minimum(water_volume, evaporation_rate * vertex_areas)
-    #         new_water -= evaporation
-            
-    #         # 3. Flow between vertices
-    #         current_water_depth = water_volume / vertex_areas
-    #         effective_elevation = elevation + current_water_depth
-            
-    #         # Find downhill flow for each vertex
-    #         for i in range(num_vertices):
-    #             if not land_mask[i]:
-    #                 continue  # Skip ocean cells
-                    
-    #             neighbors = neighbor_indices[i][neighbor_mask[i]]
-    #             if len(neighbors) == 0:
-    #                 continue
-                    
-    #             # Find lowest neighbor
-    #             neighbor_eff_elev = effective_elevation[neighbors]
-    #             min_elev_idx = torch.argmin(neighbor_eff_elev)
-    #             lowest_neighbor = neighbors[min_elev_idx]
-                
-    #             if effective_elevation[lowest_neighbor] >= effective_elevation[i]:
-    #                 continue  # No downhill flow
-                    
-    #             # Calculate flow amount based on gradient
-    #             elev_diff = effective_elevation[i] - effective_elevation[lowest_neighbor]
-    #             gradient = elev_diff / torch.norm(
-    #                 torch.tensor(self.vertices[i].pos, device=self.device) - 
-    #                 torch.tensor(self.vertices[lowest_neighbor].pos, device=self.device)
-    #             )
-                
-    #             max_possible_flow = min(
-    #                 water_volume[i] * 0.2,  # Max 20% of current water can flow
-    #                 max_water_flow * vertex_areas[i]  # Absolute max flow
-    #             )
-                
-    #             flow_amount = max_possible_flow * torch.sigmoid(
-    #                 torch.tensor(5.0, device=self.device) * gradient
-    #             )
-                
-    #             # Adjust flow based on areas
-    #             area_ratio = vertex_areas[i] / vertex_areas[lowest_neighbor]
-    #             adjusted_flow = flow_amount * area_ratio
-                
-    #             new_water[i] -= flow_amount
-    #             new_water[lowest_neighbor] += adjusted_flow
-            
-    #         # Update water volumes
-    #         water_volume = torch.maximum(water_volume + new_water, torch.tensor(0.0, device=self.device))
-        
-    #     # Update vertex data
-    #     print("Updating vertex data...")
-    #     water_depth = water_volume / vertex_areas
-    #     water_depth_cpu = water_depth.cpu().numpy()
-    #     water_volume_cpu = water_volume.cpu().numpy()
-        
-    #     for i in range(num_vertices):
-    #         self.vertices[i].water_volume = float(water_volume_cpu[i])
-    #         self.vertices[i].water_depth = float(water_depth_cpu[i])
-        
-    #     # Generate rivers and lakes
-    #     print("Generating water features...")
-    #     self._generate_rivers(self.device)
-    #     self._identify_lakes(self.device)
-        
-    #     print("Water simulation complete")
 
     def _generate_rivers(self, min_flow=1.0):
         """Identify and mark rivers based on accumulated water flow.
@@ -1359,8 +1238,6 @@ class World:
                         break
 
     def _find_lakes(self, min_size=3.0):
-        """Identify lakes (standing water bodies above sea level).
-        min_size: minimum water volume in TL to be considered a lake."""
         lakes = []
         visited = set()
         
@@ -1571,6 +1448,50 @@ class World:
 
         return neighbor_indices, neighbor_mask, max_neighbors
   
+    def _find_vertices_within_radius(self, start_vidx, radius):
+        """
+        Find all vertices within a given graph distance (number of edges) from a starting vertex.
+        
+        Args:
+            start_vidx (int): Index of the starting vertex
+            radius (int): Maximum graph distance to search (number of edges)
+            
+        Returns:
+            list: List of vertex indices within the specified radius
+        """
+        if not self._neighbor_map_initialized:
+            self._initialize_neighbor_map()
+            
+        if start_vidx < 0 or start_vidx >= len(self.vertices):
+            return []
+            
+        if radius < 1:
+            return []
+            
+        visited = set()
+        queue = deque([(start_vidx, 0)])  # (vertex_index, current_distance)
+        vertices_in_radius = []
+        
+        while queue:
+            current_vidx, current_dist = queue.popleft()
+            
+            if current_vidx in visited:
+                continue
+                
+            visited.add(current_vidx)
+            
+            if current_dist > 0:  # Don't include the starting vertex unless radius is 0
+                vertices_in_radius.append(current_vidx)
+                
+            if current_dist < radius:
+                # Add neighbors to queue with incremented distance
+                neighbors = self._find_vertex_neighbors(current_vidx)
+                for neighbor in neighbors:
+                    if neighbor not in visited:
+                        queue.append((neighbor, current_dist + 1))
+                        
+        return vertices_in_radius
+
     #### display
 
     def plot(self, fig=None, ax=None, cmap='terrain', edge_color=None, alpha=1):

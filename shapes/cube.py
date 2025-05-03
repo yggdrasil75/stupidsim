@@ -6,7 +6,7 @@ import numpy as np
 from holder.face import Face
 from holder.vertex import Vertex
 from world import World
-
+import torch
 
 class Cube(World):
     """Represents a Cube."""
@@ -48,15 +48,52 @@ class Cube(World):
         for f in f_indices:
             self.add_face(Face(f))
 
-    def _subdivide(self, radius=1.0, level=3):
+    def _subdivide__(self):
+        new_faces = []
+        new_vertices = []
+        for face in self.faces:
+            _new_faces, _new_indices, _new_vertices = face.subdivide_face(self.vertices)
+            new_faces.extend(_new_faces)
+            new_vertices.extend(_new_vertices)
+
+
+        self.faces = new_faces
+        self.vertices = new_vertices
+        #return super()._subdivide()
+
+    def _get_midpoint_vertex_torch(self, v1_idx, v2_idx, midpoint_cache, vertices, plate_ids, radius):
+        key = tuple(sorted((v1_idx, v2_idx)))
+        if key in midpoint_cache:
+            return midpoint_cache[key]
+        
+        # Compute midpoint
+        v1 = vertices[v1_idx]
+        v2 = vertices[v2_idx]
+        mid_pos = (v1 + v2) / 2
+        
+        # Normalize
+        mid_pos = mid_pos / torch.norm(mid_pos) * radius
+        
+        # Determine plate ID
+        plate1 = plate_ids[v1_idx]
+        plate2 = plate_ids[v2_idx]
+        mid_plate = plate1 if plate1 == plate2 else -1
+        
+        # Add to vertices
+        mid_idx = len(vertices)
+        vertices = torch.cat([vertices, mid_pos.unsqueeze(0)])
+        plate_ids = torch.cat([plate_ids, torch.tensor([mid_plate], device=self.device)])
+        
+        midpoint_cache[key] = mid_idx
+        return mid_idx
+    
+    def _subdivide_old(self, radius=1.0):
         midpoint_cache = {}
         new_faces = []
-        #current_level_vertices = list(self.vertices)
         current_level_vertices = [copy.deepcopy(v) for v in self.vertices]
         
         next_vertices = list(current_level_vertices) 
 
-        processed_faces = 0
         for face in self.faces:
             v_indices = face.v_indices
             n = len(v_indices)
@@ -98,8 +135,6 @@ class Cube(World):
                 
                 new_quad = Face((v_orig_idx, mid_curr_idx, center_idx, mid_prev_idx))
                 new_faces.append(new_quad)
-
-            processed_faces += 1
 
         self.vertices = next_vertices
         self.faces = new_faces
