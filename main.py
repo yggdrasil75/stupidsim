@@ -7,6 +7,7 @@ from shapes.icosahedron import Icosahedron
 from shapes.truncatedicosahedron import TruncatedIcosahedron
 from shapes.TruncatedIcosidodecahedron import TruncatedIcosidodecahedron
 from shapes.truncatedtetrahedron import truncatedTetrahedron
+from util import print_timing_stats
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -52,5 +53,6 @@ if __name__ == "__main__":
     fig, ax, radio = shape.plot()
 
     ax.set_title(f'Sphere Approx. ({shape_type.capitalize()} Subdivided {num_subdivisions} Times)')
+    print_timing_stats()
     plt.show()
     

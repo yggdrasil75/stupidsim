@@ -5,6 +5,7 @@ import random
 import numpy as np
 from holder.face import Face
 from holder.vertex import Vertex
+from util import time_function
 from world import World
 import torch
 
@@ -13,6 +14,7 @@ class Cube(World):
     def __init__(self):
         super().__init__()
 
+    @time_function
     def _create_world(self, radius=1.0):
         """Creates the vertices and faces for a unit cube."""
         self.vertices = []
@@ -48,19 +50,25 @@ class Cube(World):
         for f in f_indices:
             self.add_face(Face(f))
 
-    def _subdivide__(self):
+    @time_function
+    def _subdivide_bad(self):
         new_faces = []
         new_vertices = []
-        for face in self.faces:
-            _new_faces, _new_indices, _new_vertices = face.subdivide_face(self.vertices)
+        original_face = list(self.faces)
+        self.faces.clear()
+
+        for face in original_face:
+            _new_faces, _new_vertices = face.subdivide_face(self.vertices, self.faces)
             new_faces.extend(_new_faces)
             new_vertices.extend(_new_vertices)
 
 
         self.faces = new_faces
-        self.vertices = new_vertices
+        self.vertices.extend(new_vertices)
+        self._neighbor_map_initialized = False
         #return super()._subdivide()
 
+    @time_function
     def _get_midpoint_vertex_torch(self, v1_idx, v2_idx, midpoint_cache, vertices, plate_ids, radius):
         key = tuple(sorted((v1_idx, v2_idx)))
         if key in midpoint_cache:
@@ -87,14 +95,15 @@ class Cube(World):
         midpoint_cache[key] = mid_idx
         return mid_idx
     
-    def _subdivide_old(self, radius=1.0):
+    @time_function
+    def _subdivide(self):
         midpoint_cache = {}
         new_faces = []
         current_level_vertices = [copy.deepcopy(v) for v in self.vertices]
-        
         next_vertices = list(current_level_vertices) 
 
         for face in self.faces:
+            plate = face.get_plate(vertex_list=self.vertices)
             v_indices = face.v_indices
             n = len(v_indices)
 
@@ -104,30 +113,24 @@ class Cube(World):
                 continue
                 
             face_center_pos = np.zeros(3, dtype=float)
-            face_plates = []
             for v_idx in v_indices:
                 face_center_pos += current_level_vertices[v_idx].pos
-                if current_level_vertices[v_idx].plate_id != -1:
-                    face_plates.append(current_level_vertices[v_idx].plate_id)
             face_center_pos /= n
             
             center_v = Vertex(*face_center_pos)
-            try:
-                center_v.plate_id = random.choice(face_plates)
-            except:
-                center_v.plate_id = -1
-            center_v.normalize(radius)
-            
+            center_v.normalize()
             center_idx = len(next_vertices)
+            center_v.plate_id = plate
             next_vertices.append(center_v)
 
             mid_indices = []
             for i in range(n):
                 v1_idx = v_indices[i]
                 v2_idx = v_indices[(i + 1) % n] 
-                mid_idx = self._get_midpoint_vertex(v1_idx, v2_idx, midpoint_cache, next_vertices, radius)
+                mid_idx = self._get_midpoint_vertex(v1_idx, v2_idx, midpoint_cache, next_vertices)
+
                 mid_indices.append(mid_idx)
-            
+
             for i in range(n):
                 v_orig_idx = v_indices[i]
                 mid_curr_idx = mid_indices[i]
@@ -135,10 +138,14 @@ class Cube(World):
                 
                 new_quad = Face((v_orig_idx, mid_curr_idx, center_idx, mid_prev_idx))
                 new_faces.append(new_quad)
+            
+            # for i, v in enumerate(next_vertices):
+            #     v.plate_id = plate
 
         self.vertices = next_vertices
         self.faces = new_faces
 
+    @time_function
     def _subdivide_selected(self, faces_to_subdivide, radius=1.0, level=3):
         midpoint_cache = {}
         new_faces = []

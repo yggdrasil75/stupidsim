@@ -14,10 +14,11 @@ from holder.face import Face
 from holder.globals import CONTINENTAL_CRUST_THICKNESS, OCEANIC_CRUST_THICKNESS, PLATE_TYPE_CONTINENTAL, PLATE_TYPE_OCEANIC
 from holder.vertex import Vertex
 from plate import Plate
-from util import batch_calculate_areas, plate_grow_worker_process
+from util import batch_calculate_areas, plate_grow_worker_process, time_function
 
 
 class World:
+    @time_function
     def __init__(self):
         self.vertices: list[Vertex] = []
         self.faces: list[Face] = []
@@ -35,43 +36,52 @@ class World:
         self.vertex_areas = []
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    @time_function
     def add_vertex(self, vertex):
         self.vertices.append(vertex)
         return len(self.vertices) - 1
 
+    @time_function
     def add_face(self, face):
         self.faces.append(face)
 
+    @time_function
     def create_world(self, radius=1.0, plates = 15, min_height = -15000, max_height = 15000):
         self.platecount = plates
         self.elevationMin = min_height
         self.elevationMax = max_height
         self._create_world(radius=1.0)
 
+    @time_function
     def _create_world(self, radius = 1.0):
         raise NotImplementedError("Subclasses must implement _create_world()")
     
+    @time_function
     def _subdivide_selected(self, faces_to_subdivide, radius=1.0, level=3):
         raise NotImplementedError("Subclasses must implement _subdivide_selected(faces_to_subdivide, radius, level)")
 
+    @time_function
     def subdivide(self, radius=1.0, levels=3):
         self.subdivisions = levels
         for level in range(levels):
             print(f"Starting Subdivision level {level+1}...")
-            if np.floor(levels / 2) == level:
+            if level == 2:
                 self._create_plates()
                 self._assign_tectonic_plates()
             self._subdivide()
             print(f"Subdivision level {level+1} complete. Vertices: {len(self.vertices)}, Faces: {len(self.faces)}")
-            self._neighbor_map_initialized = False
-            self._fix_non_contiguous_vertices()
-        self.fixPlates()
+            if level >= 2:
+                self._neighbor_map_initialized = False
+                self._fix_non_contiguous_vertices()
+        #self.fixPlates()
 
+    @time_function
     def _subdivide(self):
         raise NotImplementedError("Subclasses must implement _subdivide()")
 
     #### plates and elevation
 
+    @time_function
     def fixPlates(self):
         self._neighbor_map_initialized = False
         for plate in self.plates.values():
@@ -128,6 +138,7 @@ class World:
         
         self._fix_non_contiguous_vertices()
 
+    @time_function
     def genElevations(self, num_plates=7, min_height=0.0, max_height=1.0):
         if not self.vertices:
             return
@@ -141,6 +152,7 @@ class World:
         #self._smooth_elevations(iterations=3)
         #self._add_variations()
     
+    @time_function
     def _create_plates(self):
         self.plates = {}
         
@@ -148,7 +160,7 @@ class World:
         minor_plate_count = max(1, int(total_plates * random.uniform(0.2, 0.3)))
         minor_plate_ids = set(random.sample(range(total_plates), minor_plate_count))
         plate_types = []
-        for _ in range(self.platecount):
+        for i in range(self.platecount):
             if len(plate_types) > 0 and plate_types[-1] == PLATE_TYPE_CONTINENTAL:
                 next_type = PLATE_TYPE_OCEANIC
             elif len(plate_types) > 0 and plate_types[-1] == PLATE_TYPE_OCEANIC:
@@ -162,9 +174,12 @@ class World:
                 plate_types[i] = 1 - plate_types[i]
 
         for plate_id in range(self.platecount):
-            self.plates[plate_id] = Plate(plate_id)
-            self.plates[plate_id].type = plate_types[plate_id]
+            print(plate_types[plate_id])
+            self.plates[plate_id] = Plate(plate_id, plate_types[plate_id])
+            print(self.plates[plate_id].type)
+            #self.plates[plate_id].type = plate_types[plate_id]
             
+    @time_function
     def _plate_grow_worker(self, plate_id, plate_queue, vertices, unassigned, plates, assignment_lock):
         my_plate = plates[plate_id]
 
@@ -232,6 +247,7 @@ class World:
                     my_plate.add_vertex(selected_neighbor_idx)
                     unassigned.remove(selected_neighbor_idx)
 
+    @time_function
     def _assign_tectonic_plates(self, parallel_threshold_percent=10.0, max_iterations=100):
         num_vertices = len(self.vertices)
         print("Initializing plate assignment...")
@@ -245,7 +261,7 @@ class World:
         assignment_lock = multiprocessing.Lock()
         manager = multiprocessing.Manager()
         results_queue = manager.Queue()
-        self.plates = {plate_id: Plate(plate_id) for plate_id in range(self.platecount)}
+        #self.plates = {plate_id: Plate(plate_id) for plate_id in range(self.platecount)}
 
         # --- Assign Starting Points ---
         plate_starts = np.random.choice(list(unassigned), size=self.platecount, replace=False)
@@ -363,95 +379,16 @@ class World:
         # --- Handle Non-Contiguous Vertices ---
         self._fix_non_contiguous_vertices()
 
+    @time_function
     def _fix_non_contiguous_vertices(self, min_plate_size=5, minor_plate_ratio=0.2):
-        min_plate_size *= min_plate_size * self.subdivisions
-        """
-        Identify and handle non-contiguous vertices, potentially creating minor plates.
+        for plate in self.plates.values():
+            plate.resetVertices
+        for i, vertex in enumerate(self.vertices):
+            self.plates[vertex.plate_id].add_vertex(i, self.vertices)
         
-        Args:
-            min_plate_size: Minimum number of vertices to consider creating a new minor plate
-            minor_plate_ratio: Ratio of main plate size to consider creating a minor plate
-        """
-        print("Checking for non-contiguous vertices...")
-        
-        # First pass: Identify all contiguous regions in all plates
-        all_regions = []
-        plate_regions = {}  # {plate_id: [region1, region2, ...]}
-        
-        for plate_id, plate in self.plates.items():
-            if not plate.vertices:
-                continue
-                
-            regions = self._find_all_contiguous_regions(plate_id)
-            plate_regions[plate_id] = regions
-            all_regions.extend([(plate_id, region) for region in regions])
-        
-        # Second pass: Process regions and potentially create minor plates
-        new_plates = {}
-        next_plate_id = max(self.plates.keys()) + 1 if self.plates else 0
-        
-        for plate_id, regions in plate_regions.items():
-            if len(regions) <= 1:
-                continue  # Only one region - nothing to fix
-                
-            # Sort regions by size (descending)
-            regions.sort(key=lambda r: len(r), reverse=True)
-            main_region = regions[0]
-            main_region_size = len(main_region)
-            
-            for region in regions[1:]:
-                region_size = len(region)
-                
-                # Decision: Merge to neighbor or create new minor plate?
-                if (region_size >= min_plate_size and 
-                    region_size >= main_region_size * minor_plate_ratio):
-                    # Significant region - make it a new minor plate
-                    new_plate_id = next_plate_id
-                    next_plate_id += 1
-                    
-                    # Determine plate type (same as parent or opposite)
-                    parent_type = self.plates[plate_id].type
-                    if random.random() < 0.7:  # 70% chance same type
-                        new_type = parent_type
-                    else:
-                        new_type = 1 - parent_type
-                    
-                    # Create new minor plate
-                    new_plate = Plate(new_plate_id)
-                    new_plate.type = new_type
-                    new_plate.is_minor = True
-                    
-                    # Assign vertices
-                    for v_idx in region:
-                        self.vertices[v_idx].plate_id = new_plate_id
-                        new_plate.add_vertex(v_idx, self.vertices)
-                        self.plates[plate_id].vertices.discard(v_idx)
-                    
-                    new_plates[new_plate_id] = new_plate
-                    print(f"Created minor plate {new_plate_id} (type {'continental' if new_type == PLATE_TYPE_CONTINENTAL else 'oceanic'}) with {region_size} vertices")
-                    
-                else:
-                    # Small region - merge to neighboring plate
-                    neighbor_plate = self._find_best_neighbor_plate(region)
-                    if neighbor_plate is not None and neighbor_plate != plate_id:
-                        # Merge to neighbor
-                        for v_idx in region:
-                            self.vertices[v_idx].plate_id = neighbor_plate
-                            self.plates[neighbor_plate].add_vertex(v_idx, self.vertices)
-                            self.plates[plate_id].vertices.discard(v_idx)
-                        #print(f"Merged {len(region)} vertices from plate {plate_id} to plate {neighbor_plate}")
-                    else:
-                        # No better neighbor found, leave with original plate
-                        pass
-        
-        # Add any new minor plates to main plates dictionary
-        self.plates.update(new_plates)
-        
-        # Update plate count if we created new plates
-        if new_plates:
-            self.platecount = len(self.plates)
-            print(f"Total plates now: {self.platecount} ({len(new_plates)} new minor plates)")
+        return
 
+    @time_function
     def _find_all_contiguous_regions(self, plate_id):
         """
         Find all contiguous regions in a plate using BFS.
@@ -489,6 +426,7 @@ class World:
         
         return regions
 
+    @time_function
     def _find_best_neighbor_plate(self, region_vertices):
         """
         Find the best neighboring plate for a region based on:
@@ -531,6 +469,7 @@ class World:
         # Still tied - random choice
         return random.choice(candidates)
     
+    @time_function
     def _find_largest_contiguous_region(self, plate_id):
         """
         Find the largest contiguous region of vertices in a plate using BFS.
@@ -566,127 +505,52 @@ class World:
 
         return largest_region
     
+    @time_function
     def _assign_remaining_vertices_safe(self, remaining_unassigned_indices):
-        """
-        Assign remaining unassigned vertices sequentially (BFS from orphan).
-        Operates on the provided list and modifies self.vertices/self.plates.
-        Relies on vertex.plate_id, not the global `unassigned` set.
-        """
-        print(f"Assigning {len(remaining_unassigned_indices)} remaining vertices sequentially using BFS...")
-        assigned_count_in_fallback = 0
-        still_unassigned_after_bfs = []
-        processed_indices = set() # Track which of the input list we've handled
-
-        # Make multiple passes if necessary, as assigning one orphan might
-        # make a previously isolated orphan reachable.
-        pass_num = 0
+        print(f"Assigning {len(remaining_unassigned_indices)} remaining vertices sequentially in a safer manner...")
         indices_to_process = list(remaining_unassigned_indices)
+        assigned_in_fallback = 0
 
+        pass_num = 0
         while indices_to_process:
-             pass_num += 1
-             print(f"Fallback Pass {pass_num}: Processing {len(indices_to_process)} indices...")
-             next_indices_to_process = []
-             assigned_in_pass = 0
+            pass_num += 1
+            print(f"Fallback Pass {pass_num}: Processing {len(indices_to_process)} indices...")
+            processed_indices = set()
 
-             queue = deque()
-             visited_bfs = set()
+            for v_idx in indices_to_process:
+                if v_idx in processed_indices:
+                    continue
 
-             for v_idx in indices_to_process:
-                 # Check if already processed or assigned by another orphan's BFS in this pass
-                 if v_idx in processed_indices or self.vertices[v_idx].plate_id != -1:
-                      continue
+                queue = deque([v_idx])
+                visited = {v_idx}
+                found_plate = -1
+                while queue and found_plate == -1:
+                    current = queue.popleft()
+                    for n_idx in self._find_vertex_neighbors(current):
+                        n_plate = self.vertices[n_idx].plate_id
+                        if n_plate != -1:
+                            found_plate = n_plate
+                            break
+                    if n_idx not in visited:
+                        visited.add(n_idx)
+                        queue.append(n_idx)
 
-                 processed_indices.add(v_idx) # Mark as processed for this fallback run
+                if found_plate != -1:
+                    for vidx in visited:
+                        if vidx in indices_to_process:
+                            self.plates[found_plate].add_vertex(vidx, self.vertices)
+                            indices_to_process.remove(vidx)
+                            assigned_in_fallback += 1
+                    processed_indices.update(visited)
 
-                 # Start BFS from this orphan
-                 queue.clear()
-                 visited_bfs.clear()
-                 queue.append(v_idx)
-                 visited_bfs.add(v_idx)
-                 found_plate = -1
-                 closest_assigned_neighbor_idx = -1
-
-                 while queue:
-                      current_bfs = queue.popleft()
-                      neighbors = self._find_vertex_neighbors(current_bfs)
-
-                      # Check neighbors first for an assigned plate
-                      for n_idx in neighbors:
-                           neighbor_plate = self.vertices[n_idx].plate_id
-                           if neighbor_plate != -1:
-                                found_plate = neighbor_plate
-                                closest_assigned_neighbor_idx = n_idx # Record who we found it from
-                                # print(f"Orphan {v_idx} found plate {found_plate} via neighbor {n_idx}")
-                                break # Found the nearest plate
-
-                      if found_plate != -1:
-                           break # Exit BFS loop for this orphan
-
-                      # If no assigned neighbor found yet, expand BFS to unassigned neighbors
-                      for n_idx in neighbors:
-                           if n_idx not in visited_bfs and self.vertices[n_idx].plate_id == -1:
-                                visited_bfs.add(n_idx)
-                                queue.append(n_idx)
-
-                 # Assign the original orphan v_idx if a plate was found
-                 if found_plate != -1:
-                      self.vertices[v_idx].plate_id = found_plate
-                      if found_plate in self.plates:
-                           self.plates[found_plate].add_vertex(v_idx, self.vertices)
-                      else:
-                           print(f"Warning: Found plate {found_plate} for orphan {v_idx} but plate not in self.plates dict!")
-                      assigned_count_in_fallback += 1
-                      assigned_in_pass += 1
-                 else:
-                      # BFS completed without finding an assigned neighbor this pass
-                      next_indices_to_process.append(v_idx)
-                      # print(f"Vertex {v_idx} remains unassigned after BFS pass {pass_num}.")
-
-             print(f"Fallback Pass {pass_num}: Assigned {assigned_in_pass} vertices.")
-             if not next_indices_to_process:
-                 print(f"Fallback Pass {pass_num}: No remaining unassigned after BFS.")
-                 break # All processed or assigned
-             if not assigned_in_pass and next_indices_to_process:
-                 # If a pass assigned nothing but vertices remain, they are truly isolated
-                 print(f"Fallback Pass {pass_num}: Stalled. Moving to random assignment for remaining.")
-                 still_unassigned_after_bfs = next_indices_to_process
-                 break
-
-             indices_to_process = next_indices_to_process # Prepare for next pass
-
-             if pass_num > 10: # Safety break for infinite loops
-                 print("Warning: Exceeded fallback pass limit.")
-                 still_unassigned_after_bfs = indices_to_process
-                 break
-
-
-        # Force-assign any vertices that are still unassigned (truly isolated components)
-        if still_unassigned_after_bfs:
-             print(f"Warning: {len(still_unassigned_after_bfs)} vertices remain unassigned after BFS. Force assigning randomly.")
-             available_plate_ids = list(self.plates.keys())
-             if not available_plate_ids:
-                  print("Error: No plates available to assign remaining vertices!")
-             else:
-                  assigned_randomly = 0
-                  for v_idx in still_unassigned_after_bfs:
-                      # Double check it wasn't assigned somehow
-                      if self.vertices[v_idx].plate_id == -1:
-                           chosen_plate_id = random.choice(available_plate_ids)
-                           self.vertices[v_idx].plate_id = chosen_plate_id
-                           self.plates[chosen_plate_id].add_vertex(v_idx, self.vertices)
-                           assigned_count_in_fallback += 1
-                           assigned_randomly += 1
-                  print(f"Force assigned {assigned_randomly} vertices randomly.")
-
-
-        print(f"Fallback phase finished. Total vertices assigned in fallback: {assigned_count_in_fallback}")
-
+    @time_function
     def _assign_base_elevations(self):
         for plate in self.plates.values():
             for v_idx in plate.vertices:
                 variation = np.random.uniform(-0.1, 0.1)
                 self.vertices[v_idx].elevation = plate.base_elevation + (variation * plate.base_elevation)
 
+    @time_function
     def _calculate_boundary_elevations(self):
         """Calculate elevations based on plate interactions at boundaries."""
         boundary_vertices = []
@@ -753,6 +617,7 @@ class World:
             vertex.elevation = elevation
         print('boundary effects calculated')
 
+    @time_function
     def _add_variations(self, iterations=5):
             """
             Add natural elevation variations using PyTorch for GPU acceleration.
@@ -1012,6 +877,7 @@ class World:
             print(f"Data synchronization took {time.time() - sync_start_time:.2f}s")
             print(f"--- PyTorch Elevation Variation Finished (Total Time: {time.time() - start_total_time:.2f}s) ---")
 
+    @time_function
     def _smooth_elevations(self, iterations=2):
         """Smooth elevation values with plate-aware smoothing."""
         for _ in range(iterations):
@@ -1039,6 +905,7 @@ class World:
 
     #### fluids
 
+    @time_function
     def simulate_water(self, iterations: int = 5):
         print("Starting water simulation...")
         
@@ -1160,6 +1027,7 @@ class World:
         
         print("Water simulation complete")
 
+    @time_function
     def _generate_rivers(self, min_flow=1.0):
         """Identify and mark rivers based on accumulated water flow.
         min_flow: minimum flow rate in TL/iteration to be considered a river."""
@@ -1198,6 +1066,7 @@ class World:
         
         print(f"Generated {sum(1 for v in self.vertices if v.is_river)} river segments")
 
+    @time_function
     def _connect_river_segments(self):
         """Ensure rivers form continuous paths from source to ocean/lake."""
         # This is a simplified approach - more sophisticated methods could be used
@@ -1237,6 +1106,7 @@ class World:
                     if current in path[:-1]:
                         break
 
+    @time_function
     def _find_lakes(self, min_size=3.0):
         lakes = []
         visited = set()
@@ -1273,6 +1143,7 @@ class World:
 
     #### utility functions
 
+    @time_function
     def _compute_vertex_areas(self) -> torch.Tensor:
         """Compute vertex areas by distributing adjacent face areas to vertices.
         Each vertex gets an equal share of each adjacent face's area."""
@@ -1299,6 +1170,7 @@ class World:
         self.vertex_areas = (vertex_areas).cpu()
         return vertex_areas
 
+    @time_function
     def calculate_all_face_areas(self):
             
         areas = batch_calculate_areas(self.faces, self.vertices)
@@ -1307,7 +1179,8 @@ class World:
             
         return areas
 
-    def _get_midpoint_vertex(self, v1_idx, v2_idx, midpoint_cache, next_level_vertices, radius):
+    @time_function
+    def _get_midpoint_vertex(self, v1_idx, v2_idx, midpoint_cache, next_level_vertices):
         """
         Helper: Calculates or retrieves the midpoint vertex between two vertices.
         Adds the new vertex if it doesn't exist and normalizes it.
@@ -1322,14 +1195,15 @@ class World:
         v2 = self.vertices[v2_idx]
         mid_pos = (v1.pos + v2.pos) / 2.0
         new_v = Vertex(mid_pos[0], mid_pos[1], mid_pos[2])
-        new_v.normalize(radius)
-
+        new_v.normalize()
+        new_v.plate_id = v1.plate_id
         # Add to the *accumulating* vertex list for the next level
         new_idx = len(next_level_vertices)
         next_level_vertices.append(new_v)
         midpoint_cache[key] = new_idx # Cache the index in the accumulating list
         return new_idx
 
+    @time_function
     def _get_face_center_vertex(self, face, center_cache, next_level_vertices, radius):
         """
         Helper: Calculates or retrieves the center vertex of a face.
@@ -1352,6 +1226,7 @@ class World:
         center_cache[key] = new_idx # Cache the index in the accumulating list
         return new_idx
 
+    @time_function
     def _compute_face_centroid(self, v_indices, vertices, radius):
         face_vertex_positions = np.array([vertices[idx].pos for idx in v_indices], dtype=float)
         centroid_pos = np.mean(face_vertex_positions, axis=0)
@@ -1359,6 +1234,7 @@ class World:
         normalized_centroid_pos = centroid_pos * (radius / norm)
         return Vertex(*normalized_centroid_pos)
     
+    @time_function
     def _initialize_neighbor_map(self) -> None:
         if self._neighbor_map_initialized:
             return
@@ -1368,6 +1244,7 @@ class World:
         vertex_neighbor_sets = [set() for _ in range(len(self.vertices))]
         vertex_face_map = [[] for _ in range(len(self.vertices))]
         face_neighbor_sets = [set() for _ in range(len(self.faces))]
+        all_positions = np.array([v.pos for v in self.vertices])
         edge_face_map = {}
         for fid, face in enumerate(self.faces):
             for vid in face.v_indices:
@@ -1390,36 +1267,39 @@ class World:
                 edge_face_map[edge] = fid
 
         for v_idx, neighbors in enumerate(vertex_neighbor_sets):
-            for neighbor_idx in neighbors:
-                dist = np.linalg.norm(self.vertices[v_idx].pos - self.vertices[neighbor_idx].pos)
-                try:
-                    weight = 1.0 / dist
-                except ZeroDivisionError:
-                    weight = 1.0 / (dist + 1e9)
-                self.vertices[v_idx].neighbors[neighbor_idx] = weight
+            neighbor_indices = np.array(list(neighbors))
+            dists = np.linalg.norm(all_positions[v_idx] - all_positions[neighbor_indices], axis=1)
+            weights = np.divide(1.0, dists, where=dists!=0, out=dists)
+            for n_idx in neighbor_indices:
+                self.vertices[v_idx].neighbors[n_idx] = weights
+
         
         self._face_neighbors = [list(s) for s in face_neighbor_sets]
         self._vertex_face_map = vertex_face_map
         self._neighbor_map_initialized = True
         print("Neighbor map initialized")
 
+
+    @time_function
     def _find_vertex_neighbors(self, vertex_idx):
-        if not self._neighbor_map_initialized:
-            self._initialize_neighbor_map()
+        self._initialize_neighbor_map()
         return self.vertices[vertex_idx].neighbors
     
+    @time_function
     def _get_adjacent_faces(self, vertex_idx):
         """Get all faces adjacent to a vertex"""
         if not self._neighbor_map_initialized:
             self._initialize_neighbor_maps()
         return [self.faces[i] for i in self._vertex_face_map[vertex_idx]]
 
+    @time_function
     def _get_face_neighbors(self, face_idx):
         """Get faces that share an edge with the given face"""
         if not self._neighbor_map_initialized:
             self._initialize_neighbor_maps()
         return [self.faces[i] for i in self._face_neighbors[face_idx]]
 
+    @time_function
     def _build_neighbor_tensors(self):
         num_vertices = len(self.vertices)
         neighbor_lists = [list(self._find_vertex_neighbors(i)) for i in range(num_vertices)]
@@ -1448,6 +1328,7 @@ class World:
 
         return neighbor_indices, neighbor_mask, max_neighbors
   
+    @time_function
     def _find_vertices_within_radius(self, start_vidx, radius):
         """
         Find all vertices within a given graph distance (number of edges) from a starting vertex.
@@ -1494,6 +1375,7 @@ class World:
 
     #### display
 
+    @time_function
     def plot(self, fig=None, ax=None, cmap='terrain', edge_color=None, alpha=1):
         """Plots the shape with interactive radio toggle for elevation/plate/water visualization."""
         if fig is None or ax is None:
@@ -1574,6 +1456,7 @@ class World:
         
         return fig, ax, radio
 
+    @time_function
     def _create_collection(self, plot_data, mode='elevation'):
         """Create the appropriate Poly3DCollection based on visualization mode."""
         if mode == 'elevation':
@@ -1605,6 +1488,7 @@ class World:
             alpha=plot_data['alpha']
         )
     
+    @time_function
     def _add_colorbar(self, plot_data, ax, mode='elevation'):
         fig = plot_data['fig']
         cbar_ax = fig.add_axes([0.85, 0.15, 0.03, 0.7])
@@ -1639,6 +1523,7 @@ class World:
         
         return cbar
 
+    @time_function
     def export_to_obj(self, filename, include_attributes=True):
         """Export the world to an OBJ file format.
         
@@ -1688,6 +1573,7 @@ class World:
         if include_attributes:
             self._write_mtl_file(filename.replace('.obj', '.mtl'))
 
+    @time_function
     def _calculate_vertex_normals(self):
         """Calculate vertex normals by averaging adjacent face normals."""
         if not self._neighbor_map_initialized:
@@ -1723,6 +1609,7 @@ class World:
             if normal_length > 0:
                 v.normal /= normal_length
 
+    @time_function
     def _write_mtl_file(self, mtl_filename):
         """Write a companion material file that uses vertex colors."""
         with open(mtl_filename, 'w') as f:
