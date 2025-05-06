@@ -28,6 +28,7 @@ class World:
         self.minheight: np.float64 = -15000
         self.maxheight: np.float64  = 15000
         self.platecount: np.int8 = 15
+        self.radius: np.float64 = 1.0 # in earth radii
         self.rainfall_rate: float = 0.002  # 2mm per iteration
         self.evaporation_rate: float = 0.001  # 1mm per iteration
         self.max_water_flow: float = 0.5  # Max 50cm flow per iteration

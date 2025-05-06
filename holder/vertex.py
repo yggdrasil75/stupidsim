@@ -14,6 +14,7 @@ class Vertex:
         self.river_size = 0.0
         self.water_depth = 0.0
         self.water_volume = 0.0
+        self.albedo = 0.06
 
     @time_function
     def normalize(self, radius=1.0):

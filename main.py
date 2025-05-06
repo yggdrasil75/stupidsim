@@ -7,6 +7,8 @@ from shapes.icosahedron import Icosahedron
 from shapes.truncatedicosahedron import TruncatedIcosahedron
 from shapes.TruncatedIcosidodecahedron import TruncatedIcosidodecahedron
 from shapes.truncatedtetrahedron import truncatedTetrahedron
+from system import System
+from systemviwer import SystemViewer
 from util import print_timing_stats
 
 # --- Main Execution ---
@@ -42,17 +44,25 @@ if __name__ == "__main__":
         raise ValueError(f"Unknown shape type: {shape_type}")
 
     shape.subdivide(sphere_radius, num_subdivisions)
+    system = System(2, 1000)
+    system.place_world_in_habitable_zone(shape, 1)
+    system.update_environment()
 
     shape.genElevations(plates, elevationmin, elevationmax)
-    shape.simulate_water()
+    #shape.simulate_water()
 
     # print(f'plates have the following vertex count: ')
     # for plate in shape.plates.values():
     #     print(f'{plate.plate_id} has {len(plate.vertices)}')
     
-    fig, ax, radio = shape.plot()
+    #fig, ax, radio = shape.plot()
+    # system.plot_system()
+    # system.plot_world(0)
+    # system.plot_world_environment(0)
+    viewer = SystemViewer(system)
+    viewer.launch()
 
-    ax.set_title(f'Sphere Approx. ({shape_type.capitalize()} Subdivided {num_subdivisions} Times)')
+    #ax.set_title(f'Sphere Approx. ({shape_type.capitalize()} Subdivided {num_subdivisions} Times)')
     print_timing_stats()
-    plt.show()
+    plt.show(block=True)
     
