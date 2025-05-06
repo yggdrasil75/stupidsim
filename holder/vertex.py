@@ -1,6 +1,7 @@
 from functools import lru_cache
 import numpy as np
 import torch
+from globals import DEVICE
 from util import time_function
 
 
@@ -15,6 +16,10 @@ class Vertex:
         self.water_depth = 0.0
         self.water_volume = 0.0
         self.albedo = 0.06
+        self.solar_radiation = 0
+        self.tidal_force = 0
+        self.temperature = 0
+        self.reflected_light = 0
 
     @time_function
     def normalize(self, radius=1.0):
@@ -77,10 +82,10 @@ class Vertex:
             angle = np.degrees(angle)
         return angle
 
-    def add_neighbor(self, neighbor_vertex, device=None):
+    def add_neighbor(self, neighbor_vertex):
         """Add a neighboring vertex with calculated distance."""
         if neighbor_vertex not in self.neighbors:
-            distance = self.distance_to(neighbor_vertex, device=device)
+            distance = self.distance_to(neighbor_vertex, device=DEVICE)
             self.neighbors[neighbor_vertex] = distance
             neighbor_vertex.neighbors[self] = distance  # reciprocal
 
@@ -98,3 +103,7 @@ class Vertex:
         if device is not None:
             return torch.from_numpy(self.pos).to(device)
         return None
+    
+class SpaceVertex(Vertex):
+    def __init__(self, x, y, z):
+        super().__init__(x, y, z)

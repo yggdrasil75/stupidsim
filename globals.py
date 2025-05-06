@@ -1,6 +1,7 @@
 
 from matplotlib import colors
 import numpy as np
+import torch
 
 VMIN=-11000
 VMAX=11000
@@ -19,3 +20,4 @@ CONTINENTAL_BASE_ELEVATION = 500.0 # meters
 OCEANIC_BASE_ELEVATION = -4000.0 # meters
 
 PHI = (1.0 + np.sqrt(5.0)) / 2.0
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

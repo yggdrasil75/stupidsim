@@ -45,7 +45,7 @@ if __name__ == "__main__":
 
     shape.subdivide(sphere_radius, num_subdivisions)
     system = System(2, 1000)
-    system.place_world_in_habitable_zone(shape, 1)
+    system.add_world(shape, 1, 365.25)
     system.update_environment()
 
     shape.genElevations(plates, elevationmin, elevationmax)
