@@ -49,7 +49,7 @@ if __name__ == "__main__":
     system.update_environment()
 
     shape.genElevations(plates, elevationmin, elevationmax)
-    #shape.simulate_water()
+    shape.simulate_water()
 
     # print(f'plates have the following vertex count: ')
     # for plate in shape.plates.values():

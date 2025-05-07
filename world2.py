@@ -10,16 +10,16 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 import torch
 from holder.face import Face
-from holder.globals import CONTINENTAL_CRUST_THICKNESS, OCEANIC_CRUST_THICKNESS, PLATE_TYPE_CONTINENTAL, PLATE_TYPE_OCEANIC
+from holder.globals import CONTINENTAL_CRUST_THICKNESS, EQUATORIAL_RADIUS, OCEANIC_CRUST_THICKNESS, PLATE_TYPE_CONTINENTAL, PLATE_TYPE_OCEANIC
 from holder.vertex import Vertex
 from plate import Plate
-from util import batch_calculate_areas, plate_grow_worker_process
+from util import batch_calculate_areas, plate_grow_worker_process, time_function
 
-class world:
+class World:
     def __init__(self):
         self.vertices: list[Vertex] = []
         self.faces: list[Face] = []
-        self.plates: list[Plate] = {}
+        self.plates: list[Plate] = []
         self._neighbor_map_initialized: bool = False
         self.sea_level: np.float64 = 0.0
         self.minheight: np.float64 = -15000
@@ -32,6 +32,7 @@ class world:
         self.min_lake_volume: float = 3.0
         self.vertex_areas = []
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.radius = EQUATORIAL_RADIUS
 
     def add_vertex(self, vertex):
         self.vertices.append(vertex)
@@ -40,10 +41,8 @@ class world:
     def add_face(self, face):
         self.faces.append(face)
 
-    def create_world(self, radius=1.0, plates = 15, min_height = -15000, max_height = 15000):
+    def create_world(self, radius=1.0, plates = 15):
         self.platecount = plates
-        self.elevationMin = min_height
-        self.elevationMax = max_height
         self._create_world(radius=1.0)
 
     def _create_world(self, radius = 1.0):
@@ -60,8 +59,6 @@ class world:
             if level >= 2:
                 self._neighbor_map_initialized = False
                 #self._fix_non_contiguous_vertices()
-        for plate in self.plates:
-            plate.set_continental_centers(self.vertices)
     
     def _subdivide(self):
         return NotImplementedError("subclass implements _subdivide()")
@@ -116,23 +113,15 @@ class world:
     ########## PLATES ###########
 
     def _create_plates(self):
-        self.plates = {}
         minor_plates_count = max(1, int(self.platecount * random.uniform(0.4, 0.6)))
         major_plates_ids = set(random.sample(range(self.platecount), minor_plates_count))
         plate_types = []
         for _ in range(self.platecount):
-            if len(plate_types) > 0:
-                if plate_types[-1] == PLATE_TYPE_CONTINENTAL: next_type = PLATE_TYPE_CONTINENTAL
-                else: next_type = PLATE_TYPE_OCEANIC
-            else:
-                next_type = random.choice([PLATE_TYPE_CONTINENTAL, PLATE_TYPE_OCEANIC])
+            next_type = random.choice([PLATE_TYPE_CONTINENTAL, PLATE_TYPE_OCEANIC])
             plate_types.append(next_type)
-        
-        for i in range(self.platecount // 3):
-            if random.random() < 0.3:
-                plate_types[i] = 1 - plate_types[i]
         for plate_id in range(self.platecount):
-            self.plates[plate_id] = Plate(plate_id, plate_types[i], plate_id in major_plates_ids)
+            self.plates.append(Plate(plate_id, plate_types[plate_id], plate_id in major_plates_ids))
+
 
     def _assign_tectonic_plates(self, max_iterations=100):
         num_vertices = len(self.vertices)
@@ -230,8 +219,10 @@ class world:
                             assigned_in_fallback += 1
                     processed_indices.update(visited)
 
-    def _gen_elevations(self):
+    def genElevations(self):
         self._assign_base_elevations()
+        for plate in self.plates:
+            plate.set_continental_centers(vertex_list=self.vertices)
         self._calculate_boundary_elevations()
 
     def _assign_base_elevations(self):
@@ -239,3 +230,109 @@ class world:
             for v_idx in plate.vertices:
                 variation = np.random.uniform(-0.1, 0.1)
                 self.vertices[v_idx].elevation = plate.base_elevation + (variation * plate.base_elevation)
+
+
+    def _calculate_boundary_elevations(self):
+        boundary_vertices = []
+        boundary_info = {}
+
+        for plate in self.plates:
+            for v_idx in plate.get_boundary_vertices(self):
+                vertex = self.vertices[v_idx]
+                neighbors = self._find_vertex_neighbors(v_idx)
+
+                adjacent_plates = set()
+                for n in neighbors:
+                    adjacent_plates.add(self.vertices[n].plate_id)
+                adjacent_plates.add(vertex.plate_id)
+                
+                movement_vectors = []
+                current_plate = self.plates[vertex.plate_id]
+                
+                dist_to_continent = min(
+                    np.linalg.norm(vertex.pos - center) for center in current_plate.continental_centers
+                ) if current_plate.continental_centers else 1.0
+                normalized_continent_dist = dist_to_continent / self.radius  # normalize by Earth radius
+                
+                for plate_id in adjacent_plates:
+                    if plate_id == vertex.plate_id:
+                        continue
+                        
+                    other_plate = self.plates[plate_id]
+                    rel_velocity = current_plate.velocity - other_plate.velocity
+                    
+                    # Project onto vertex normal
+                    normal = vertex.pos / np.linalg.norm(vertex.pos)
+                    movement = np.dot(rel_velocity, normal)
+                    movement_vectors.append(movement)
+                
+                boundary_info[v_idx] = {
+                    'movements': movement_vectors,
+                    'adjacent_plates': adjacent_plates,
+                    'plate_type': current_plate.type,
+                    'continental_ratio': current_plate.continental_ratio,
+                    'continent_dist': normalized_continent_dist,
+                    'is_minor': current_plate.is_minor,
+                    'speed': current_plate.speed
+                }
+                boundary_vertices.append(v_idx)
+
+        # Second pass: assign elevations based on boundary interactions and plate properties
+        for v_idx in boundary_vertices:
+            vertex = self.vertices[v_idx]
+            info = boundary_info[v_idx]
+            movements = info['movements']
+            plate_type = info['plate_type']
+            continental_ratio = info['continental_ratio']
+            continent_dist = info['continent_dist']
+            is_minor = info['is_minor']
+            speed = info['speed']
+            
+            if not movements:
+                continue
+                
+            avg_movement = np.mean(movements)
+            
+            # Base elevation based on plate type and continental ratio
+            if plate_type == PLATE_TYPE_CONTINENTAL:
+                base_elevation = CONTINENTAL_CRUST_THICKNESS
+                # Higher elevation closer to continental centers
+                continent_influence = (1 - continent_dist) * continental_ratio
+            else:
+                base_elevation = OCEANIC_CRUST_THICKNESS
+                continent_influence = 0
+            
+            # Modify based on boundary interactions
+            if plate_type == PLATE_TYPE_CONTINENTAL:
+                # Continental plates - mountain building influenced by continental ratio
+                movement_factor = (avg_movement + 1) / 2  # normalize to 0-1 range
+                elevation = base_elevation + (self.maxheight - base_elevation) * movement_factor
+                
+                # Enhance mountains near continental cores
+                elevation *= (1 + 0.5 * continent_influence)
+                
+                # Minor plates create more localized features
+                if is_minor:
+                    elevation *= 0.7  # reduce scale for minor plates
+            else:
+                # Oceanic plates
+                if avg_movement > 0:  # Converging
+                    # Trenches - deeper for faster plates
+                    trench_depth = (OCEANIC_CRUST_THICKNESS - self.minheight) * avg_movement
+                    elevation = base_elevation - trench_depth * (0.5 + speed * 0.5)
+                    
+                    # If colliding with continental crust, create accretion wedge
+                    if any(self.plates[pid].type == PLATE_TYPE_CONTINENTAL for pid in info['adjacent_plates']):
+                        elevation += 0.3 * (self.maxheight - base_elevation) * continental_ratio
+                else:  # Diverging (mid-ocean ridges)
+                    # Ridges - higher for faster spreading
+                    ridge_height = (0.5 - OCEANIC_CRUST_THICKNESS) * abs(avg_movement)
+                    elevation = base_elevation + ridge_height * (0.5 + speed * 0.5)
+            
+            # Apply minor plate adjustment
+            if is_minor:
+                elevation *= 0.8  # minor plates have more subdued topography
+                
+            vertex.elevation = elevation
+        
+        print('boundary effects calculated with continental influences')

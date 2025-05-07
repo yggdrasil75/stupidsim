@@ -5,7 +5,7 @@ from holder.globals import CONTINENTAL_CRUST_THICKNESS, OCEANIC_CRUST_THICKNESS,
 
 
 class Plate:
-    def __init__(self, plate_id, conoce=None, is_minor=False):
+    def __init__(self, plate_id, conoce, is_minor=False):
         self.plate_id = plate_id
         #self.velocity = np.random.uniform(low=-1, high=1, size=3)
 
@@ -23,7 +23,12 @@ class Plate:
                               else CONTINENTAL_CRUST_THICKNESS)
         if self.type == PLATE_TYPE_CONTINENTAL:
             self.continental_ratio = random.uniform(0.4, 0.95)
-            self.continental_centers = []
+        else:
+            self.continental_ratio = random.uniform(0.0, 0.1)
+        self.continental_centers = []
+
+    def __repr__(self):
+        return f'Plate({self.plate_id}, heading towards {self.velocity} with a speed of {self.speed}.)\nPlate is {"continental" if self.type else "oceanic"}, and {"is" if self.is_minor else "is not"} a minor plate'
 
     def resetVertices(self):
         self.vertices.clear()
@@ -41,7 +46,7 @@ class Plate:
                 boundary.append(v_idx)
         return boundary
 
-    def set_continental_centers(self, vertex_list, num_centers=None):
+    def set_continental_centers(self, vertex_list):
         if self.type != PLATE_TYPE_CONTINENTAL or not self.vertices:
             return  # Exit if not continental or no vertices
         
