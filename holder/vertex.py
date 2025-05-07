@@ -112,3 +112,8 @@ class Vertex:
 class SpaceVertex(Vertex):
     def __init__(self, x, y, z):
         super().__init__(x, y, z)
+
+class StellarVertex(Vertex):
+    def __init__(self, x, y, z):
+        super().__init__(x, y, z)
+        self.is_stellar = True
