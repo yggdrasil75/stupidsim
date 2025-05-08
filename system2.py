@@ -3,6 +3,7 @@ from matplotlib import pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.colors import to_rgba
 import numpy as np
+import numba
 import torch
 from typing import Dict, Set, Tuple, List, Optional
 from collections import defaultdict
@@ -45,6 +46,28 @@ class Star:
 	def __repr__(self):
 		return f"Star(M={self.mass}M☉, R={self.radius}R☉, T={self.temperature}K)"
 
+@numba.jit(nopython=True)
+def assign_neighbors_numba( positions: np.ndarray, resolution: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+	n = len(positions)
+	resolution_sq = (resolution * 1.7)**2
+	v1_indices = []
+	v2_indices = []
+	distances = []
+	
+	for i in range(n):
+		for j in range(i+1, n):
+			dx = positions[i, 0] - positions[j, 0]
+			dy = positions[i, 1] - positions[j, 1]
+			dz = positions[i, 2] - positions[j, 2]
+			dist_sq = dx*dx + dy*dy + dz*dz
+			
+			if dist_sq <= resolution_sq:
+				dist = np.sqrt(dist_sq)
+				v1_indices.append(i)
+				v2_indices.append(j)
+				distances.append(dist)
+	
+	return np.array(v1_indices), np.array(v2_indices), np.array(distances)
 
 class System:
 	def __init__(self, radius: float = 2.0, resolution: float = 0.05):
@@ -151,40 +174,15 @@ class System:
 		
 	@time_function
 	def _assign_neighbors(self):
-		resolution = self.resolution * 1.7
-		for cell in self.bbox_dict:
-			neighborcells = self._get_nearby_cells(cell)
-			vidxs = list(cell)
-			for cell2 in neighborcells:
-				vidxs.extend(cell2)
-			vertles = [self.vertices[v] for v in vidxs]
-			vertlepos = np.array([v.pos for v in vertles])
-			try:
-				positions = torch.tensor(vertlepos, device=DEVICE)
-				diff = torch.abs(positions.unsqueeze(1) - positions.unsqueeze(0))
-				mask = torch.all(diff <= resolution, dim=2)
-				mask.fill_diagonal_(False)
-				v_ind, v_ids = torch.where(mask)
-				for v_idx, v_idx2 in zip(v_ind, v_ids):
-					if v_idx < v_idx2:
-						v = self.vertices[v_idx]
-						v2 = self.vertices[v_idx2]
-						dist = v.distance_to(v2)
-						v.add_neighbor_preweighted(v_idx2, dist)
-						v2.add_neighbor_preweighted(v_idx, dist)
-			except:
-				positions = vertlepos
-				diff = np.abs(positions[:, None, :] - positions[None, :, :])
-				mask = np.all(diff <= resolution, axis=2)
-				np.fill_diagonal(mask, False)
-				v_ind, v_ids = np.where(mask)
-				for v_idx, v_idx2 in zip(v_ind, v_ids):
-					if v_idx < v_idx2:
-						v = self.vertices[v_idx]
-						v2 = self.vertices[v_idx2]
-						dist = v.distance_to(v2)
-						v.add_neighbor_preweighted(v_idx2, dist)
-						v2.add_neighbor_preweighted(v_idx, dist)
+
+		positions = np.array([v.pos for v in self.vertices])
+		v1_indices, v2_indices, distances = assign_neighbors_numba(positions, self.resolution)
+		
+		for i, j, dist in zip(v1_indices, v2_indices, distances):
+			v1 = self.vertices[i]
+			v2 = self.vertices[j]
+			v1.add_neighbor_preweighted(j, dist)
+			v2.add_neighbor_preweighted(i, dist)
 
 	@time_function
 	def _assign_neighbors_star(self, star):
@@ -303,7 +301,7 @@ class System:
 		cbar = fig.colorbar(sc, ax=ax, shrink=0.5)
 		cbar.set_label('Normalized Distance from Origin')
 		
-		# Plot connections with thinner, more transparent lines
+		
 		# for v in verts:
 		# 	if v.neighbors:
 		# 		neighbors_pos = np.array([self.vertices[n].pos for n in v.neighbors.keys()])
@@ -317,8 +315,8 @@ class System:
 		plt.show()
 
 
-solar_system = System(radius=1.0, resolution=0.1)
-sun = Star(1, 0.1, 5778, 'yellow')
-solar_system.add_star(sun)
+solar_system = System(radius=1.0, resolution=0.05)
+#sun = Star(1, 0.1, 5778, 'yellow')
+#solar_system.add_star(sun)
 print_timing_stats()
 solar_system.plot_system()
