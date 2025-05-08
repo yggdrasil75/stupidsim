@@ -123,7 +123,6 @@ class World:
         for plate_id in range(self.platecount):
             self.plates.append(Plate(plate_id, plate_types[plate_id], plate_id in major_plates_ids))
 
-
     def _assign_tectonic_plates(self, max_iterations=100):
         num_vertices = len(self.vertices)
         print("Initializing plate assignment...")
@@ -231,7 +230,6 @@ class World:
             for v_idx in plate.vertices:
                 variation = np.random.uniform(-0.1, 0.1)
                 self.vertices[v_idx].elevation = plate.base_elevation + (variation * plate.base_elevation)
-
 
     def _calculate_boundary_elevations(self):
         boundary_vertices = []

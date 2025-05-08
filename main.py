@@ -43,7 +43,7 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown shape type: {shape_type}")
 
-    shape.subdivide(sphere_radius, num_subdivisions)
+    shape.subdivide(num_subdivisions)
     system = System(2, 1000)
     system.add_world(shape, 1, 365.25)
     system.update_environment()

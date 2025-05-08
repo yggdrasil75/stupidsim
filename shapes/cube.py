@@ -138,10 +138,6 @@ class Cube(World):
                 
                 new_quad = Face((v_orig_idx, mid_curr_idx, center_idx, mid_prev_idx))
                 new_faces.append(new_quad)
-            
-            # for i, v in enumerate(next_vertices):
-            #     v.plate_id = plate
-
         self.vertices = next_vertices
         self.faces = new_faces
 
