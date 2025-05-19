@@ -20,6 +20,8 @@ class Vertex:
         self.tidal_force = 0
         self.temperature = 0
         self.reflected_light = 0
+        self.MOLES: dict[str, float] = {} # grams of mole ^ -1
+        self.groundwater: float = 0.0
 
     @time_function
     def normalize(self, radius=1.0):
