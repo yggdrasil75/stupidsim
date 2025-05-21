@@ -1,0 +1,52 @@
+{
+    "types": [
+        {
+            "name": "Phototrophic Bacteria",
+            "compatible_energy_modes": ["oxygenic_photosynthesis", "anoxygenic_photosynthesis"],
+            "compatible_reproduction_modes": ["binary_fission", "gene_uptake"],
+            "size": 1,
+            "mobility": 0.1,
+            "color": "green",
+            "preferred_environment": {
+                "oxygen": "low",
+                "light": "high"
+            }
+        },
+        {
+            "name": "Aerobic Heterotroph",
+            "compatible_energy_modes": ["aerobic_respiration"],
+            "compatible_reproduction_modes": ["binary_fission", "conjugation"],
+            "size": 1,
+            "mobility": 0.3,
+            "color": "blue",
+            "preferred_environment": {
+                "oxygen": "high",
+                "light": "none"
+            }
+        },
+        {
+            "name": "Anaerobic Archaea",
+            "compatible_energy_modes": ["methanogenesis", "sulfate_reduction"],
+            "compatible_reproduction_modes": ["binary_fission", "budding"],
+            "size": 1,
+            "mobility": 0.05,
+            "color": "purple",
+            "preferred_environment": {
+                "oxygen": "none",
+                "light": "none"
+            }
+        },
+        {
+            "name": "Cyanobacteria",
+            "compatible_energy_modes": ["oxygenic_photosynthesis"],
+            "compatible_reproduction_modes": ["binary_fission", "fragmentation"],
+            "size": 1.5,
+            "mobility": 0.2,
+            "color": "cyan",
+            "preferred_environment": {
+                "oxygen": "moderate",
+                "light": "high"
+            }
+        }
+    ]
+}

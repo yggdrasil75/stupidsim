@@ -234,18 +234,26 @@ class GameOfLife3D:
             if mode.requires_oxygen:
                 oxygen_consumers += (self.energy_assignments == mode_idx).float() * 0.2
         
-        # Diffusion (simple 3D convolution)
-        diffusion_kernel = torch.tensor([[[0, 0.1, 0],
-                                        [0.1, 0.6, 0.1],
-                                        [0, 0.1, 0]]], device=self.DEVICE).view(1, 1, 3, 3, 3) / 1.1
-        
-        # Apply changes to oxygen grid
+        # Apply production and consumption
         self.oxygen_grid = self.oxygen_grid + oxygen_producers - oxygen_consumers
-        self.oxygen_grid = torch.nn.functional.conv3d(
-            self.oxygen_grid.unsqueeze(0).unsqueeze(0),
-            diffusion_kernel,
-            padding=1
-        ).squeeze()
+        
+        # Diffusion (3D convolution)
+        # Create proper 3D diffusion kernel (center is 0.6, faces 0.1, edges 0.0, corners 0.0)
+        diffusion_kernel = torch.zeros((3, 3, 3), device=self.DEVICE)
+        diffusion_kernel[1, 1, 1] = 0.6  # center
+        diffusion_kernel[1, 1, 0] = diffusion_kernel[1, 1, 2] = 0.1  # front/back
+        diffusion_kernel[1, 0, 1] = diffusion_kernel[1, 2, 1] = 0.1  # left/right
+        diffusion_kernel[0, 1, 1] = diffusion_kernel[2, 1, 1] = 0.1  # top/bottom
+        diffusion_kernel = diffusion_kernel.unsqueeze(0).unsqueeze(0)  # shape: [1,1,3,3,3]
+        
+        # Pad the grid for boundary conditions
+        padded_oxygen = torch.nn.functional.pad(self.oxygen_grid.unsqueeze(0).unsqueeze(0), (1,1,1,1,1,1), mode='replicate')
+        
+        # Apply diffusion
+        diffused = torch.nn.functional.conv3d(padded_oxygen, diffusion_kernel, padding=0).squeeze()
+        
+        # Update with diffused version
+        self.oxygen_grid = diffused
         
         # Ensure oxygen stays within reasonable bounds
         self.oxygen_grid = torch.clamp(self.oxygen_grid, 0.0, 100.0)
