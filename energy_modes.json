@@ -1,0 +1,38 @@
+
+{
+    "modes": [
+        {
+            "name": "Oxygenic Photosynthesis",
+            "type": "Phototrophy (O₂-producing)",
+            "energy_source": "light",
+            "efficiency": 0.8,
+            "oxygen_requirement": "produces",
+            "organisms": ["Cyanobacteria", "Chlorella"],
+            "color": "blue",
+            "rules": {},
+            "maintenance_cost": 2
+        },
+        {
+            "name": "Aerobic Respiration",
+            "type": "Oxygen-dependent",
+            "energy_source": "oxygen",
+            "efficiency": 0.9,
+            "oxygen_requirement": "requires",
+            "organisms": ["E. coli", "Yeast"],
+            "color": "red",
+            "rules": {},
+            "maintenance_cost": 3
+        },
+        {
+            "name": "Fermentation",
+            "type": "Organic breakdown (anaerobic)",
+            "energy_source": "organic",
+            "efficiency": 0.5,
+            "oxygen_requirement": "inhibited_by",
+            "organisms": ["Lactic acid bacteria"],
+            "color": "green",
+            "rules": {},
+            "maintenance_cost": 1
+        }
+    ]
+}

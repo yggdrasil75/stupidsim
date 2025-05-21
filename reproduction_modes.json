@@ -1,0 +1,269 @@
+{
+  "modes": [
+    {
+      "name": "Binary Fission",
+      "type": "Asexual",
+      "organisms": [
+        "Bacteria",
+        "Archaea",
+        "Protozoa"
+      ],
+      "initial_rate": 0.35,
+      "color": "#FF0000",
+      "energy_cost": 40,
+      "child_energy": [30, 50],
+      "parent_cost": [30, 40],
+      "rules": {
+        "birth_conditions": {
+          "min_neighbors": 1,
+          "max_neighbors": 3
+        },
+        "survival_conditions": {
+          "min_neighbors": 1,
+          "max_neighbors": 3
+        }
+      }
+    },
+    {
+      "name": "Multiple Fission",
+      "type": "Asexual",
+      "organisms": [
+        "Protozoa (Plasmodium)"
+      ],
+      "initial_rate": 0.05,
+      "color": "#FF5733",
+      "energy_cost": 80,
+      "child_energy": [20, 30],
+      "parent_cost": [60, 80],
+      "rules": {
+        "birth_conditions": {
+          "min_neighbors": 2,
+          "max_neighbors": 4
+        },
+        "survival_conditions": {
+          "min_neighbors": 2,
+          "max_neighbors": 4
+        }
+      }
+    },
+    {
+      "name": "Budding",
+      "type": "Asexual",
+      "organisms": [
+        "Yeasts",
+        "Some protozoa"
+      ],
+      "initial_rate": 0.05,
+      "color": "#FFC300",
+      "energy_cost": 50,
+      "child_energy": [35, 45],
+      "parent_cost": [40, 50],
+      "rules": {
+        "birth_conditions": {
+          "min_neighbors": 1,
+          "max_neighbors": 2
+        },
+        "survival_conditions": {
+          "min_neighbors": 1,
+          "max_neighbors": 2
+        }
+      }
+    },
+    {
+      "name": "Endodyogeny/Endopolygeny",
+      "type": "Asexual",
+      "organisms": [
+        "Toxoplasma",
+        "Coccidians"
+      ],
+      "initial_rate": 0.03,
+      "color": "#DAF7A6",
+      "energy_cost": 70,
+      "child_energy": [25, 35],
+      "parent_cost": [50, 70],
+      "rules": {
+        "birth_conditions": {
+          "min_neighbors": 1,
+          "max_neighbors": 1
+        },
+        "survival_conditions": {
+          "min_neighbors": 1,
+          "max_neighbors": 2
+        }
+      }
+    },
+    {
+      "name": "Conjugation",
+      "type": "Genetic mix",
+      "organisms": [
+        "Ciliates",
+        "Some bacteria"
+      ],
+      "initial_rate": 0.08,
+      "color": "#00FFFF",
+      "energy_cost": 60,
+      "child_energy": [40, 60],
+      "parent_cost": [50, 60],
+      "rules": {
+        "birth_conditions": {
+          "min_same_type": 1,
+          "max_same_type": 1
+        },
+        "survival_conditions": {
+          "min_same_type": 1,
+          "max_same_type": 2
+        }
+      }
+    },
+    {
+      "name": "Transformation",
+      "type": "Gene uptake",
+      "organisms": [
+        "Bacteria"
+      ],
+      "initial_rate": 0.07,
+      "color": "#581845",
+      "energy_cost": 45,
+      "child_energy": [35, 50],
+      "parent_cost": [40, 45],
+      "rules": {
+        "birth_conditions": {
+          "min_neighbors": 1
+        },
+        "survival_conditions": {
+          "min_neighbors": 1
+        },
+        "can_acquire_genes": true
+      }
+    },
+    {
+      "name": "Transduction",
+      "type": "Virus-mediated",
+      "organisms": [
+        "Bacteria"
+      ],
+      "initial_rate": 0.05,
+      "color": "#900C3F",
+      "energy_cost": 55,
+      "child_energy": [30, 45],
+      "parent_cost": [45, 55],
+      "rules": {
+        "birth_conditions": {
+          "min_neighbors": 1,
+          "virus_present": true
+        },
+        "survival_conditions": {
+          "min_neighbors": 1
+        }
+      }
+    },
+    {
+      "name": "Automixis/Autogamy",
+      "type": "Genetic mix",
+      "organisms": [
+        "Ciliates"
+      ],
+      "initial_rate": 0.04,
+      "color": "#7FFFD4",
+      "energy_cost": 65,
+      "child_energy": [40, 55],
+      "parent_cost": [55, 65],
+      "rules": {
+        "birth_conditions": {
+          "min_same_type": 1
+        },
+        "survival_conditions": {
+          "min_same_type": 1
+        }
+      }
+    },
+    {
+      "name": "Syngamy (gamete fusion)",
+      "type": "Sexual",
+      "organisms": [
+        "Algae",
+        "Protozoa"
+      ],
+      "initial_rate": 0.1,
+      "color": "#0000FF",
+      "energy_cost": 75,
+      "child_energy": [50, 70],
+      "parent_cost": [60, 75],
+      "rules": {
+        "birth_conditions": {
+          "min_different_type": 1,
+          "max_different_type": 1
+        },
+        "survival_conditions": {
+          "min_different_type": 1,
+          "max_different_type": 2
+        }
+      }
+    },
+    {
+      "name": "GTAs/Nanotubes",
+      "type": "Gene exchange",
+      "organisms": [
+        "Bacteria",
+        "Archaea"
+      ],
+      "initial_rate": 0.06,
+      "color": "#FF7F50",
+      "energy_cost": 50,
+      "child_energy": [35, 50],
+      "parent_cost": [40, 50],
+      "rules": {
+        "birth_conditions": {
+          "min_neighbors": 1
+        },
+        "survival_conditions": {
+          "min_neighbors": 1
+        },
+        "can_transfer_genes": true
+      }
+    },
+    {
+      "name": "Cell Fusion",
+      "type": "Rare sexual",
+      "organisms": [
+        "Some protists",
+        "Algae"
+      ],
+      "initial_rate": 0.04,
+      "color": "#4B0082",
+      "energy_cost": 85,
+      "child_energy": [60, 80],
+      "parent_cost": [70, 85],
+      "rules": {
+        "birth_conditions": {
+          "min_different_type": 1
+        },
+        "survival_conditions": {
+          "min_different_type": 1
+        }
+      }
+    },
+    {
+      "name": "Parasexuality",
+      "type": "Non-meiotic",
+      "organisms": [
+        "Some fungi",
+        "Protists"
+      ],
+      "initial_rate": 0.08,
+      "color": "#9370DB",
+      "energy_cost": 70,
+      "child_energy": [45, 60],
+      "parent_cost": [55, 70],
+      "rules": {
+        "birth_conditions": {
+          "min_neighbors": 1
+        },
+        "survival_conditions": {
+          "min_neighbors": 1
+        },
+        "can_recombine_genes": true
+      }
+    }
+  ]
+}
