@@ -216,7 +216,8 @@ class GameOfLife3D:
                 repro_config: str = 'reproduction_modes.json',
                 device: Optional[str] = None,
                 light_intensity: float = 100.0,
-                oxygen_level: float = 50.0):
+                oxygen_level: float = 50.0,
+                gui: bool = True):
         """
         Initialize the 3D simulation environment.
         
@@ -228,6 +229,7 @@ class GameOfLife3D:
             device: Hardware device ('cuda' or 'cpu')
             light_intensity: Initial light level at grid top
             oxygen_level: Initial oxygen concentration
+            gui: Whether to enable GUI visualization
         """
         # Grid dimensions and initialization parameters
         self.ROWS, self.COLS, self.DEPTH = grid_size
@@ -235,6 +237,7 @@ class GameOfLife3D:
         self.DEVICE = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.LIGHT_INTENSITY = light_intensity
         self.OXYGEN_LEVEL = oxygen_level
+        self.GUI = gui
         
         # Load configuration files
         self._load_configurations(energy_config, repro_config)
@@ -325,9 +328,8 @@ class GameOfLife3D:
         """Count live neighbors for all cells using 3D convolution."""
         # Create a grid of alive cells
         alive_grid = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
-        for pos in self.position_map.keys():
-            x, y, z = pos
-            alive_grid[x, y, z] = 1
+        positions = torch.tensor([org.position for org in self.organisms.values() if org.alive], device=self.DEVICE)
+        alive_grid[positions[:,0], positions[:,1], positions[:,2]] = 1
         
         alive_grid = alive_grid.unsqueeze(0).unsqueeze(0)
         neighbors = torch.nn.functional.conv3d(alive_grid, self.kernel, padding=1)
@@ -546,18 +548,23 @@ class GameOfLife3D:
     
     def _find_birth_positions(self, repro_idx: int, rules: Dict,
                              neighbors: torch.Tensor) -> List[Tuple[int, int, int]]:
-        """Find all valid birth positions for this reproduction mode."""
         birth_positions = []
+        living_positions = set(org.position for org in self.organisms.values() if org.alive)
         
-        # Get all empty positions
-        all_positions = set((x, y, z) 
-                          for x in range(self.ROWS) 
-                          for y in range(self.COLS) 
-                          for z in range(self.DEPTH))
-        occupied_positions = set(self.position_map.keys())
-        empty_positions = all_positions - occupied_positions
+        # Only check positions adjacent to living organisms
+        empty_neighbors = set()
+        for x, y, z in living_positions:
+            for dx in [-1, 0, 1]:
+                for dy in [-1, 0, 1]:
+                    for dz in [-1, 0, 1]:
+                        if dx == dy == dz == 0:
+                            continue
+                        nx, ny, nz = x+dx, y+dy, z+dz
+                        if (0 <= nx < self.ROWS and 0 <= ny < self.COLS and 0 <= nz < self.DEPTH):
+                            if (nx, ny, nz) not in self.position_map:
+                                empty_neighbors.add((nx, ny, nz))
         
-        for pos in empty_positions:
+        for pos in empty_neighbors:
             x, y, z = pos
             neighbor_count = neighbors[x, y, z].item()
             
@@ -577,7 +584,6 @@ class GameOfLife3D:
             
             if valid:
                 birth_positions.append(pos)
-        
         return birth_positions
     
     def _find_nearby_parents(self, birth_pos: Tuple[int, int, int], 
@@ -676,8 +682,11 @@ class GameOfLife3D:
         self.ax.set_title(f"3D Microbial Life Simulation - Frame {frameNum}")
         self.ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
-    def animate(self, frames: int = 50, interval: int = 200) -> None:
-        """Create and display an animation of the simulation."""
+    def animate(self, frames: int = 50, interval: int = 200) -> animation.FuncAnimation:
+        """Create and return an animation of the simulation."""
+        if not self.GUI:
+            raise RuntimeError("GUI is disabled. Set gui=True when initializing the simulation.")
+            
         self.fig = plt.figure(figsize=(12, 10))
         self.ax = self.fig.add_subplot(111, projection='3d')
         
@@ -690,7 +699,7 @@ class GameOfLife3D:
         initial_data = self._prepare_visualization_data()
         self.visualize_frame(*initial_data, 0)
         
-        # Create animation
+        # Create and return animation
         self.ani = animation.FuncAnimation(
             self.fig, update_wrapper,
             frames=frames,
@@ -699,7 +708,12 @@ class GameOfLife3D:
         )
         
         plt.tight_layout()
-        plt.show()
+        return self.ani
+    
+    def run(self, steps: int = 100) -> None:
+        """Run the simulation without visualization."""
+        for _ in range(steps):
+            self.update()
     
     def get_population_density(self) -> np.ndarray:
         """Get 2D population density projection (sum along depth axis)."""
@@ -711,9 +725,18 @@ class GameOfLife3D:
         return sum(1 for org in self.organisms.values() if org.alive)
 
 if __name__ == '__main__':
-    # Example usage
+    # Example usage with GUI
     simulation = GameOfLife3D(
         grid_size=(50, 50, 50),
-        initial_prob=0.1
+        initial_prob=0.1,
+        gui=False  # Set to False for non-GUI execution
     )
-    simulation.animate(frames=100, interval=200)
+    
+    if simulation.GUI:
+        # Run with animation
+        ani = simulation.animate(frames=100, interval=200)
+        plt.show()
+    else:
+        # Run without visualization
+        simulation.run(steps=100)
+        print(f"Final population: {simulation.get_organism_count()}")
