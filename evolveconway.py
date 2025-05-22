@@ -3,11 +3,13 @@ import torch
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import numpy as np
-from typing import Optional, Tuple, Dict, List
-from dataclasses import dataclass
+from typing import Optional, Tuple, Dict, List, Set
+from dataclasses import dataclass, field
 from enum import Enum
+import uuid
 
 class EnergySource(Enum):
+    """Enumeration of possible energy sources for microorganisms."""
     LIGHT = "light"
     ORGANIC = "organic"
     INORGANIC = "inorganic"
@@ -18,15 +20,29 @@ class EnergySource(Enum):
 
 @dataclass
 class EnergyMode:
+    """
+    Represents an energy acquisition mode for microorganisms.
+    
+    Attributes:
+        name: Descriptive name of the mode
+        type: General category (e.g., "phototrophic", "chemotrophic")
+        energy_source: Primary energy source (from EnergySource enum)
+        efficiency: Conversion efficiency (0.0-1.0)
+        oxygen_requirement: Relationship with oxygen ('produces', 'requires', 'none', 'inhibited_by')
+        organisms: List of organism types that use this mode
+        color: Visualization color for this mode
+        rules: Dictionary of specific behavioral rules
+        maintenance_cost: Base energy consumption per cycle
+    """
     name: str
     type: str
     energy_source: EnergySource
-    efficiency: float  # How efficiently this mode converts source to energy
-    oxygen_requirement: str  # 'produces', 'requires', 'none', 'inhibited_by'
+    efficiency: float
+    oxygen_requirement: str
     organisms: List[str]
     color: str
     rules: Dict
-    maintenance_cost: int  # Base energy consumption per cycle
+    maintenance_cost: int
     
     @property
     def is_phototrophic(self) -> bool:
@@ -50,15 +66,29 @@ class EnergyMode:
 
 @dataclass
 class ReproductionMode:
+    """
+    Represents a reproduction mode for microorganisms.
+    
+    Attributes:
+        name: Descriptive name of the mode
+        type: General category (e.g., "asexual", "sexual")
+        organisms: List of organism types that use this mode
+        initial_rate: Initial probability of this mode being assigned
+        color: Visualization color for this mode
+        rules: Dictionary of specific behavioral rules
+        energy_cost: Energy required to reproduce
+        child_energy: Range of energy given to offspring (min, max)
+        parent_cost: Range of energy consumed by parent during reproduction (min, max)
+    """
     name: str
     type: str
     organisms: List[str]
     initial_rate: float
     color: str
     rules: Dict
-    energy_cost: int  # Energy required to reproduce
-    child_energy: Tuple[int, int]  # Range of energy given to child
-    parent_cost: Tuple[int, int]  # Range of energy consumed by parent
+    energy_cost: int
+    child_energy: Tuple[int, int]
+    parent_cost: Tuple[int, int]
     
     @property
     def is_asexual(self) -> bool:
@@ -76,34 +106,151 @@ class ReproductionMode:
     def is_gene_exchange(self) -> bool:
         return "gene exchange" in self.type.lower() or "gene uptake" in self.type.lower()
 
-class GameOfLife3D:
-    def __init__(self, 
-                 grid_size: Tuple[int, int, int] = (50, 50, 50), 
-                 initial_prob: float = 0.1,
-                 energy_config: str = 'energy_modes.json',
-                 repro_config: str = 'reproduction_modes.json',
-                 device: Optional[str] = None,
-                 light_intensity: float = 100.0,
-                 oxygen_level: float = 50.0):
+@dataclass
+class Organism:
+    """
+    Represents an individual organism in the simulation.
+    
+    Attributes:
+        id: Unique identifier
+        position: (x, y, z) coordinates in the grid
+        energy_mode: Index of the energy acquisition mode
+        reproduction_mode: Index of the reproduction mode
+        energy: Current energy level
+        age: Number of time steps the organism has survived
+        parent_ids: IDs of parent organisms (empty for initial organisms)
+        children_ids: IDs of child organisms
+        alive: Whether the organism is currently alive
+    """
+    id: str
+    position: Tuple[int, int, int]
+    energy_mode: int
+    reproduction_mode: int
+    energy: float
+    age: int = 0
+    parent_ids: List[str] = field(default_factory=list)
+    children_ids: List[str] = field(default_factory=list)
+    alive: bool = True
+    
+    def update_energy(self, delta: float) -> None:
+        """Update the organism's energy level."""
+        self.energy += delta
+        if self.energy <= 0:
+            self.alive = False
+    
+    def increment_age(self) -> None:
+        """Increment the organism's age."""
+        self.age += 1
+    
+    def reproduce(self, child_id: str, child_position: Tuple[int, int, int], 
+                 child_energy: float, parent_energy_cost: float, game: 'GameOfLife3D') -> 'Organism':
         """
-        3D Game of Life simulator with multiple energy acquisition modes and reproduction modes.
+        Create a new child organism and update parent's energy.
         
         Args:
-            grid_size: Tuple of (rows, cols, depth) for the 3D grid
-            initial_prob: Probability of a cell being alive initially
-            energy_config: Path to JSON file containing energy modes configuration
-            repro_config: Path to JSON file containing reproduction modes configuration
-            device: 'cuda' or 'cpu' (None for auto-detection)
-            light_intensity: Initial light intensity at the top of the grid
-            oxygen_level: Initial oxygen concentration in the environment
+            child_id: ID for the new organism
+            child_position: Position for the new organism
+            child_energy: Initial energy for the new organism
+            parent_energy_cost: Energy to deduct from parent
+            
+        Returns:
+            New Organism instance
         """
+        self.energy -= parent_energy_cost
+        self.children_ids.append(child_id)
+        
+        # Create new organism with possible mutations
+        new_energy_mode = self._mutate_energy_mode(game)
+        new_repro_mode = self._mutate_reproduction_mode(game)
+        
+        return Organism(
+            id=child_id,
+            position=child_position,
+            energy_mode=new_energy_mode,
+            reproduction_mode=new_repro_mode,
+            energy=child_energy,
+            parent_ids=[self.id]
+        )
+    
+    def _mutate_energy_mode(self, game: 'GameOfLife3D') -> int:
+        """Potentially mutate the energy mode (5% chance)."""
+        if np.random.random() < 0.95:
+            return self.energy_mode
+        else:
+            return np.random.randint(0, len(game.energy_modes))
+    
+    def _mutate_reproduction_mode(self, game: 'GameOfLife3D') -> int:
+        """Potentially mutate the reproduction mode (5% chance)."""
+        if np.random.random() < 0.95:
+            return self.reproduction_mode
+        else:
+            current_mode = game.repro_modes[self.reproduction_mode]
+            compatible_modes = [i for i, m in enumerate(game.repro_modes) 
+                              if m.type == current_mode.type]
+            return np.random.choice(compatible_modes)
+
+class GameOfLife3D:
+    """
+    3D simulation of microbial life with multiple energy acquisition and reproduction modes.
+    
+    Features:
+    - 3D grid environment with customizable size
+    - Multiple energy acquisition strategies
+    - Different reproduction modes with genetic inheritance
+    - Environmental factors (light, oxygen)
+    - GPU acceleration support
+    
+    Key Components:
+    1. Organism tracking with individual properties
+    2. Grid management (3D tensor operations)
+    3. Energy system (acquisition and consumption)
+    4. Reproduction system (mode-specific rules)
+    5. Environmental simulation (light, oxygen)
+    6. Visualization tools
+    """
+    
+    def __init__(self, 
+                grid_size: Tuple[int, int, int] = (50, 50, 50), 
+                initial_prob: float = 0.1,
+                energy_config: str = 'energy_modes.json',
+                repro_config: str = 'reproduction_modes.json',
+                device: Optional[str] = None,
+                light_intensity: float = 100.0,
+                oxygen_level: float = 50.0):
+        """
+        Initialize the 3D simulation environment.
+        
+        Args:
+            grid_size: Dimensions of the 3D grid (rows, cols, depth)
+            initial_prob: Initial probability of cell existence
+            energy_config: Path to JSON file with energy mode configurations
+            repro_config: Path to JSON file with reproduction mode configurations
+            device: Hardware device ('cuda' or 'cpu')
+            light_intensity: Initial light level at grid top
+            oxygen_level: Initial oxygen concentration
+        """
+        # Grid dimensions and initialization parameters
         self.ROWS, self.COLS, self.DEPTH = grid_size
         self.INITIAL_PROB = initial_prob
         self.DEVICE = device if device else ('cuda' if torch.cuda.is_available() else 'cpu')
         self.LIGHT_INTENSITY = light_intensity
         self.OXYGEN_LEVEL = oxygen_level
         
-        # Load energy and reproduction modes from JSON
+        # Load configuration files
+        self._load_configurations(energy_config, repro_config)
+        
+        # Initialize simulation components
+        self._initialize_kernel()
+        self._initialize_organisms()
+        self._initialize_environment()
+        
+        # Visualization setup
+        self.fig = None
+        self.ax = None
+        self.ani = None
+    
+    def _load_configurations(self, energy_config: str, repro_config: str) -> None:
+        """Load and validate energy and reproduction mode configurations."""
         with open(energy_config, 'r') as f:
             energy_config = json.load(f)
         with open(repro_config, 'r') as f:
@@ -112,92 +259,110 @@ class GameOfLife3D:
         self.energy_modes = [EnergyMode(**mode) for mode in energy_config['modes']]
         self.repro_modes = [ReproductionMode(**mode) for mode in repro_config['modes']]
         
-        # Create mappings for modes
+        # Create mode mappings
         self.energy_mode_indices = {i: mode for i, mode in enumerate(self.energy_modes)}
         self.repro_mode_indices = {i: mode for i, mode in enumerate(self.repro_modes)}
         
-        # Validate initial rates sum to <= 1
+        # Validate initial reproduction rates
         total_rate = sum(mode.initial_rate for mode in self.repro_modes)
         if total_rate > 1:
             raise ValueError(f"Total initial reproduction rate {total_rate} exceeds 1.0")
-        
-        # Create the 3D kernel for neighbor counting
+    
+    def _initialize_kernel(self) -> None:
+        """Initialize the 3D convolution kernel for neighbor counting."""
         self.kernel = torch.ones((3, 3, 3), dtype=torch.float32, device=self.DEVICE)
         self.kernel[1, 1, 1] = 0  # Center cell doesn't count
         self.kernel = self.kernel.view(1, 1, 3, 3, 3)  # Shape for conv3d
+    
+    def _initialize_organisms(self) -> None:
+        """Initialize the organism population."""
+        self.organisms: Dict[str, Organism] = {}
+        self.position_map: Dict[Tuple[int, int, int], str] = {}  # Maps positions to organism IDs
         
-        # Initialize grids
-        self.grid = self.initialize_grid()
-        self.energy_assignments = self.initialize_energy_assignments()
-        self.repro_assignments = self.initialize_repro_assignments()
-        self.energy = self.initialize_energy()
+        # Create initial organisms
+        for x in range(self.ROWS):
+            for y in range(self.COLS):
+                for z in range(self.DEPTH):
+                    if np.random.random() < self.INITIAL_PROB:
+                        self._create_organism((x, y, z))
+    
+    def _create_organism(self, position: Tuple[int, int, int]) -> None:
+        """Create a new organism at the specified position."""
+        # Randomly assign energy mode
+        energy_mode_idx = np.random.randint(0, len(self.energy_modes))
         
-        # Environmental factors
+        # Assign reproduction mode based on probabilities
+        rand_val = np.random.random()
+        cum_prob = 0.0
+        repro_mode_idx = 0
+        
+        for i, mode in enumerate(self.repro_modes):
+            if rand_val < cum_prob + mode.initial_rate:
+                repro_mode_idx = i
+                break
+            cum_prob += mode.initial_rate
+        
+        # Create organism
+        organism_id = str(uuid.uuid4())
+        new_organism = Organism(
+            id=organism_id,
+            position=position,
+            energy_mode=energy_mode_idx,
+            reproduction_mode=repro_mode_idx,
+            energy=np.random.uniform(70, 150)
+        )
+        
+        self.organisms[organism_id] = new_organism
+        self.position_map[position] = organism_id
+    
+    def _initialize_environment(self) -> None:
+        """Initialize environmental factors."""
         self.oxygen_grid = torch.full((self.ROWS, self.COLS, self.DEPTH), 
                                     self.OXYGEN_LEVEL, 
                                     device=self.DEVICE)
+    
+    def count_neighbors(self) -> torch.Tensor:
+        """Count live neighbors for all cells using 3D convolution."""
+        # Create a grid of alive cells
+        alive_grid = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
+        for pos in self.position_map.keys():
+            x, y, z = pos
+            alive_grid[x, y, z] = 1
         
-        # Visualization attributes
-        self.fig = None
-        self.ax = None
-        self.ani = None
-    
-    def initialize_grid(self) -> torch.Tensor:
-        """Create a random initial 3D grid on the chosen device"""
-        return (torch.rand((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE) < self.INITIAL_PROB).float()
-    
-    def initialize_energy_assignments(self) -> torch.Tensor:
-        # Assign modes randomly (for now - could implement weighted distribution)
-        # Just assign randomly among available modes
-        modes = torch.randint(0, len(self.energy_modes), 
-                            (self.ROWS, self.COLS, self.DEPTH), 
-                            device=self.DEVICE)
-        
-        # Only keep modes for alive cells
-        modes = modes * self.grid.byte()
-        
-        return modes
-    
-    def initialize_repro_assignments(self) -> torch.Tensor:
-        """Initialize reproduction modes based on the configuration"""
-        rand_vals = torch.rand((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
-        modes = torch.zeros((self.ROWS, self.COLS, self.DEPTH), dtype=torch.int32, device=self.DEVICE)
-        cum_prob = 0.0
-        for i, mode in enumerate(self.repro_modes):
-            mask = (rand_vals >= cum_prob) & (rand_vals < cum_prob + mode.initial_rate)
-            modes[mask] = i
-            cum_prob += mode.initial_rate
-        modes = modes * self.grid.byte()
-        return modes
-    
-    def initialize_energy(self) -> torch.Tensor:
-        """Initialize energy levels for cells (70-150 for initial cells)"""
-        return (torch.rand((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE) * 80 + 70)
-    
-    def count_neighbors(self, grid: torch.Tensor) -> torch.Tensor:
-        """Count live neighbors for all cells in 3D using PyTorch convolution"""
-        grid = grid.unsqueeze(0).unsqueeze(0)
-        neighbors = torch.nn.functional.conv3d(grid, self.kernel, padding=1)
+        alive_grid = alive_grid.unsqueeze(0).unsqueeze(0)
+        neighbors = torch.nn.functional.conv3d(alive_grid, self.kernel, padding=1)
         return neighbors.squeeze()
     
     def count_specific_energy_neighbors(self, mode_index: int) -> torch.Tensor:
-        """Count neighbors of a specific energy mode type"""
-        mode_grid = (self.energy_assignments == mode_index).float()
+        """Count neighbors with a specific energy mode."""
+        mode_grid = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
+        
+        for org_id, org in self.organisms.items():
+            if org.alive and org.energy_mode == mode_index:
+                x, y, z = org.position
+                mode_grid[x, y, z] = 1
+        
         mode_grid = mode_grid.unsqueeze(0).unsqueeze(0)
-        neighbors = torch.nn.functional.conv3d(mode_grid, self.kernel, padding=1)
-        return neighbors.squeeze()
+        return torch.nn.functional.conv3d(mode_grid, self.kernel, padding=1).squeeze()
     
     def count_specific_repro_neighbors(self, mode_index: int) -> torch.Tensor:
-        """Count neighbors of a specific reproduction mode type"""
-        mode_grid = (self.repro_assignments == mode_index).float()
+        """Count neighbors with a specific reproduction mode."""
+        mode_grid = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
+        
+        for org_id, org in self.organisms.items():
+            if org.alive and org.reproduction_mode == mode_index:
+                x, y, z = org.position
+                mode_grid[x, y, z] = 1
+        
         mode_grid = mode_grid.unsqueeze(0).unsqueeze(0)
-        neighbors = torch.nn.functional.conv3d(mode_grid, self.kernel, padding=1)
-        return neighbors.squeeze()
+        return torch.nn.functional.conv3d(mode_grid, self.kernel, padding=1).squeeze()
     
     def propagate_light(self) -> torch.Tensor:
         """
-        Simulate light propagation from top to bottom of the grid.
-        Returns the light available at each cell position.
+        Simulate light attenuation through the 3D grid.
+        
+        Returns:
+            Tensor with light intensity at each cell position
         """
         light = torch.full((self.ROWS, self.COLS), self.LIGHT_INTENSITY, device=self.DEVICE)
         light_grid = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
@@ -205,243 +370,306 @@ class GameOfLife3D:
         for z in range(self.DEPTH):
             light_grid[:, :, z] = light
             
-            # Get current layer of phototrophic cells
-            phototrophic_mask = torch.zeros((self.ROWS, self.COLS), dtype=torch.bool, device=self.DEVICE)
+            # Calculate absorption by phototrophic cells in this layer
+            phototrophic_mask = torch.zeros((self.ROWS, self.COLS), 
+                                         dtype=torch.bool, 
+                                         device=self.DEVICE)
+            
             for mode_idx, mode in self.energy_mode_indices.items():
                 if mode.is_phototrophic:
-                    phototrophic_mask |= (self.energy_assignments[:, :, z] == mode_idx) & (self.grid[:, :, z] == 1)
+                    # Check if any organism at this (x,y,z) has this energy mode
+                    for x in range(self.ROWS):
+                        for y in range(self.COLS):
+                            if (x, y, z) in self.position_map:
+                                org_id = self.position_map[(x, y, z)]
+                                if self.organisms[org_id].energy_mode == mode_idx:
+                                    phototrophic_mask[x, y] = True
             
-            # Calculate absorption by phototrophic cells
-            absorption = phototrophic_mask.float() * 0.1  # Simple absorption model
+            # Simple absorption model
+            absorption = phototrophic_mask.float() * 0.1  
             light = light * (1 - absorption)
-            
-            # Ensure light doesn't go negative
             light = torch.clamp(light, 0.0, self.LIGHT_INTENSITY)
         
         return light_grid
     
     def update_oxygen(self) -> None:
-        """Update oxygen levels based on microorganism activity"""
-        # Oxygen production by phototrophs
+        """Update oxygen levels based on microorganism activity and diffusion."""
+        # Track oxygen production and consumption
         oxygen_producers = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
-        for mode_idx, mode in self.energy_mode_indices.items():
-            if mode.produces_oxygen:
-                oxygen_producers += (self.energy_assignments == mode_idx).float() * 0.1
-        
-        # Oxygen consumption by aerobes
         oxygen_consumers = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
-        for mode_idx, mode in self.energy_mode_indices.items():
-            if mode.requires_oxygen:
-                oxygen_consumers += (self.energy_assignments == mode_idx).float() * 0.2
+        
+        for org_id, org in self.organisms.items():
+            if not org.alive:
+                continue
+                
+            x, y, z = org.position
+            mode = self.energy_modes[org.energy_mode]
+            
+            if mode.produces_oxygen:
+                oxygen_producers[x, y, z] += 0.1
+            elif mode.requires_oxygen:
+                oxygen_consumers[x, y, z] += 0.2
         
         # Apply production and consumption
-        self.oxygen_grid = self.oxygen_grid + oxygen_producers - oxygen_consumers
+        self.oxygen_grid += oxygen_producers - oxygen_consumers
         
-        # Diffusion (3D convolution)
-        # Create proper 3D diffusion kernel (center is 0.6, faces 0.1, edges 0.0, corners 0.0)
+        # Apply diffusion
+        self._apply_oxygen_diffusion()
+        
+        # Maintain reasonable bounds
+        self.oxygen_grid = torch.clamp(self.oxygen_grid, 0.0, 100.0)
+    
+    def _apply_oxygen_diffusion(self) -> None:
+        """Simulate oxygen diffusion using 3D convolution."""
+        # Diffusion kernel (center is 0.6, faces 0.1)
         diffusion_kernel = torch.zeros((3, 3, 3), device=self.DEVICE)
         diffusion_kernel[1, 1, 1] = 0.6  # center
         diffusion_kernel[1, 1, 0] = diffusion_kernel[1, 1, 2] = 0.1  # front/back
         diffusion_kernel[1, 0, 1] = diffusion_kernel[1, 2, 1] = 0.1  # left/right
         diffusion_kernel[0, 1, 1] = diffusion_kernel[2, 1, 1] = 0.1  # top/bottom
-        diffusion_kernel = diffusion_kernel.unsqueeze(0).unsqueeze(0)  # shape: [1,1,3,3,3]
+        diffusion_kernel = diffusion_kernel.unsqueeze(0).unsqueeze(0)
         
-        # Pad the grid for boundary conditions
-        padded_oxygen = torch.nn.functional.pad(self.oxygen_grid.unsqueeze(0).unsqueeze(0), (1,1,1,1,1,1), mode='replicate')
-        
-        # Apply diffusion
-        diffused = torch.nn.functional.conv3d(padded_oxygen, diffusion_kernel, padding=0).squeeze()
-        
-        # Update with diffused version
-        self.oxygen_grid = diffused
-        
-        # Ensure oxygen stays within reasonable bounds
-        self.oxygen_grid = torch.clamp(self.oxygen_grid, 0.0, 100.0)
+        # Apply diffusion with boundary replication
+        padded_oxygen = torch.nn.functional.pad(
+            self.oxygen_grid.unsqueeze(0).unsqueeze(0), 
+            (1,1,1,1,1,1), 
+            mode='replicate'
+        )
+        self.oxygen_grid = torch.nn.functional.conv3d(
+            padded_oxygen, 
+            diffusion_kernel, 
+            padding=0
+        ).squeeze()
     
-    def calculate_energy_gain(self) -> torch.Tensor:
-        """Calculate energy gain for all cells based on their energy mode"""
-        energy_gain = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
+    def calculate_energy_gain(self) -> Dict[str, float]:
+        """Calculate energy gain for all organisms based on their energy mode."""
+        energy_gains = {}
         light_grid = self.propagate_light()
         
-        for mode_idx, mode in self.energy_mode_indices.items():
-            cell_mask = (self.energy_assignments == mode_idx) & (self.grid == 1)
+        for org_id, org in self.organisms.items():
+            if not org.alive:
+                continue
+                
+            x, y, z = org.position
+            mode = self.energy_modes[org.energy_mode]
+            gain = 0.0
             
             if mode.is_phototrophic:
                 # Phototrophs gain energy from light
-                gain = light_grid * mode.efficiency
-                energy_gain[cell_mask] = gain[cell_mask]
+                gain = light_grid[x, y, z] * mode.efficiency
                 
             elif mode.energy_source == EnergySource.ORGANIC:
-                # Heterotrophs gain energy from organic matter (simplified)
-                # In a more complex model, we'd track organic matter in the environment
-                gain = torch.rand((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE) * 5 * mode.efficiency
-                energy_gain[cell_mask] = gain[cell_mask]
+                # Heterotrophs gain from organic matter
+                gain = torch.rand(1).item() * 5 * mode.efficiency
                 
             elif mode.energy_source == EnergySource.INORGANIC:
-                # Chemolithotrophs gain energy from inorganic compounds
-                gain = torch.rand((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE) * 3 * mode.efficiency
-                energy_gain[cell_mask] = gain[cell_mask]
+                # Chemolithotrophs gain from inorganic compounds
+                gain = torch.rand(1).item() * 3 * mode.efficiency
                 
             elif mode.energy_source == EnergySource.OXYGEN and mode.requires_oxygen:
-                # Aerobic respirers - gain depends on oxygen availability
-                gain = self.oxygen_grid * 0.5 * mode.efficiency
-                energy_gain[cell_mask] = gain[cell_mask]
-                
-            # Add other energy source types here...
+                # Aerobic respirers - oxygen-dependent gain
+                gain = self.oxygen_grid[x, y, z] * 0.5 * mode.efficiency
             
             # Apply oxygen inhibition if needed
             if mode.inhibited_by_oxygen:
-                inhibition = 1.0 - (self.oxygen_grid / 100.0)  # More oxygen = more inhibition
-                energy_gain[cell_mask] = energy_gain[cell_mask] * inhibition[cell_mask]
+                inhibition = 1.0 - (self.oxygen_grid[x, y, z] / 100.0)
+                gain *= inhibition
+            
+            energy_gains[org_id] = gain
         
-        return energy_gain
+        return energy_gains
     
     def update(self, frameNum: Optional[int] = None, visualize: bool = False) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """
-        Update the grid according to the reproduction mode rules and energy acquisition.
+        Advance the simulation by one time step.
         
         Args:
-            frameNum: Optional frame number (for visualization)
-            visualize: Whether to prepare data for visualization
+            frameNum: Current frame number (for visualization)
+            visualize: Whether to return data for visualization
             
         Returns:
-            If visualize=True, returns tuple of (grid_state, energy_assignments, repro_assignments) as numpy arrays
+            If visualize=True, returns tuple of numpy arrays (grid, energy_assignments, repro_assignments)
         """
-        neighbors = self.count_neighbors(self.grid)
-        
-        # Update environmental factors
+        # Count neighbors and update environment
+        neighbors = self.count_neighbors()
         self.update_oxygen()
         
-        # Calculate energy gain for all cells
-        energy_gain = self.calculate_energy_gain()
-        self.energy = torch.where(self.grid == 1, self.energy + energy_gain, self.energy)
+        # Update energy levels
+        energy_gains = self.calculate_energy_gain()
+        for org_id, gain in energy_gains.items():
+            if org_id in self.organisms and self.organisms[org_id].alive:
+                mode = self.energy_modes[self.organisms[org_id].energy_mode]
+                net_gain = gain - mode.maintenance_cost
+                self.organisms[org_id].update_energy(net_gain)
+                self.organisms[org_id].increment_age()
         
-        # Cells consume energy for maintenance based on their energy mode
-        for mode_idx, mode in self.energy_mode_indices.items():
-            cell_mask = (self.energy_assignments == mode_idx) & (self.grid == 1)
-            self.energy[cell_mask] -= mode.maintenance_cost
-        
-        # Initialize new grid and assignments
-        new_grid = torch.zeros_like(self.grid)
-        new_energy_assign = torch.zeros_like(self.energy_assignments)
-        new_repro_assign = torch.zeros_like(self.repro_assignments)
-        new_energy = torch.zeros_like(self.energy)
-        
-        # Process each reproduction mode with its specific rules
+        # Process reproduction for each reproduction mode
         for repro_idx, repro_mode in self.repro_mode_indices.items():
-            mode_mask = (self.repro_assignments == repro_idx) & (self.grid == 1)
-            rules = repro_mode.rules
-            
-            # Initialize birth and survival conditions
-            birth = (self.grid == 0)
-            survive = mode_mask.clone()
-            
-            # Handle birth conditions
-            if "min_neighbors" in rules["birth_conditions"]:
-                birth &= (neighbors >= rules["birth_conditions"]["min_neighbors"])
-            if "max_neighbors" in rules["birth_conditions"]:
-                birth &= (neighbors <= rules["birth_conditions"]["max_neighbors"])
-            if "min_same_type" in rules["birth_conditions"]:
-                same_type_neighbors = self.count_specific_repro_neighbors(repro_idx)
-                birth &= (same_type_neighbors >= rules["birth_conditions"]["min_same_type"])
-            if "max_same_type" in rules["birth_conditions"]:
-                same_type_neighbors = self.count_specific_repro_neighbors(repro_idx)
-                birth &= (same_type_neighbors <= rules["birth_conditions"]["max_same_type"])
-            
-            # Handle survival conditions
-            if "min_neighbors" in rules["survival_conditions"]:
-                survive &= (neighbors >= rules["survival_conditions"]["min_neighbors"])
-            if "max_neighbors" in rules["survival_conditions"]:
-                survive &= (neighbors <= rules["survival_conditions"]["max_neighbors"])
-            if "min_same_type" in rules["survival_conditions"]:
-                same_type_neighbors = self.count_specific_repro_neighbors(repro_idx)
-                survive &= (same_type_neighbors >= rules["survival_conditions"]["min_same_type"])
-            if "max_same_type" in rules["survival_conditions"]:
-                same_type_neighbors = self.count_specific_repro_neighbors(repro_idx)
-                survive &= (same_type_neighbors <= rules["survival_conditions"]["max_same_type"])
-            
-            # Apply the rules - only if parent has enough energy for reproduction
-            potential_new_cells = birth | survive
-            parent_energy_mask = (self.energy >= repro_mode.energy_cost) & mode_mask
-            
-            # Only allow reproduction if parent has enough energy
-            new_grid[potential_new_cells & parent_energy_mask.any()] = 1
-            
-            # For surviving cells, transfer their energy (minus maintenance cost)
-            new_energy[survive] = self.energy[survive]
-            
-            # For new cells (birth), assign energy and deduct from parent
-            birth_cells = birth & parent_energy_mask.any()
-            if birth_cells.any():
-                # Assign random energy to new cells within specified range
-                child_energy = (torch.rand(birth_cells.sum(), device=self.DEVICE) * 
-                               (repro_mode.child_energy[1] - repro_mode.child_energy[0]) + 
-                               repro_mode.child_energy[0])
-                new_energy[birth_cells] = child_energy
-                
-                # Deduct parent energy (random within specified range)
-                parent_cost = (torch.rand(parent_energy_mask.sum(), device=self.DEVICE) * 
-                              (repro_mode.parent_cost[1] - repro_mode.parent_cost[0]) + 
-                              repro_mode.parent_cost[0])
-                new_energy[parent_energy_mask] = self.energy[parent_energy_mask] - parent_cost
-            
-            # Assign reproduction modes to new cells
-            if repro_mode.is_asexual or repro_mode.is_gene_exchange:
-                # Asexual or gene exchange modes tend to keep their type
-                new_repro_assign[(birth | survive) & (new_repro_assign == 0)] = repro_idx
-            elif repro_mode.is_sexual or repro_mode.is_genetic_mix:
-                # Sexual and genetic mix modes can sometimes change type
-                if torch.rand(1).item() < 0.9:  # 90% chance to keep same type
-                    new_repro_assign[(birth | survive) & (new_repro_assign == 0)] = repro_idx
-                else:
-                    # 10% chance to switch to a random compatible type
-                    compatible_modes = [i for i, m in self.repro_mode_indices.items() 
-                                      if m.type == repro_mode.type and i != repro_idx]
-                    if compatible_modes:
-                        new_mode = np.random.choice(compatible_modes)
-                        new_repro_assign[(birth | survive) & (new_repro_assign == 0)] = new_mode
-            
-            # Assign energy modes to new cells (inherit from parent or mutate)
-            parent_energy_modes = self.energy_assignments[parent_energy_mask]
-            if parent_energy_modes.numel() > 0:
-                # Most cells inherit their parent's energy mode
-                if torch.rand(1).item() < 0.95:  # 95% chance to inherit
-                    # Need to map parent modes to birth cells - this is simplified
-                    # In a more accurate model, we'd track which parent produced which offspring
-                    new_energy_assign[(birth | survive) & (new_energy_assign == 0)] = parent_energy_modes[0]
-                else:
-                    # 5% chance to switch to a random energy mode
-                    new_mode = np.random.choice(len(self.energy_modes))
-                    new_energy_assign[(birth | survive) & (new_energy_assign == 0)] = new_mode
+            self._process_reproduction_mode(repro_idx, repro_mode, neighbors)
         
-        # Cells die if they have no energy left
-        new_grid[new_energy <= 0] = 0
-        
-        self.grid = new_grid
-        self.energy_assignments = new_energy_assign * self.grid.byte()  # Only keep modes for alive cells
-        self.repro_assignments = new_repro_assign * self.grid.byte()    # Only keep modes for alive cells
-        self.energy = new_energy * self.grid  # Only keep energy for alive cells
+        # Remove dead organisms
+        self._cleanup_dead_organisms()
         
         if visualize:
-            return (self.grid.cpu().numpy(), 
-                    self.energy_assignments.cpu().numpy(),
-                    self.repro_assignments.cpu().numpy())
+            return self._prepare_visualization_data()
         return None
     
-    def visualize_frame(self, grid_data: np.ndarray, energy_data: np.ndarray, repro_data: np.ndarray, frameNum: int = 0) -> None:
-        """Visualize a single frame of the simulation with colored cells"""
+    def _process_reproduction_mode(self, repro_idx: int, repro_mode: ReproductionMode,
+                                 neighbors: torch.Tensor) -> None:
+        """Apply rules for a specific reproduction mode."""
+        # Get all organisms with this reproduction mode
+        mode_organisms = [org for org in self.organisms.values() 
+                         if org.alive and org.reproduction_mode == repro_idx]
+        
+        if not mode_organisms:
+            return
+        
+        rules = repro_mode.rules
+        
+        # Determine potential birth positions
+        birth_positions = self._find_birth_positions(repro_idx, rules, neighbors)
+        
+        # For each potential birth position, find nearby parents
+        for birth_pos in birth_positions:
+            parent_organisms = self._find_nearby_parents(birth_pos, repro_idx, repro_mode.energy_cost)
+            
+            if parent_organisms:
+                # Select a random parent (could implement more sophisticated selection)
+                parent = np.random.choice(parent_organisms)
+                
+                # Calculate child energy and parent cost
+                child_energy = (np.random.uniform(*repro_mode.child_energy))
+                parent_cost = (np.random.uniform(*repro_mode.parent_cost))
+                
+                # Create new organism
+                self._create_child_organism(parent, birth_pos, child_energy, parent_cost)
+    
+    def _find_birth_positions(self, repro_idx: int, rules: Dict,
+                             neighbors: torch.Tensor) -> List[Tuple[int, int, int]]:
+        """Find all valid birth positions for this reproduction mode."""
+        birth_positions = []
+        
+        # Get all empty positions
+        all_positions = set((x, y, z) 
+                          for x in range(self.ROWS) 
+                          for y in range(self.COLS) 
+                          for z in range(self.DEPTH))
+        occupied_positions = set(self.position_map.keys())
+        empty_positions = all_positions - occupied_positions
+        
+        for pos in empty_positions:
+            x, y, z = pos
+            neighbor_count = neighbors[x, y, z].item()
+            
+            # Check birth conditions
+            valid = True
+            
+            if "min_neighbors" in rules["birth_conditions"]:
+                valid &= (neighbor_count >= rules["birth_conditions"]["min_neighbors"])
+            if "max_neighbors" in rules["birth_conditions"]:
+                valid &= (neighbor_count <= rules["birth_conditions"]["max_neighbors"])
+            if "min_same_type" in rules["birth_conditions"]:
+                same_type_neighbors = self.count_specific_repro_neighbors(repro_idx)[x, y, z].item()
+                valid &= (same_type_neighbors >= rules["birth_conditions"]["min_same_type"])
+            if "max_same_type" in rules["birth_conditions"]:
+                same_type_neighbors = self.count_specific_repro_neighbors(repro_idx)[x, y, z].item()
+                valid &= (same_type_neighbors <= rules["birth_conditions"]["max_same_type"])
+            
+            if valid:
+                birth_positions.append(pos)
+        
+        return birth_positions
+    
+    def _find_nearby_parents(self, birth_pos: Tuple[int, int, int], 
+                            repro_idx: int, 
+                            required_energy: int) -> List[Organism]:
+        """Find nearby parent organisms that can reproduce."""
+        x, y, z = birth_pos
+        parents = []
+        
+        # Check all adjacent positions
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                for dz in [-1, 0, 1]:
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue  # Skip the birth position itself
+                    
+                    nx, ny, nz = x + dx, y + dy, z + dz
+                    if (0 <= nx < self.ROWS and 0 <= ny < self.COLS and 0 <= nz < self.DEPTH):
+                        if (nx, ny, nz) in self.position_map:
+                            org_id = self.position_map[(nx, ny, nz)]
+                            org = self.organisms[org_id]
+                            
+                            if (org.alive and 
+                                org.reproduction_mode == repro_idx and 
+                                org.energy >= required_energy):
+                                parents.append(org)
+        
+        return parents
+    
+    def _create_child_organism(self, parent: Organism, 
+                              birth_pos: Tuple[int, int, int],
+                              child_energy: float,
+                              parent_cost: float) -> None:
+        """Create a new child organism through reproduction."""
+        child_id = str(uuid.uuid4())
+        child = parent.reproduce(
+            child_id=child_id,
+            child_position=birth_pos,
+            child_energy=child_energy,
+            parent_energy_cost=parent_cost,
+            game=self
+        )
+        
+        self.organisms[child_id] = child
+        self.position_map[birth_pos] = child_id
+    
+    def _cleanup_dead_organisms(self) -> None:
+        """Remove dead organisms from the simulation."""
+        dead_ids = [org_id for org_id, org in self.organisms.items() if not org.alive]
+        
+        for org_id in dead_ids:
+            # Remove from position map
+            org = self.organisms[org_id]
+            if org.position in self.position_map and self.position_map[org.position] == org_id:
+                del self.position_map[org.position]
+            
+            # Remove from organisms dict
+            del self.organisms[org_id]
+    
+    def _prepare_visualization_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Prepare data for visualization as numpy arrays."""
+        grid = np.zeros((self.ROWS, self.COLS, self.DEPTH))
+        energy_assignments = np.zeros((self.ROWS, self.COLS, self.DEPTH))
+        repro_assignments = np.zeros((self.ROWS, self.COLS, self.DEPTH))
+        
+        for org in self.organisms.values():
+            if org.alive:
+                x, y, z = org.position
+                grid[x, y, z] = 1
+                energy_assignments[x, y, z] = org.energy_mode
+                repro_assignments[x, y, z] = org.reproduction_mode
+        
+        return grid, energy_assignments, repro_assignments
+    
+    def visualize_frame(self, grid_data: np.ndarray, 
+                       energy_data: np.ndarray, 
+                       repro_data: np.ndarray, 
+                       frameNum: int = 0) -> None:
+        """Render a single frame of the simulation."""
         if self.fig is None:
             self.fig = plt.figure(figsize=(12, 10))
             self.ax = self.fig.add_subplot(111, projection='3d')
         
         self.ax.clear()
         
-        # Plot each energy mode with its corresponding color
+        # Plot each energy mode with its color
         for mode_idx, mode in self.energy_mode_indices.items():
             x, y, z = np.where((grid_data == 1) & (energy_data == mode_idx))
             if len(x) > 0:
                 self.ax.scatter(x, y, z, c=mode.color, marker='o', s=1, label=mode.name)
         
+        # Configure plot appearance
         self.ax.set_xlim(0, self.ROWS)
         self.ax.set_ylim(0, self.COLS)
         self.ax.set_zlim(0, self.DEPTH)
@@ -449,7 +677,7 @@ class GameOfLife3D:
         self.ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     
     def animate(self, frames: int = 50, interval: int = 200) -> None:
-        """Create and display an animation of the simulation"""
+        """Create and display an animation of the simulation."""
         self.fig = plt.figure(figsize=(12, 10))
         self.ax = self.fig.add_subplot(111, projection='3d')
         
@@ -459,10 +687,8 @@ class GameOfLife3D:
             return self.ax,
         
         # Initial frame
-        initial_grid = self.grid.cpu().numpy()
-        initial_energy = self.energy_assignments.cpu().numpy()
-        initial_repro = self.repro_assignments.cpu().numpy()
-        self.visualize_frame(initial_grid, initial_energy, initial_repro, 0)
+        initial_data = self._prepare_visualization_data()
+        self.visualize_frame(*initial_data, 0)
         
         # Create animation
         self.ani = animation.FuncAnimation(
@@ -476,40 +702,18 @@ class GameOfLife3D:
         plt.show()
     
     def get_population_density(self) -> np.ndarray:
-        """Get the population density as a 2D numpy array (projection on XY plane)"""
-        return self.grid.sum(dim=2).cpu().numpy()
+        """Get 2D population density projection (sum along depth axis)."""
+        grid_data, _, _ = self._prepare_visualization_data()
+        return grid_data.sum(axis=2)
     
-    def get_3d_grid(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Get the current 3D grid, mode assignments, and energy state as numpy arrays"""
-        return (self.grid.cpu().numpy(), 
-                self.energy_assignments.cpu().numpy(),
-                self.repro_assignments.cpu().numpy(),
-                self.energy.cpu().numpy())
-    
-    def set_3d_grid(self, new_grid: np.ndarray, new_energy_assign: np.ndarray, 
-                   new_repro_assign: np.ndarray, new_energy: np.ndarray) -> None:
-        """Set the 3D grid, mode assignments, and energy state from numpy arrays"""
-        if new_grid.shape != (self.ROWS, self.COLS, self.DEPTH):
-            raise ValueError(f"Grid shape must be {(self.ROWS, self.COLS, self.DEPTH)}")
-        if new_energy_assign.shape != (self.ROWS, self.COLS, self.DEPTH):
-            raise ValueError(f"Energy assignments shape must be {(self.ROWS, self.COLS, self.DEPTH)}")
-        if new_repro_assign.shape != (self.ROWS, self.COLS, self.DEPTH):
-            raise ValueError(f"Repro assignments shape must be {(self.ROWS, self.COLS, self.DEPTH)}")
-        if new_energy.shape != (self.ROWS, self.COLS, self.DEPTH):
-            raise ValueError(f"Energy shape must be {(self.ROWS, self.COLS, self.DEPTH)}")
-        
-        self.grid = torch.from_numpy(new_grid).float().to(self.DEVICE)
-        self.energy_assignments = torch.from_numpy(new_energy_assign).int().to(self.DEVICE)
-        self.repro_assignments = torch.from_numpy(new_repro_assign).int().to(self.DEVICE)
-        self.energy = torch.from_numpy(new_energy).float().to(self.DEVICE)
+    def get_organism_count(self) -> int:
+        """Get the current number of living organisms."""
+        return sum(1 for org in self.organisms.values() if org.alive)
 
-# Example usage
 if __name__ == '__main__':
-    # Create simulation with default config
-    gol = GameOfLife3D(
+    # Example usage
+    simulation = GameOfLife3D(
         grid_size=(50, 50, 50),
         initial_prob=0.1
     )
-    
-    # Run with visualization
-    gol.animate(frames=100, interval=200)
+    simulation.animate(frames=100, interval=200)
