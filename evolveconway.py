@@ -323,13 +323,21 @@ class GameOfLife3D:
         self.oxygen_grid = torch.full((self.ROWS, self.COLS, self.DEPTH), 
                                     self.OXYGEN_LEVEL, 
                                     device=self.DEVICE)
-    
+        
     def count_neighbors(self) -> torch.Tensor:
         """Count live neighbors for all cells using 3D convolution."""
         # Create a grid of alive cells
         alive_grid = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
-        positions = torch.tensor([org.position for org in self.organisms.values() if org.alive], device=self.DEVICE)
-        alive_grid[positions[:,0], positions[:,1], positions[:,2]] = 1
+        
+        # Get positions of alive organisms
+        alive_positions = [org.position for org in self.organisms.values() if org.alive]
+        
+        if alive_positions:  # Only proceed if there are alive organisms
+            positions = torch.tensor(alive_positions, device=self.DEVICE)
+            # Ensure positions is 2D (N, 3) even if N=1
+            if positions.dim() == 1:
+                positions = positions.unsqueeze(0)
+            alive_grid[positions[:,0], positions[:,1], positions[:,2]] = 1
         
         alive_grid = alive_grid.unsqueeze(0).unsqueeze(0)
         neighbors = torch.nn.functional.conv3d(alive_grid, self.kernel, padding=1)
@@ -348,16 +356,25 @@ class GameOfLife3D:
         return torch.nn.functional.conv3d(mode_grid, self.kernel, padding=1).squeeze()
     
     def count_specific_repro_neighbors(self, mode_index: int) -> torch.Tensor:
-        """Count neighbors with a specific reproduction mode."""
+        """Count neighbors with a specific reproduction mode using vectorized operations."""
+        # Create a tensor marking positions of organisms with the target reproduction mode
         mode_grid = torch.zeros((self.ROWS, self.COLS, self.DEPTH), device=self.DEVICE)
         
-        for org_id, org in self.organisms.items():
-            if org.alive and org.reproduction_mode == mode_index:
-                x, y, z = org.position
-                mode_grid[x, y, z] = 1
+        # Get all positions at once
+        positions = torch.tensor([
+            org.position for org in self.organisms.values() 
+            if org.alive and org.reproduction_mode == mode_index
+        ], device=self.DEVICE)
         
-        mode_grid = mode_grid.unsqueeze(0).unsqueeze(0)
-        return torch.nn.functional.conv3d(mode_grid, self.kernel, padding=1).squeeze()
+        if positions.numel() > 0:  # Only if there are any matching organisms
+            mode_grid[positions[:, 0], positions[:, 1], positions[:, 2]] = 1
+        
+        # Apply convolution
+        return torch.nn.functional.conv3d(
+            mode_grid.unsqueeze(0).unsqueeze(0), 
+            self.kernel, 
+            padding=1
+        ).squeeze()
     
     def propagate_light(self) -> torch.Tensor:
         """
@@ -729,14 +746,14 @@ if __name__ == '__main__':
     simulation = GameOfLife3D(
         grid_size=(50, 50, 50),
         initial_prob=0.1,
-        gui=False  # Set to False for non-GUI execution
+        gui=True  # Set to False for non-GUI execution
     )
     
     if simulation.GUI:
         # Run with animation
-        ani = simulation.animate(frames=100, interval=200)
+        ani = simulation.animate(frames=5, interval=200)
         plt.show()
     else:
         # Run without visualization
-        simulation.run(steps=100)
+        simulation.run(steps=5)
         print(f"Final population: {simulation.get_organism_count()}")
