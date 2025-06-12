@@ -5,9 +5,9 @@ import numpy as np
 
 from util import print_timing_stats, time_function
 
-WIDTH = 50
-HEIGHT = 30
-RESOLUTION = 10
+WIDTH = 500
+HEIGHT = 400
+RESOLUTION = 2
 ti.init()
 
 @ti.data_oriented
@@ -25,6 +25,22 @@ class GameOfLife:
         self.gui = ti.GUI("Conway's Game of Life", 
                          res=(self.width * self.cell_size, self.height * self.cell_size))
         
+        self.cell_positions = ti.Vector.field(2, dtype=ti.f32, shape=(self.height, self.width))
+        self.cell_colors = ti.Vector.field(3, dtype=ti.f32, shape=(self.height, self.width))
+        self.precompute_cell_positions()
+        
+    def precompute_cell_positions(self):
+        cell_width = 1.0 / self.width
+        cell_height = 1.0 / self.height
+        
+        for y in range(self.height):
+            for x in range(self.width):
+                self.cell_positions[y, x] = [
+                    (x + 0.5) * cell_width, 
+                    (y + 0.5) * cell_height
+                ]
+                self.cell_colors[y, x] = [1.0, 1.0, 1.0]
+
     @time_function
     def initialize_random(self):
         random_grid = np.random.choice([0, 1], size=(self.height, self.width))
@@ -53,28 +69,16 @@ class GameOfLife:
     @time_function
     def update(self):
         current_grid = self.grid.to_numpy()
-        
         next_grid = self.conways_fast(current_grid)
-        
         self.update_grid(next_grid)
 
     @time_function
     def draw_cells(self):
-        cell_width = 1.0 / self.width
-        cell_height = 1.0 / self.height
+        alive_cells = np.where(self.grid.to_numpy() == 1)
+        positions = self.cell_positions.to_numpy()[alive_cells]
+        if positions.shape[0] > 0:
+            self.gui.circles(positions, color=0xFFFFFF, radius=self.cell_size / 2)
         
-        for y in range(self.height):
-            for x in range(self.width):
-                if self.grid[y, x]:
-                    x1 = x * cell_width
-                    y1 = y * cell_height
-                    x2 = (x + 1) * cell_width
-                    y2 = (y + 1) * cell_height
-                    
-                    self.gui.rect(topleft=(x1, y1), 
-                                 bottomright=(x2, y2), 
-                                 color=0xFFFFFF)
-    
     def run(self):
         counter = 0
         while self.gui.running:
@@ -86,10 +90,11 @@ class GameOfLife:
                     self.initialize_random()
             
             self.update()
-            if counter % 5 == 0:
+            if counter % 1 == 0:
                 self.draw_cells()
                 counter = 0
-            else: counter +=1
+            else: 
+                counter += 1
             self.gui.show()
 
 if __name__ == "__main__":
