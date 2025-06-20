@@ -1,183 +1,322 @@
+import hashlib
 import dearpygui.dearpygui as dpg
 import random
 import time
 import math
 from enum import Enum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
-
-class SpeciesType(Enum):
-    PLANT = 0
-    HERBIVORE = 1
-    CARNIVORE = 2
-    OMNIVORE = 3
 
 @dataclass
 class Species:
-    name: str
-    type: SpeciesType
-    color: tuple
-    max_energy: float
-    energy_gain: float  # For plants: per step in full light, for animals: per food eaten
-    energy_consumption: float  # Per step always
-    mature_age: int
-    reproduction_cost: float
-    offspring_energy: float
-    reproduction_frequency: int
-    temperature_sensitivity: float
-    light_sensitivity: float
-    cold_resistance: float
-    # Plant-specific traits
-    root_energy: float = 0  # Energy stored in roots (plants only)
-    # Animal-specific traits
+    # Core attributes
+    name: str = ""
+    name_parts: List[str] = field(default_factory=list)
+    color: tuple = (0, 0, 0)
+    max_energy: float = 10.0
+    energy_gain: float = 1.0
+    energy_consumption: float = 0.1
+    mature_age: int = 50
+    reproduction_cost: float = 5.0
+    offspring_energy: float = 3.0
+    reproduction_frequency: int = 10
+    temperature_sensitivity: float = 0.5
+    light_sensitivity: float = 0.5
+    cold_resistance: float = 0.5
+    
+    # Movement and type-related
+    can_move: bool = False
     move_speed: int = 0
-    move_energy_cost: float = 0  # Energy cost per movement
-    max_age: int = 0
-    sleep_ratio: float = 0
+    move_energy_cost: float = 0.0
+    has_roots: bool = False
+    root_energy: float = 0.0
+    
+    # Lifecycle
+    max_age: int = 0  # 0 means no max age (for plants)
+    sleep_ratio: float = 0.0
     diurnal: bool = True
-    preferred_food: List[str] = None
-    toxic_food: List[str] = None
+    
+    # Physical characteristics
+    height: float = 1.0  # Relative height
+    body_type: str = "generic"  # slim, bulky, etc.
+    surface_covering: str = "skin"  # fur, scales, feathers, etc.
+    covering_density: float = 0.5  # 0-1
+    covering_color: tuple = (0, 0, 0)
+    appendages: List[str] = field(default_factory=list)  # wings, fins, etc.
+    
+    # Diet preferences
+    preferred_food_parts: List[str] = field(default_factory=list)
+    toxic_food_parts: List[str] = field(default_factory=list)
+    diet_type: float = 0.0  # 0=plant, 0.5=omnivore, 1=carnivore
+    
+    # Cached type
+    _type: Optional[int] = None
+    
+    # Name part databases
+    _name_parts_db = {
+        'prefix': ["zo", "ra", "fi", "lo", "pa", "ki", "tu", "ve", "no", "xi"],
+        'suffix': ["oid", "ian", "us", "ix", "ae", "or", "ite", "oid", "ax", "is"],
+        'plant_suffix': ["folia", "phyll", "herba", "flora", "verd", "chloro"]
+    }
+    
+    # Physical part databases
+    _body_parts_db = {
+        'body_type': ["slim", "bulky", "streamlined", "segmented", "radial"],
+        'surface_covering': ["fur", "scales", "feathers", "skin", "bark", "chitin"],
+        'appendages': ["wings", "fins", "tentacles", "antennae", "claws", "hooves"]
+    }
+    
+    # Food part databases
+    _food_parts_db = {
+        'plant': ["leaf", "fruit", "nut", "root", "stem", "flower"],
+        'animal': ["meat", "organ", "bone", "marrow", "fat"]
+    }
+    
+    def __post_init__(self):
+        if not self.name and not self.name_parts:
+            self._generate_random_name()
+        if not self.name:
+            self.name = "".join(part.capitalize() for part in self.name_parts)
+        
+        # Ensure name is never empty
+        if not self.name:
+            self.name = "Unnamed"
+        
+        # Generate physical characteristics if not set
+        if not self.appendages:
+            self._generate_physical_characteristics()
+        
+        # Generate diet preferences if not set
+        if not self.preferred_food_parts or not self.toxic_food_parts:
+            self._generate_diet_preferences()
+    
+    @property
+    def type(self) -> int:
+        """Determine the species type based on characteristics"""
+        if self._type is None:
+            if not self.can_move and self.has_roots:
+                self._type = 0  # Plant
+            elif self.diet_type < 0.3:
+                self._type = 1  # Herbivore
+            elif self.diet_type > 0.7:
+                self._type = 2  # Carnivore
+            else:
+                self._type = 3  # Omnivore
+        return self._type
+    
+    def _hash_select(self, key: str, options: List[str]) -> str:
+        """Select an option consistently based on a hash of the key"""
+        hash_val = int(hashlib.sha256(key.encode()).hexdigest(), 16)
+        return options[hash_val % len(options)]
+    
+    def _generate_random_name(self):
+        """Generate a name based on the species characteristics"""
+        if self.type == 0:  # Plant
+            prefix = self._hash_select("plant_prefix", self._name_parts_db['prefix'])
+            suffix = self._hash_select("plant_suffix", self._name_parts_db['plant_suffix'])
+            self.name_parts = [prefix, suffix]
+        else:
+            prefix = self._hash_select("animal_prefix", self._name_parts_db['prefix'])
+            suffix = self._hash_select("animal_suffix", self._name_parts_db['suffix'])
+            self.name_parts = [prefix, suffix]
+    
+    def _generate_physical_characteristics(self):
+        """Generate random physical characteristics"""
+        # Determine body type based on movement
+        if self.can_move:
+            self.body_type = self._hash_select("body_type", self._body_parts_db['body_type'])
+            
+            # Select surface covering
+            self.surface_covering = self._hash_select("covering", self._body_parts_db['surface_covering'])
+            self.covering_density = random.uniform(0.1, 0.9)
+            
+            # Select appendages (0-3)
+            num_appendages = random.randint(0, 3)
+            if num_appendages > 0:
+                self.appendages = random.sample(self._body_parts_db['appendages'], num_appendages)
+            
+            # Set height based on type
+            if self.type in [2, 3]:  # Carnivore/Omnivore
+                self.height = random.uniform(0.8, 2.0)
+            else:  # Herbivore
+                self.height = random.uniform(0.5, 1.5)
+        else:
+            # Plant characteristics
+            self.body_type = "radial" if random.random() < 0.5 else "segmented"
+            self.surface_covering = "bark" if random.random() < 0.5 else "skin"
+            self.covering_density = random.uniform(0.7, 1.0)
+            self.height = random.uniform(0.1, 3.0)  # Plants can be very tall
+    
+    def _generate_diet_preferences(self):
+        """Generate diet preferences based on species type"""
+        if self.type == 0:  # Plants don't eat
+            return
+        
+        # Determine diet composition
+        if self.type == 1:  # Herbivore
+            self.diet_type = random.uniform(0.0, 0.3)
+            num_preferred = random.randint(1, 3)
+            self.preferred_food_parts = random.sample(self._food_parts_db['plant'], num_preferred)
+            
+        elif self.type == 2:  # Carnivore
+            self.diet_type = random.uniform(0.7, 1.0)
+            num_preferred = random.randint(1, 2)
+            self.preferred_food_parts = random.sample(self._food_parts_db['animal'], num_preferred)
+            
+        else:  # Omnivore
+            self.diet_type = random.uniform(0.3, 0.7)
+            plant_parts = random.sample(self._food_parts_db['plant'], random.randint(1, 2))
+            animal_parts = random.sample(self._food_parts_db['animal'], random.randint(1, 2))
+            self.preferred_food_parts = plant_parts + animal_parts
+        
+        # Generate some toxic parts (10-30% chance per part)
+        all_parts = self._food_parts_db['plant'] + self._food_parts_db['animal']
+        self.toxic_food_parts = [part for part in all_parts if random.random() < 0.2]
     
     def mutate(self) -> 'Species':
         """Create a slightly mutated version of this species"""
-        mutation_factor = random.uniform(0.8, 1.2)
-        
-        # Create new name by combining syllables
-        syllables = ["zo", "ra", "fi", "lo", "pa", "ki", "tu", "ve", "no", "xi"]
-        new_name = "".join(random.choices(syllables, k=random.randint(2, 3))).capitalize()
-        
+        # Create a copy with slight modifications
         new_species = Species(
-            name=new_name,
-            type=self.type,
+            name_parts=self.name_parts.copy(),
             color=(
-                max(0, min(255, int(self.color[0] * random.uniform(0.8, 1.2)))),
-                max(0, min(255, int(self.color[1] * random.uniform(0.8, 1.2)))),
-                max(0, min(255, int(self.color[2] * random.uniform(0.8, 1.2))))
+                max(0, min(255, int(self.color[0] * random.uniform(0.9, 1.1)))),
+                max(0, min(255, int(self.color[1] * random.uniform(0.9, 1.1)))),
+                max(0, min(255, int(self.color[2] * random.uniform(0.9, 1.1))))
             ),
-            max_energy=max(1, self.max_energy * mutation_factor),
-            energy_gain=max(0.05, self.energy_gain * mutation_factor),
-            energy_consumption=max(0.01, self.energy_consumption * mutation_factor),
-            mature_age=max(5, int(self.mature_age * random.uniform(0.8, 1.2))),
-            reproduction_cost=max(0.5, self.reproduction_cost * mutation_factor),
-            offspring_energy=max(0.5, self.offspring_energy * mutation_factor),
-            reproduction_frequency=max(1, int(self.reproduction_frequency * random.uniform(0.8, 1.2))),
-            temperature_sensitivity=max(0.1, min(1.0, self.temperature_sensitivity * random.uniform(0.8, 1.2))),
-            light_sensitivity=max(0.1, min(1.0, self.light_sensitivity * random.uniform(0.8, 1.2))),
-            cold_resistance=max(0.1, min(1.0, self.cold_resistance * random.uniform(0.8, 1.2))),
-            root_energy=max(0, self.root_energy * random.uniform(0.8, 1.2)) if self.type == SpeciesType.PLANT else 0,
-            move_speed=max(0, int(self.move_speed * random.uniform(0.8, 1.2))) if self.type != SpeciesType.PLANT else 0,
-            move_energy_cost=max(0, self.move_energy_cost * random.uniform(0.8, 1.2)) if self.type != SpeciesType.PLANT else 0,
-            max_age=max(0, int(self.max_age * random.uniform(0.8, 1.2))) if self.type != SpeciesType.PLANT else 0,
-            sleep_ratio=max(0, min(0.5, self.sleep_ratio * random.uniform(0.8, 1.2))) if self.type != SpeciesType.PLANT else 0,
-            diurnal=self.diurnal if random.random() < 0.8 else not self.diurnal,
-            preferred_food=self.preferred_food.copy() if self.preferred_food else None,
-            toxic_food=self.toxic_food.copy() if self.toxic_food else None
+            max_energy=max(1, self.max_energy * random.uniform(0.95, 1.05)),
+            energy_gain=max(0.05, self.energy_gain * random.uniform(0.95, 1.05)),
+            energy_consumption=max(0.01, self.energy_consumption * random.uniform(0.95, 1.05)),
+            mature_age=max(5, int(self.mature_age * random.uniform(0.9, 1.1))),
+            reproduction_cost=max(0.5, self.reproduction_cost * random.uniform(0.9, 1.1)),
+            offspring_energy=max(0.5, self.offspring_energy * random.uniform(0.9, 1.1)),
+            reproduction_frequency=max(1, int(self.reproduction_frequency * random.uniform(0.9, 1.1))),
+            temperature_sensitivity=max(0.1, min(1.0, self.temperature_sensitivity * random.uniform(0.9, 1.1))),
+            light_sensitivity=max(0.1, min(1.0, self.light_sensitivity * random.uniform(0.9, 1.1))),
+            cold_resistance=max(0.1, min(1.0, self.cold_resistance * random.uniform(0.9, 1.1))),
+            can_move=self.can_move,
+            move_speed=max(0, int(self.move_speed * random.uniform(0.9, 1.1)) if self.can_move else 0),
+            move_energy_cost=max(0, self.move_energy_cost * random.uniform(0.9, 1.1) if self.can_move else 0),
+            has_roots=self.has_roots,
+            root_energy=max(0, self.root_energy * random.uniform(0.9, 1.1)) if self.has_roots else 0,
+            max_age=max(0, int(self.max_age * random.uniform(0.9, 1.1)) if self.max_age > 0 else 0),
+            sleep_ratio=max(0, min(0.5, self.sleep_ratio * random.uniform(0.9, 1.1))) if self.can_move else 0,
+            diurnal=self.diurnal if random.random() < 0.9 else not self.diurnal,
+            height=max(0.1, self.height * random.uniform(0.95, 1.05)),
+            body_type=self.body_type,
+            surface_covering=self.surface_covering,
+            covering_density=max(0, min(1, self.covering_density * random.uniform(0.95, 1.05))),
+            covering_color=(
+                max(0, min(255, int(self.covering_color[0] * random.uniform(0.9, 1.1)))),
+                max(0, min(255, int(self.covering_color[1] * random.uniform(0.9, 1.1)))),
+                max(0, min(255, int(self.covering_color[2] * random.uniform(0.9, 1.1))))
+            ),
+            appendages=self.appendages.copy(),
+            preferred_food_parts=self.preferred_food_parts.copy(),
+            toxic_food_parts=self.toxic_food_parts.copy(),
+            diet_type=max(0, min(1, self.diet_type * random.uniform(0.95, 1.05)))
         )
         
-        # Small chance to change type
+        # Small chance to add/remove an appendage
+        if random.random() < 0.05 and new_species.can_move:
+            if random.random() < 0.5 and new_species.appendages:
+                new_species.appendages.pop(random.randint(0, len(new_species.appendages)-1))
+            elif len(new_species.appendages) < 3:
+                available = [a for a in self._body_parts_db['appendages'] if a not in new_species.appendages]
+                if available:
+                    new_species.appendages.append(random.choice(available))
+        
+        # Small chance to change a food preference
+        if random.random() < 0.1 and new_species.type != 0:
+            if random.random() < 0.5 and new_species.preferred_food_parts:
+                new_species.preferred_food_parts.pop(random.randint(0, len(new_species.preferred_food_parts)-1))
+            else:
+                all_parts = self._food_parts_db['plant'] + self._food_parts_db['animal']
+                available = [p for p in all_parts if p not in new_species.preferred_food_parts]
+                if available:
+                    new_species.preferred_food_parts.append(random.choice(available))
+        
+        # Very small chance to change fundamental type
         if random.random() < 0.005:
-            if new_species.type == SpeciesType.PLANT:
-                new_species.type = random.choice([SpeciesType.HERBIVORE, SpeciesType.OMNIVORE])
+            if new_species.type == 0:  # Plant -> Animal
+                new_species.can_move = True
+                new_species.has_roots = False
                 new_species.move_speed = random.randint(1, 3)
                 new_species.move_energy_cost = random.uniform(0.1, 0.5)
                 new_species.max_age = random.randint(100, 500)
-            else:
+                new_species.sleep_ratio = random.uniform(0.1, 0.3)
+                new_species._generate_diet_preferences()
+                new_species._generate_physical_characteristics()
+            else:  # Animal -> Plant
                 if random.random() < 0.1:
-                    new_species.type = SpeciesType.PLANT
+                    new_species.can_move = False
+                    new_species.has_roots = True
                     new_species.move_speed = 0
                     new_species.move_energy_cost = 0
                     new_species.max_age = 0
+                    new_species.sleep_ratio = 0
                     new_species.root_energy = random.uniform(5, 20)
+                    new_species.preferred_food_parts = []
+                    new_species.toxic_food_parts = []
+                    new_species._generate_physical_characteristics()
+        
+        # Regenerate name to reflect changes
+        new_species._generate_random_name()
+        #new_species.name = ""  # Force regeneration
         
         return new_species
 
-def generate_random_species():
-    """Generate a completely random species"""
-    species_type = random.choice(list(SpeciesType))
-    
-    # Generate a random color based on type
-    if species_type == SpeciesType.PLANT:
-        color = (random.randint(50, 150), random.randint(100, 200), random.randint(50, 150))
-    elif species_type == SpeciesType.HERBIVORE:
-        color = (random.randint(150, 255), random.randint(150, 255), random.randint(100, 200))
-    elif species_type == SpeciesType.CARNIVORE:
-        color = (random.randint(200, 255), random.randint(100, 150), random.randint(100, 150))
-    else:  # OMNIVORE
-        color = (random.randint(150, 255), random.randint(150, 200), random.randint(100, 150))
-    
-    # Generate a name
-    syllables = ["zo", "ra", "fi", "lo", "pa", "ki", "tu", "ve", "no", "xi"]
-    name = "".join(random.choices(syllables, k=random.randint(2, 3))).capitalize()
-    
-    # Base traits
-    max_energy = random.uniform(5, 50)
-    energy_gain = random.uniform(0.1, 2.0)
-    energy_consumption = random.uniform(0.01, 0.2)
-    mature_age = random.randint(10, 100)
-    reproduction_cost = random.uniform(1, 10)
-    offspring_energy = random.uniform(1, 5)
-    reproduction_frequency = random.randint(1, 20)
-    temperature_sensitivity = random.uniform(0.1, 1.0)
-    light_sensitivity = random.uniform(0.1, 1.0)
-    cold_resistance = random.uniform(0.1, 1.0)
-    
-    # Plant-specific traits
-    root_energy = random.uniform(5, 20) if species_type == SpeciesType.PLANT else 0
-    
-    # Animal-specific traits
-    move_speed = 0
-    move_energy_cost = 0
-    max_age = 0
-    sleep_ratio = 0
-    diurnal = True
-    preferred_food = []
-    toxic_food = []
-    
-    if species_type != SpeciesType.PLANT:
-        move_speed = random.randint(1, 3)
-        move_energy_cost = random.uniform(0.1, 0.5)
-        max_age = random.randint(100, 1000)
-        sleep_ratio = random.uniform(0.1, 0.3)
-        diurnal = random.random() < 0.7
+    @classmethod
+    def generate_random_species(cls) -> 'Species':
+        """Generate a completely random species"""
+        # First decide if it's a plant or animal
+        is_plant = random.random() < 0.5
         
-        # Generate food preferences
-        if species_type in [SpeciesType.HERBIVORE, SpeciesType.OMNIVORE]:
-            preferred_food = random.sample(["Grass", "Bush", "Algae", "Fruit"], random.randint(1, 2))
-            toxic_food = random.sample(["Poison Ivy", "Toxic Shroom"], random.randint(0, 1))
+        species = cls()
+        species.can_move = not is_plant
+        species.has_roots = is_plant
         
-        if species_type in [SpeciesType.CARNIVORE, SpeciesType.OMNIVORE]:
-            if not preferred_food:
-                preferred_food = []
-            preferred_food.extend(random.sample(["Herbivore", "Small Carnivore"], random.randint(1, 2)))
-    
-    return Species(
-        name=name,
-        type=species_type,
-        color=color,
-        max_energy=max_energy,
-        energy_gain=energy_gain,
-        energy_consumption=energy_consumption,
-        mature_age=mature_age,
-        reproduction_cost=reproduction_cost,
-        offspring_energy=offspring_energy,
-        reproduction_frequency=reproduction_frequency,
-        temperature_sensitivity=temperature_sensitivity,
-        light_sensitivity=light_sensitivity,
-        cold_resistance=cold_resistance,
-        root_energy=root_energy,
-        move_speed=move_speed,
-        move_energy_cost=move_energy_cost,
-        max_age=max_age,
-        sleep_ratio=sleep_ratio,
-        diurnal=diurnal,
-        preferred_food=preferred_food,
-        toxic_food=toxic_food
-    )
+        # Set core attributes
+        species.max_energy = random.uniform(5, 50)
+        species.energy_gain = random.uniform(0.1, 2.0)
+        species.energy_consumption = random.uniform(0.01, 0.2)
+        species.mature_age = random.randint(10, 100)
+        species.reproduction_cost = random.uniform(1, 10)
+        species.offspring_energy = random.uniform(1, 5)
+        species.reproduction_frequency = random.randint(1, 20)
+        species.temperature_sensitivity = random.uniform(0.1, 1.0)
+        species.light_sensitivity = random.uniform(0.1, 1.0)
+        species.cold_resistance = random.uniform(0.1, 1.0)
+        
+        # Set plant or animal specific attributes
+        if is_plant:
+            species.root_energy = random.uniform(5, 20)
+            species.color = (random.randint(50, 150), random.randint(100, 200), random.randint(50, 150))
+        else:
+            species.move_speed = random.randint(1, 3)
+            species.move_energy_cost = random.uniform(0.1, 0.5)
+            species.max_age = random.randint(100, 1000)
+            species.sleep_ratio = random.uniform(0.1, 0.3)
+            species.diurnal = random.random() < 0.7
+            
+            # Set color based on diet type
+            species.diet_type = random.random()
+            if species.diet_type < 0.3:  # Herbivore
+                species.color = (random.randint(150, 255), random.randint(150, 255), random.randint(100, 200))
+            elif species.diet_type > 0.7:  # Carnivore
+                species.color = (random.randint(200, 255), random.randint(100, 150), random.randint(100, 150))
+            else:  # Omnivore
+                species.color = (random.randint(150, 255), random.randint(150, 200), random.randint(100, 150))
+        
+        # Generate name and characteristics
+        species._generate_random_name()
+        species._generate_physical_characteristics()
+        species._generate_diet_preferences()
+        
+        return species
 
-# Default species
+# Default species examples
 Species.GRASS = Species(
-    name="Grass",
-    type=SpeciesType.PLANT,
+    name_parts=["gra", "ss"],
     color=(100, 200, 100),
     max_energy=15,
     energy_gain=0.3,
@@ -189,12 +328,17 @@ Species.GRASS = Species(
     temperature_sensitivity=0.8,
     light_sensitivity=0.9,
     cold_resistance=0.7,
-    root_energy=8  # Grass has substantial root energy
+    can_move=False,
+    has_roots=True,
+    root_energy=8,
+    height=0.3,
+    body_type="radial",
+    surface_covering="skin",
+    covering_density=0.8
 )
 
 Species.OMNIVORE = Species(
-    name="Omnivore",
-    type=SpeciesType.OMNIVORE,
+    name_parts=["om", "niv", "ore"],
     color=(200, 150, 100),
     max_energy=25,
     energy_gain=2.0,
@@ -206,13 +350,20 @@ Species.OMNIVORE = Species(
     temperature_sensitivity=0.6,
     light_sensitivity=0.3,
     cold_resistance=0.5,
+    can_move=True,
     move_speed=2,
-    move_energy_cost=0.2,  # Energy cost per movement
+    move_energy_cost=0.2,
     max_age=500,
     sleep_ratio=0.2,
     diurnal=True,
-    preferred_food=["Grass", "Herbivore"],
-    toxic_food=["Poison Ivy"]
+    height=1.2,
+    body_type="slim",
+    surface_covering="fur",
+    covering_density=0.6,
+    appendages=["claws"],
+    diet_type=0.5,
+    preferred_food_parts=["fruit", "meat"],
+    toxic_food_parts=["root"]
 )
 
 @dataclass
@@ -404,7 +555,7 @@ class GameOfLife:
         species = self.totalgrid[x][y][z].organism.species
         energy = self.totalgrid[x][y][z].organism.energy
         
-        if species.type == SpeciesType.PLANT:
+        if species.type == 0:
             r = species.color[0] * self.temperature * species.temperature_sensitivity
             g = species.color[1] * self.light_level * species.light_sensitivity
             b = species.color[2] * self.temperature * species.temperature_sensitivity
@@ -444,10 +595,9 @@ class GameOfLife:
             return " "
             
         species = self.totalgrid[x][y][z].organism.species
-        if species: 
+        if species and species.name:  # Check both that species exists and has a name
             return species.name[0].upper()
-        else: 
-            return " "  # Empty space
+        return "?"  # Fallback character
     
     def draw_grid(self):
         dpg.delete_item("drawlist", children_only=True)
@@ -503,7 +653,7 @@ class GameOfLife:
             return False
             
         species = self.totalgrid[x][y][z].organism.species
-        if species is None or species.type == SpeciesType.PLANT:
+        if species is None or species.type == 0:
             return False
         
         # Check if it's the wrong time of day for this species
@@ -546,7 +696,7 @@ class GameOfLife:
                     energy_loss = current_species.energy_consumption
                     
                     # Plants gain energy from light and can use root energy
-                    if current_species.type == SpeciesType.PLANT:
+                    if current_species.type == 0:
                         energy_gain = ((self.light_level * current_species.light_sensitivity) * 
                                       current_species.energy_gain * (self.temperature * current_species.temperature_sensitivity))
                         net_energy = current_energy + energy_gain - energy_loss
@@ -607,6 +757,10 @@ class GameOfLife:
                     
                     # Check if organism can survive current conditions
                     survival_chance = (self.temperature + current_species.cold_resistance)
+                    if current_species.surface_covering == "fur":
+                        survival_chance *= 1.2  # Better insulation
+                    elif current_species.surface_covering == "scales":
+                        survival_chance *= 0.9
                     if random.random() > survival_chance:
                         new_grid[x][y][z].organism = None
                         continue
@@ -645,14 +799,14 @@ class GameOfLife:
                             new_grid[nx][ny][nz].organism = CellOrganism(
                                 species=mutated_species,
                                 energy=current_species.offspring_energy,
-                                root_energy=current_species.offspring_energy * 0.5 if mutated_species.type == SpeciesType.PLANT else 0,
+                                root_energy=current_species.offspring_energy * 0.5 if mutated_species.type == 0 else 0,
                                 age=0
                             )
                             new_grid[x][y][z].organism.energy -= current_species.reproduction_cost
                             moved_or_eaten[nx][ny][nz] = True
                     
                     # Handle animal movement and eating
-                    if (current_species.type != SpeciesType.PLANT and 
+                    if (current_species.type != 0 and 
                         not self.is_animal_sleeping(x, y, z) and 
                         new_grid[x][y][z].organism.energy < current_species.max_energy * 0.9):
                         
@@ -677,12 +831,17 @@ class GameOfLife:
                                             target_species = self.totalgrid[nx][ny][nz].organism.species
                                             
                                             # Check if this is preferred food
-                                            if (current_species.preferred_food and 
-                                                target_species.name in current_species.preferred_food):
+                                            if (any(part in target_species.name_parts or 
+                                                    part in target_species.surface_covering or 
+                                                    part in target_species.body_type 
+                                                    for part in current_species.preferred_food_parts)):
                                                 food_value = current_species.energy_gain * 1.5
                                             # Check if this is toxic food
-                                            elif (current_species.toxic_food and 
-                                                  target_species.name in current_species.toxic_food):
+                                            elif (current_species.toxic_food_parts and 
+                                                any(part in target_species.name_parts or 
+                                                    part in target_species.surface_covering or 
+                                                    part in target_species.body_type 
+                                                    for part in current_species.toxic_food_parts)):
                                                 food_value = -current_species.energy_gain  # Negative value
                                             # Neutral food
                                             else:
@@ -750,7 +909,7 @@ class GameOfLife:
         num_species = random.randint(1, 10)
         random_species = [Species.GRASS, Species.OMNIVORE]  # Start with our default species
         for _ in range(num_species):
-            random_species.append(generate_random_species())
+            random_species.append(Species.generate_random_species())
         
         for x in range(self.grid_size):
             for y in range(self.grid_size):
@@ -759,7 +918,7 @@ class GameOfLife:
                     rand = random.random()
                     if rand < 0.3:  # 30% chance of being an organism
                         species = random.choice(random_species)
-                        root_energy = random.uniform(0, species.root_energy) if species.type == SpeciesType.PLANT else 0
+                        root_energy = random.uniform(0, species.root_energy) if species.type == 0 else 0
                         self.totalgrid[x][y][z].organism = CellOrganism(
                             species=species,
                             energy=random.uniform(species.offspring_energy, species.max_energy * 0.5),
@@ -802,6 +961,31 @@ class GameOfLife:
         
         # Redraw the grid
         self.draw_grid()
+
+    def inspect_species(self, x, y, z):
+        if self.totalgrid[x][y][z].organism is None:
+            return "Empty cell"
+        
+        org = self.totalgrid[x][y][z].organism
+        s = org.species
+        
+        info = f"""
+        Name: {s.name}
+        Type: {'Plant' if s.type == 0 else 'Herbivore' if s.type == 1 else 'Carnivore' if s.type == 2 else 'Omnivore'}
+        Energy: {org.energy:.1f}/{s.max_energy:.1f}
+        Age: {org.age}/{s.max_age if s.max_age > 0 else '∞'}
+        
+        Physical:
+        - Height: {s.height:.1f} units
+        - Body: {s.body_type}
+        - Covering: {s.surface_covering} ({s.covering_density*100:.0f}% density)
+        - Appendages: {', '.join(s.appendages) if s.appendages else 'None'}
+        
+        Diet:
+        - Preferred: {', '.join(s.preferred_food_parts)}
+        - Toxic: {', '.join(s.toxic_food_parts) if s.toxic_food_parts else 'None'}
+        """
+        return info
     
     def run(self):
         while dpg.is_dearpygui_running():
