@@ -7,6 +7,7 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Optional
 import torch
+import numpy as np
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
@@ -357,8 +358,13 @@ class GameOfLife:
         self.cell_size = 10
         self.running = False
         
-        # Initialize grid as a torch tensor for faster operations
-        self.totalgrid = [[[TotalCell() for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+        # Initialize grid with numpy arrays
+        self.totalgrid = np.empty((self.grid_size, self.grid_size, self.grid_size), dtype=object)
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                for z in range(self.grid_size):
+                    self.totalgrid[x, y, z] = TotalCell()
+        
         self.grid_tensor = torch.zeros((self.grid_size, self.grid_size, 3), dtype=torch.float32, device=DEVICE)
         
         # Time parameters
@@ -381,7 +387,7 @@ class GameOfLife:
         dpg.create_viewport(title="Evolution Simulation", width=850, height=600)
         dpg.setup_dearpygui()
         dpg.show_viewport()
-        
+    
     def setup_ui(self):
         with dpg.window(tag="Main Window"):
             with dpg.group(horizontal=True):
@@ -430,12 +436,12 @@ class GameOfLife:
             self.current_day = (self.current_day + 1) % self.year_length
             self.update_daylight_duration()
             
-            # Update age using tensor operations
+            # Update age using numpy operations
             for x in range(self.grid_size):
                 for y in range(self.grid_size):
                     for z in range(self.grid_size):
-                        if self.totalgrid[x][y][z].organism is not None:
-                            self.totalgrid[x][y][z].organism.age += 1
+                        if self.totalgrid[x, y, z].organism is not None:
+                            self.totalgrid[x, y, z].organism.age += 1
         
         self.is_day = self.current_step < self.current_daylight
         
@@ -451,19 +457,19 @@ class GameOfLife:
             else:
                 self.light_level = 0.05
         
-        # Calculate temperature using PyTorch for vectorized operations
         season_progress = (self.current_day - self.winter_solstice) % self.year_length / self.year_length
-        season_temp = 0.5 + 0.4 * torch.sin(torch.tensor(season_progress * 2 * math.pi, device=DEVICE)).item()
+        season_temp = 0.5 + 0.4 * np.sin(season_progress * 2 * math.pi)
         
         if self.is_day:
             day_progress = self.current_step / self.current_daylight
-            daily_temp = 0.8 + 0.2 * torch.sin(torch.tensor(day_progress * math.pi, device=DEVICE)).item()
+            daily_temp = 0.8 + 0.2 * np.sin(day_progress * math.pi)
         else:
             night_progress = (self.current_step - self.current_daylight) / (self.steps_per_day - self.current_daylight)
-            daily_temp = 0.6 - 0.1 * torch.sin(torch.tensor(night_progress * math.pi, device=DEVICE)).item()
+            daily_temp = 0.6 - 0.1 * np.sin(night_progress * math.pi)
         
         self.temperature = season_temp * daily_temp
         
+        # Update UI (remain the same)
         hours = self.current_step // 2
         minutes = (self.current_step % 2) * 30
         time_str = f"{hours:02d}:{minutes:02d}"
@@ -493,19 +499,19 @@ class GameOfLife:
     def update_daylight_duration(self):
         days_since_winter = (self.current_day - self.winter_solstice) % (self.year_length * 48)
         year_progress = days_since_winter / self.year_length
-        daylight_hours = 12 + 4 * torch.cos(torch.tensor(year_progress * math.pi)).item()
+        daylight_hours = 12 + 4 * np.cos(year_progress * math.pi)
         self.current_daylight = int(round(daylight_hours * 2))
 
     def get_species_color(self, x, y, z):
-        if self.totalgrid[x][y][z].organism is None:
+        if self.totalgrid[x, y, z].organism is None:
             return (0, 0, 0)
             
-        species = self.totalgrid[x][y][z].organism.species
-        energy = self.totalgrid[x][y][z].organism.energy
+        species = self.totalgrid[x, y, z].organism.species
+        energy = self.totalgrid[x, y, z].organism.energy
         
         if species.type == 0:
-            # Use PyTorch for vectorized color calculations
-            color = torch.tensor(species.color, dtype=torch.float32, device=DEVICE)
+            # Use numpy for color calculations
+            color = np.array(species.color, dtype=np.float32)
             r = color[0] * self.temperature * species.temperature_sensitivity
             g = color[1] * self.light_level * species.light_sensitivity
             b = color[2] * self.temperature * species.temperature_sensitivity
@@ -515,14 +521,14 @@ class GameOfLife:
                 g *= 0.3
                 b *= 0.3
             
-            r = torch.clamp(r, 0, 255).int().item()
-            g = torch.clamp(g, 0, 255).int().item()
-            b = torch.clamp(b, 0, 255).int().item()
+            r = np.clip(r, 0, 255).astype(int)
+            g = np.clip(g, 0, 255).astype(int)
+            b = np.clip(b, 0, 255).astype(int)
             
             return (r, g, b)
         else:
             energy_ratio = energy / species.max_energy
-            color = torch.tensor(species.color, dtype=torch.float32, device=DEVICE)
+            color = np.array(species.color, dtype=np.float32)
             r = color[0] * energy_ratio
             g = color[1] * energy_ratio * self.temperature
             b = color[2] * energy_ratio
@@ -532,9 +538,9 @@ class GameOfLife:
                 g *= 0.5
                 b *= 0.5
             
-            r = torch.clamp(r, 0, 255).int().item()
-            g = torch.clamp(g, 0, 255).int().item()
-            b = torch.clamp(b, 0, 255).int().item()
+            r = np.clip(r, 0, 255).astype(int)
+            g = np.clip(g, 0, 255).astype(int)
+            b = np.clip(b, 0, 255).astype(int)
             
             return (r, g, b)
     
@@ -554,7 +560,7 @@ class GameOfLife:
             # Update grid tensor with current colors
             for x in range(self.grid_size):
                 for y in range(self.grid_size):
-                    if self.totalgrid[x][y][0].organism is not None:
+                    if self.totalgrid[x, y, 0].organism is not None:
                         color = self.get_species_color(x, y, 0)
                         self.grid_tensor[x, y] = torch.tensor(color, device=DEVICE) / 255.0
                     else:
@@ -595,15 +601,15 @@ class GameOfLife:
                     color=(50, 50, 50, 100),
                     thickness=1
                 )
-                
+    
     def set_running(self, running):
         self.running = running
     
     def is_animal_sleeping(self, x, y, z):
-        if self.totalgrid[x][y][z].organism is None:
+        if self.totalgrid[x, y, z].organism is None:
             return False
             
-        species = self.totalgrid[x][y][z].organism.species
+        species = self.totalgrid[x, y, z].organism.species
         if species is None or species.type == 0:
             return False
         
@@ -613,25 +619,30 @@ class GameOfLife:
             return True
         else:
             return random.random() < species.sleep_ratio
-        
+    
     def step(self):
         self.update_time_cycles()
         
-        # Create new grids for the next generation
-        new_grid = [[[TotalCell() for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
-        moved_or_eaten = [[[False for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+        # Create new grid for the next generation using numpy
+        new_grid = np.empty((self.grid_size, self.grid_size, self.grid_size), dtype=object)
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                for z in range(self.grid_size):
+                    new_grid[x, y, z] = TotalCell()
+        
+        moved_or_eaten = np.zeros((self.grid_size, self.grid_size, self.grid_size), dtype=bool)
         
         # Process each cell
         for x in range(self.grid_size):
             for y in range(self.grid_size):
                 for z in range(self.grid_size):
-                    if moved_or_eaten[x][y][z]:
+                    if moved_or_eaten[x, y, z]:
                         continue
                         
-                    if self.totalgrid[x][y][z].organism is None:
+                    if self.totalgrid[x, y, z].organism is None:
                         continue
                         
-                    current_organism = self.totalgrid[x][y][z].organism
+                    current_organism = self.totalgrid[x, y, z].organism
                     current_species = current_organism.species
                     current_energy = current_organism.energy
                     current_root_energy = current_organism.root_energy
@@ -647,14 +658,14 @@ class GameOfLife:
                         if net_energy > current_species.max_energy:
                             storage = min(net_energy - current_species.max_energy, 
                                         current_species.root_energy - current_root_energy)
-                            new_grid[x][y][z].organism = CellOrganism(
+                            new_grid[x, y, z].organism = CellOrganism(
                                 species=current_species,
                                 energy=current_species.max_energy,
                                 root_energy=current_root_energy + storage,
                                 age=current_age
                             )
                         elif net_energy > 0:
-                            new_grid[x][y][z].organism = CellOrganism(
+                            new_grid[x, y, z].organism = CellOrganism(
                                 species=current_species,
                                 energy=net_energy,
                                 root_energy=current_root_energy,
@@ -663,47 +674,47 @@ class GameOfLife:
                         else:
                             energy_needed = -net_energy
                             if current_root_energy >= energy_needed:
-                                new_grid[x][y][z].organism = CellOrganism(
+                                new_grid[x, y, z].organism = CellOrganism(
                                     species=current_species,
                                     energy=0,
                                     root_energy=current_root_energy - energy_needed,
                                     age=current_age
                                 )
                             else:
-                                new_grid[x][y][z].organism = None
+                                new_grid[x, y, z].organism = None
                                 continue
                     else:
                         net_energy = current_energy - energy_loss
                         
                         if current_age >= current_species.max_age:
-                            new_grid[x][y][z].organism = None
+                            new_grid[x, y, z].organism = None
                             continue
                         
                         if net_energy <= 0:
-                            new_grid[x][y][z].organism = None
+                            new_grid[x, y, z].organism = None
                             continue
                         
-                        new_grid[x][y][z].organism = CellOrganism(
+                        new_grid[x, y, z].organism = CellOrganism(
                             species=current_species,
                             energy=net_energy,
                             root_energy=0,
                             age=current_age
                         )
                     
-                    # Calculate survival chance using PyTorch
+                    # Calculate survival chance using numpy
                     survival_chance = (self.temperature + current_species.cold_resistance)
                     if current_species.surface_covering == "fur":
                         survival_chance *= 1.2
                     elif current_species.surface_covering == "scales":
                         survival_chance *= 0.9
                     
-                    if torch.rand(1).item() > survival_chance:
-                        new_grid[x][y][z].organism = None
+                    if np.random.random() > survival_chance:
+                        new_grid[x, y, z].organism = None
                         continue
                     
                     # Reproduction
-                    if (new_grid[x][y][z].organism is not None and 
-                        new_grid[x][y][z].organism.energy >= current_species.reproduction_cost and 
+                    if (new_grid[x, y, z].organism is not None and 
+                        new_grid[x, y, z].organism.energy >= current_species.reproduction_cost and 
                         current_age >= current_species.mature_age and 
                         self.current_day % current_species.reproduction_frequency == 0):
                         
@@ -717,31 +728,31 @@ class GameOfLife:
                                     if (0 <= nx < self.grid_size and 
                                         0 <= ny < self.grid_size and 
                                         0 <= nz < self.grid_size):
-                                        if (self.totalgrid[nx][ny][nz].organism is None and 
-                                            not moved_or_eaten[nx][ny][nz]):
+                                        if (self.totalgrid[nx, ny, nz].organism is None and 
+                                            not moved_or_eaten[nx, ny, nz]):
                                             empty_neighbors.append((nx, ny, nz))
                         
                         if empty_neighbors:
                             nx, ny, nz = random.choice(empty_neighbors)
                             
-                            if torch.rand(1).item() < 0.05:  # Mutation chance
+                            if np.random.random() < 0.05:  # Mutation chance
                                 mutated_species = current_species.mutate()
                             else:
                                 mutated_species = current_species
                             
-                            new_grid[nx][ny][nz].organism = CellOrganism(
+                            new_grid[nx, ny, nz].organism = CellOrganism(
                                 species=mutated_species,
                                 energy=current_species.offspring_energy,
                                 root_energy=current_species.offspring_energy * 0.5 if mutated_species.type == 0 else 0,
                                 age=0
                             )
-                            new_grid[x][y][z].organism.energy -= current_species.reproduction_cost
-                            moved_or_eaten[nx][ny][nz] = True
+                            new_grid[x, y, z].organism.energy -= current_species.reproduction_cost
+                            moved_or_eaten[nx, ny, nz] = True
                     
                     # Animal movement and eating
                     if (current_species.type != 0 and 
                         not self.is_animal_sleeping(x, y, z) and 
-                        new_grid[x][y][z].organism.energy < current_species.max_energy * 0.9):
+                        new_grid[x, y, z].organism.energy < current_species.max_energy * 0.9):
                         
                         best_food = None
                         best_food_value = 0
@@ -758,8 +769,8 @@ class GameOfLife:
                                         0 <= ny < self.grid_size and 
                                         0 <= nz < self.grid_size):
                                         
-                                        if self.totalgrid[nx][ny][nz].organism is not None:
-                                            target_species = self.totalgrid[nx][ny][nz].organism.species
+                                        if self.totalgrid[nx, ny, nz].organism is not None:
+                                            target_species = self.totalgrid[nx, ny, nz].organism.species
                                             
                                             if (any(part in target_species.name_parts or 
                                                     part in target_species.surface_covering or 
@@ -779,39 +790,44 @@ class GameOfLife:
                                                 best_food_value = food_value
                                                 best_food = (nx, ny, nz)
                                         
-                                        elif self.totalgrid[nx][ny][nz].organism is None:
+                                        elif self.totalgrid[nx, ny, nz].organism is None:
                                             if best_food_value <= 0:
                                                 best_position = (nx, ny, nz)
                         
                         if best_food is not None and best_food_value > 0:
                             nx, ny, nz = best_food
-                            food_energy = self.totalgrid[nx][ny][nz].organism.energy
+                            food_energy = self.totalgrid[nx, ny, nz].organism.energy
                             energy_gain = min(current_species.energy_gain, food_energy)
                             
-                            new_grid[nx][ny][nz].organism = CellOrganism(
+                            new_grid[nx, ny, nz].organism = CellOrganism(
                                 species=current_species,
-                                energy=new_grid[x][y][z].organism.energy + energy_gain - current_species.move_energy_cost,
+                                energy=new_grid[x, y, z].organism.energy + energy_gain - current_species.move_energy_cost,
                                 root_energy=0,
                                 age=current_age
                             )
-                            new_grid[x][y][z].organism = None
-                            moved_or_eaten[nx][ny][nz] = True
+                            new_grid[x, y, z].organism = None
+                            moved_or_eaten[nx, ny, nz] = True
                         elif best_position != (x, y, z):
                             nx, ny, nz = best_position
-                            new_grid[nx][ny][nz].organism = CellOrganism(
+                            new_grid[nx, ny, nz].organism = CellOrganism(
                                 species=current_species,
-                                energy=new_grid[x][y][z].organism.energy - current_species.move_energy_cost,
+                                energy=new_grid[x, y, z].organism.energy - current_species.move_energy_cost,
                                 root_energy=0,
                                 age=current_age
                             )
-                            new_grid[x][y][z].organism = None
-                            moved_or_eaten[nx][ny][nz] = True
+                            new_grid[x, y, z].organism = None
+                            moved_or_eaten[nx, ny, nz] = True
         
         self.totalgrid = new_grid
         self.draw_grid()
     
     def clear_grid(self):
-        self.totalgrid = [[[TotalCell() for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+        self.totalgrid = np.empty((self.grid_size, self.grid_size, self.grid_size), dtype=object)
+        for x in range(self.grid_size):
+            for y in range(self.grid_size):
+                for z in range(self.grid_size):
+                    self.totalgrid[x, y, z] = TotalCell()
+        
         self.grid_tensor = torch.zeros((self.grid_size, self.grid_size, 3), dtype=torch.float32, device=DEVICE)
         self.current_step = 0
         self.current_day = 0
@@ -836,19 +852,19 @@ class GameOfLife:
         for x in range(self.grid_size):
             for y in range(self.grid_size):
                 for z in range(self.grid_size):
-                    self.totalgrid[x][y][z] = TotalCell()
+                    self.totalgrid[x, y, z] = TotalCell()
                     rand = random.random()
                     if rand < 0.3:
                         species = random.choice(random_species)
                         root_energy = random.uniform(0, species.root_energy) if species.type == 0 else 0
-                        self.totalgrid[x][y][z].organism = CellOrganism(
+                        self.totalgrid[x, y, z].organism = CellOrganism(
                             species=species,
                             energy=random.uniform(species.offspring_energy, species.max_energy * 0.5),
                             root_energy=root_energy,
                             age=random.randint(0, species.mature_age * 2)
                         )
                     else:
-                        self.totalgrid[x][y][z].organism = None
+                        self.totalgrid[x, y, z].organism = None
         
         self.current_step = 0
         self.current_day = 0
@@ -867,7 +883,12 @@ class GameOfLife:
     def change_grid_size(self, sender, app_data):
         new_size = app_data
         self.grid_size = new_size
-        self.totalgrid = [[[TotalCell() for _ in range(new_size)] for _ in range(new_size)] for _ in range(new_size)]
+        self.totalgrid = np.empty((new_size, new_size, new_size), dtype=object)
+        for x in range(new_size):
+            for y in range(new_size):
+                for z in range(new_size):
+                    self.totalgrid[x, y, z] = TotalCell()
+        
         self.grid_tensor = torch.zeros((new_size, new_size, 3), dtype=torch.float32, device=DEVICE)
         
         dpg.configure_item("drawlist", 
@@ -875,6 +896,7 @@ class GameOfLife:
                         height=self.grid_size * self.cell_size)
         
         self.draw_grid()
+
     
     def run(self):
         while dpg.is_dearpygui_running():
