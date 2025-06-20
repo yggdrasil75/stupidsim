@@ -355,13 +355,14 @@ class WorldGrid:
         self.organisms: Dict[Tuple[int, int, int], Organism] = {}
         self.organism_ids: Dict[int, Tuple[int, int, int]] = {}
         
-        # Pre-compute neighbor offsets for faster access
-        self.neighbor_offsets = np.array([(dx, dy, dz) 
-                                        for dx in range(-1, 2)
-                                        for dy in range(-1, 2)
-                                        for dz in range(-1, 2)
-                                        if not (dx == 0 and dy == 0 and dz == 0)], dtype=np.int32)
-        
+        # Pre-compute neighbor offsets as torch tensor
+        neighbor_list = [(dx, dy, dz) 
+                        for dx in range(-1, 2)
+                        for dy in range(-1, 2)
+                        for dz in range(-1, 2)
+                        if not (dx == 0 and dy == 0 and dz == 0)]
+        self.neighbor_offsets = torch.tensor(neighbor_list, dtype=torch.int32, device=DEVICE)
+    
     def add_organism(self, organism: Organism):
         pos = organism.position
         if not self.is_valid_position(pos):
@@ -413,11 +414,12 @@ class WorldGrid:
         x, y, z = position
         neighbors = []
         
-        # Vectorized neighbor checking
+        # Convert position to tensor and calculate neighbor positions
+        pos_tensor = torch.tensor([x, y, z], device=DEVICE)
         offsets = self.neighbor_offsets * radius
-        neighbor_positions = np.array([x, y, z]) + offsets
+        neighbor_positions = pos_tensor + offsets
         
-        # Filter valid positions
+        # Filter valid positions using torch operations
         valid_mask = (
             (neighbor_positions[:, 0] >= 0) & (neighbor_positions[:, 0] < self.size) &
             (neighbor_positions[:, 1] >= 0) & (neighbor_positions[:, 1] < self.size) &
@@ -427,7 +429,7 @@ class WorldGrid:
         valid_positions = neighbor_positions[valid_mask]
         
         # Convert to tuples and check if empty
-        for pos in valid_positions:
+        for pos in valid_positions.cpu().numpy():
             pos_tuple = tuple(pos)
             if pos_tuple not in self.organisms:
                 neighbors.append(pos_tuple)
@@ -438,21 +440,21 @@ class WorldGrid:
         x, y, z = position
         food = []
         
-        # Create a grid of positions to check
-        x_range = np.arange(max(0, x - radius), min(self.size, x + radius + 1))
-        y_range = np.arange(max(0, y - radius), min(self.size, y + radius + 1))
-        z_range = np.arange(max(0, z - radius), min(self.size, z + radius + 1))
+        # Create ranges as torch tensors
+        x_range = torch.arange(max(0, x - radius), min(self.size, x + radius + 1), device=DEVICE)
+        y_range = torch.arange(max(0, y - radius), min(self.size, y + radius + 1), device=DEVICE)
+        z_range = torch.arange(max(0, z - radius), min(self.size, z + radius + 1), device=DEVICE)
         
         # Create meshgrid of positions
-        xx, yy, zz = np.meshgrid(x_range, y_range, z_range, indexing='ij')
-        positions = np.stack((xx.ravel(), yy.ravel(), zz.ravel()), axis=1)
+        xx, yy, zz = torch.meshgrid(x_range, y_range, z_range, indexing='ij')
+        positions = torch.stack((xx.flatten(), yy.flatten(), zz.flatten()), dim=1)
         
         # Remove the center position
         center_mask = ~((positions[:, 0] == x) & (positions[:, 1] == y) & (positions[:, 2] == z))
         positions = positions[center_mask]
         
         # Check each position
-        for pos in positions:
+        for pos in positions.cpu().numpy():
             pos_tuple = tuple(pos)
             if pos_tuple in self.organisms:
                 food.append((pos_tuple, self.organisms[pos_tuple]))
@@ -483,9 +485,9 @@ class GameOfLife:
         self.temperature = 1.0
         self.is_day = True
         
-        # Precompute trigonometric values for performance
-        self.day_angles = np.linspace(0, np.pi, self.steps_per_day)
-        self.season_angles = np.linspace(0, 2*np.pi, self.year_length)
+        # Precompute trigonometric values as torch tensors
+        self.day_angles = torch.linspace(0, torch.pi, self.steps_per_day, device=DEVICE)
+        self.season_angles = torch.linspace(0, 2*torch.pi, self.year_length, device=DEVICE)
         
         # Initialize DPG
         dpg.create_context()
@@ -542,21 +544,18 @@ class GameOfLife:
             self.current_day = (self.current_day + 1) % self.year_length
             self.update_daylight_duration()
             
-            # Batch age updates using numpy
-            positions = np.array(list(self.grid.organisms.keys()))
-            organisms = np.array(list(self.grid.organisms.values()), dtype=object)
-            
-            # Vectorized age update
+            # Batch age updates using torch
+            organisms = list(self.grid.organisms.values())
             for org in organisms:
                 org.age += 1
         
         self.is_day = self.current_step < self.current_daylight
         
-        # Use precomputed angles for light/temperature calculations
+        # Use precomputed angles for light/temperature calculations with torch
         if self.is_day:
             progress = self.current_step / self.current_daylight
             angle = self.day_angles[int(progress * (len(self.day_angles)-1))]
-            self.light_level = np.sin(angle) * 0.9 + 0.1
+            self.light_level = torch.sin(angle).item() * 0.9 + 0.1
         else:
             night_progress = (self.current_step - self.current_daylight) / (self.steps_per_day - self.current_daylight)
             if night_progress < 0.1:
@@ -566,18 +565,18 @@ class GameOfLife:
             else:
                 self.light_level = 0.05
         
-        # Vectorized season temperature calculation
+        # Season temperature calculation with torch
         season_angle = self.season_angles[self.current_day]
-        season_temp = 0.5 + 0.4 * np.sin(season_angle)
+        season_temp = 0.5 + 0.4 * torch.sin(season_angle).item()
         
         if self.is_day:
             day_progress = self.current_step / self.current_daylight
             day_angle = self.day_angles[int(day_progress * (len(self.day_angles)-1))]
-            daily_temp = 0.8 + 0.2 * np.sin(day_angle)
+            daily_temp = 0.8 + 0.2 * torch.sin(day_angle).item()
         else:
             night_progress = (self.current_step - self.current_daylight) / (self.steps_per_day - self.current_daylight)
             night_angle = self.day_angles[int(night_progress * (len(self.day_angles)-1))]
-            daily_temp = 0.6 - 0.1 * np.sin(night_angle)
+            daily_temp = 0.6 - 0.1 * torch.sin(night_angle).item()
         
         self.temperature = season_temp * daily_temp
         
@@ -611,39 +610,39 @@ class GameOfLife:
     def update_daylight_duration(self):
         days_since_winter = (self.current_day - self.winter_solstice) % (self.year_length * 48)
         year_progress = days_since_winter / self.year_length
-        daylight_hours = 12 + 4 * np.cos(year_progress * math.pi)
+        daylight_hours = 12 + 4 * torch.cos(torch.tensor(year_progress * math.pi, device=DEVICE)).item()
         self.current_daylight = int(round(daylight_hours * 2))
 
     def get_species_color(self, organism: Organism) -> Tuple[int, int, int]:
         species = organism.species
         energy = organism.energy
         
-        # Convert to numpy arrays for vectorized operations
-        base_color = np.array(species.color, dtype=np.float32)
+        # Convert to torch tensors for GPU operations
+        base_color = torch.tensor(species.color, dtype=torch.float32, device=DEVICE)
         
         if species.type == 0:  # Plant
-            # Vectorized color calculation
-            color = base_color * np.array([
+            # Vectorized color calculation with torch
+            color = base_color * torch.tensor([
                 self.temperature * species.temperature_sensitivity,
                 self.light_level * species.light_sensitivity,
                 self.temperature * species.temperature_sensitivity
-            ])
+            ], device=DEVICE)
             
             if not self.is_day:
                 color *= 0.3
         else:  # Animal
             energy_ratio = energy / species.max_energy
-            color = base_color * np.array([
+            color = base_color * torch.tensor([
                 energy_ratio,
                 energy_ratio * self.temperature,
                 energy_ratio
-            ])
+            ], device=DEVICE)
             
             if self.is_animal_sleeping(organism):
                 color *= 0.5
         
         # Clip and convert to integers
-        color = np.clip(color, 0, 255).astype(np.uint8)
+        color = torch.clamp(color, 0, 255).to(torch.uint8).cpu().numpy()
         return tuple(color)
     
     def get_species_char(self, organism: Organism) -> str:
@@ -720,49 +719,49 @@ class GameOfLife:
     def step(self):
         self.update_time_cycles()
         
-        # Convert to numpy arrays for batch processing
-        organisms = np.array(list(self.grid.organisms.values()), dtype=object)
-        positions = np.array(list(self.grid.organisms.keys()))
+        # Convert to lists for processing (can't fully vectorize due to complex logic)
+        organisms = list(self.grid.organisms.values())
+        positions = list(self.grid.organisms.keys())
         
-        # Precompute masks for different organism types
-        is_plant = np.array([org.species.type == 0 for org in organisms])
+        # Precompute masks for different organism types using torch
+        is_plant = torch.tensor([org.species.type == 0 for org in organisms], device=DEVICE)
         is_animal = ~is_plant
         
         # Track changes
         organisms_to_add = []
         organisms_to_remove = set()
         
-        # Process plants and animals separately for vectorization
-        if np.any(is_plant):
-            plant_indices = np.where(is_plant)[0]
-            plant_orgs = organisms[plant_indices]
+        # Process plants and animals separately
+        if torch.any(is_plant):
+            plant_indices = torch.where(is_plant)[0].cpu().numpy()
+            plant_orgs = [organisms[i] for i in plant_indices]
             
-            # Vectorized plant energy calculations
-            plant_species = np.array([org.species for org in plant_orgs], dtype=object)
-            light_sens = np.array([s.light_sensitivity for s in plant_species])
-            temp_sens = np.array([s.temperature_sensitivity for s in plant_species])
-            max_energies = np.array([s.max_energy for s in plant_species])
-            root_energies = np.array([s.root_energy for s in plant_species])
+            # Vectorized plant energy calculations with torch
+            plant_species = [org.species for org in plant_orgs]
+            light_sens = torch.tensor([s.light_sensitivity for s in plant_species], device=DEVICE)
+            temp_sens = torch.tensor([s.temperature_sensitivity for s in plant_species], device=DEVICE)
+            max_energies = torch.tensor([s.max_energy for s in plant_species], device=DEVICE)
+            root_energies = torch.tensor([s.root_energy for s in plant_species], device=DEVICE)
             
-            current_energies = np.array([org.energy for org in plant_orgs])
-            current_root_energies = np.array([org.root_energy for org in plant_orgs])
+            current_energies = torch.tensor([org.energy for org in plant_orgs], device=DEVICE)
+            current_root_energies = torch.tensor([org.root_energy for org in plant_orgs], device=DEVICE)
             
             # Vectorized energy gain calculation
             energy_gains = (self.light_level * light_sens * 
-                           np.array([s.energy_gain for s in plant_species]) * 
-                           (self.temperature * temp_sens))
-            energy_losses = np.array([s.energy_consumption for s in plant_species])
+                          torch.tensor([s.energy_gain for s in plant_species], device=DEVICE) * 
+                          (self.temperature * temp_sens))
+            energy_losses = torch.tensor([s.energy_consumption for s in plant_species], device=DEVICE)
             
             net_energies = current_energies + energy_gains - energy_losses
             
             # Vectorized energy distribution
             excess_mask = net_energies > max_energies
-            storage_amounts = np.where(excess_mask, 
-                                     np.minimum(net_energies - max_energies, 
-                                               root_energies - current_root_energies),
-                                     0)
+            storage_amounts = torch.where(excess_mask, 
+                                       torch.minimum(net_energies - max_energies, 
+                                                   root_energies - current_root_energies),
+                                       torch.zeros_like(net_energies))
             
-            new_energies = np.where(excess_mask, max_energies, net_energies)
+            new_energies = torch.where(excess_mask, max_energies, net_energies)
             new_root_energies = current_root_energies + storage_amounts
             
             # Handle energy deficit
@@ -777,25 +776,25 @@ class GameOfLife:
                     organisms_to_remove.add(organism.id)
                     continue
                 
-                organism.energy = new_energies[i]
+                organism.energy = new_energies[i].item()
                 if deficit_mask[i]:
                     organism.energy = 0
-                    organism.root_energy = current_root_energies[i] - energy_needed[i]
+                    organism.root_energy = (current_root_energies[i] - energy_needed[i]).item()
                 else:
-                    organism.root_energy = new_root_energies[i]
+                    organism.root_energy = new_root_energies[i].item()
         
         # Process animals
-        if np.any(is_animal):
-            animal_indices = np.where(is_animal)[0]
-            animal_orgs = organisms[animal_indices]
+        if torch.any(is_animal):
+            animal_indices = torch.where(is_animal)[0].cpu().numpy()
+            animal_orgs = [organisms[i] for i in animal_indices]
             
-            # Vectorized animal calculations
-            animal_species = np.array([org.species for org in animal_orgs], dtype=object)
-            max_energies = np.array([s.max_energy for s in animal_species])
-            energy_losses = np.array([s.energy_consumption for s in animal_species])
-            max_ages = np.array([s.max_age for s in animal_species])
-            current_ages = np.array([org.age for org in animal_orgs])
-            current_energies = np.array([org.energy for org in animal_orgs])
+            # Vectorized animal calculations with torch
+            animal_species = [org.species for org in animal_orgs]
+            max_energies = torch.tensor([s.max_energy for s in animal_species], device=DEVICE)
+            energy_losses = torch.tensor([s.energy_consumption for s in animal_species], device=DEVICE)
+            max_ages = torch.tensor([s.max_age for s in animal_species], device=DEVICE)
+            current_ages = torch.tensor([org.age for org in animal_orgs], device=DEVICE)
+            current_energies = torch.tensor([org.energy for org in animal_orgs], device=DEVICE)
             
             net_energies = current_energies - energy_losses
             
@@ -804,12 +803,12 @@ class GameOfLife:
             no_energy = net_energies <= 0
             
             # Vectorized survival chance
-            cold_resistances = np.array([s.cold_resistance for s in animal_species])
-            coverings = np.array([1.2 if s.surface_covering == "fur" else 
-                                0.9 if s.surface_covering == "scales" else 
-                                1.0 for s in animal_species])
+            cold_resistances = torch.tensor([s.cold_resistance for s in animal_species], device=DEVICE)
+            coverings = torch.tensor([1.2 if s.surface_covering == "fur" else 
+                                   0.9 if s.surface_covering == "scales" else 
+                                   1.0 for s in animal_species], device=DEVICE)
             survival_chances = (self.temperature + cold_resistances) * coverings
-            survival_rolls = np.random.random(len(animal_orgs))
+            survival_rolls = torch.rand(len(animal_orgs), device=DEVICE)
             dies_from_conditions = survival_rolls > survival_chances
             
             # Mark organisms for removal
@@ -819,7 +818,7 @@ class GameOfLife:
                     organisms_to_remove.add(organism.id)
                     continue
                 
-                organism.energy = net_energies[i]
+                organism.energy = net_energies[i].item()
         
         # Reproduction and movement logic (less vectorizable due to dependencies)
         for organism in organisms:
