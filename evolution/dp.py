@@ -355,6 +355,13 @@ class WorldGrid:
         self.organisms: Dict[Tuple[int, int, int], Organism] = {}
         self.organism_ids: Dict[int, Tuple[int, int, int]] = {}
         
+        # Pre-compute neighbor offsets for faster access
+        self.neighbor_offsets = np.array([(dx, dy, dz) 
+                                        for dx in range(-1, 2)
+                                        for dy in range(-1, 2)
+                                        for dz in range(-1, 2)
+                                        if not (dx == 0 and dy == 0 and dz == 0)], dtype=np.int32)
+        
     def add_organism(self, organism: Organism):
         pos = organism.position
         if not self.is_valid_position(pos):
@@ -406,32 +413,50 @@ class WorldGrid:
         x, y, z = position
         neighbors = []
         
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                for dz in range(-radius, radius + 1):
-                    if dx == 0 and dy == 0 and dz == 0:
-                        continue
-                        
-                    new_pos = (x + dx, y + dy, z + dz)
-                    if self.is_valid_position(new_pos) and new_pos not in self.organisms:
-                        neighbors.append(new_pos)
-                        
+        # Vectorized neighbor checking
+        offsets = self.neighbor_offsets * radius
+        neighbor_positions = np.array([x, y, z]) + offsets
+        
+        # Filter valid positions
+        valid_mask = (
+            (neighbor_positions[:, 0] >= 0) & (neighbor_positions[:, 0] < self.size) &
+            (neighbor_positions[:, 1] >= 0) & (neighbor_positions[:, 1] < self.size) &
+            (neighbor_positions[:, 2] >= 0) & (neighbor_positions[:, 2] < self.size)
+        )
+        
+        valid_positions = neighbor_positions[valid_mask]
+        
+        # Convert to tuples and check if empty
+        for pos in valid_positions:
+            pos_tuple = tuple(pos)
+            if pos_tuple not in self.organisms:
+                neighbors.append(pos_tuple)
+                
         return neighbors
     
     def get_food_in_radius(self, position: Tuple[int, int, int], radius: int) -> List[Tuple[Tuple[int, int, int], Organism]]:
         x, y, z = position
         food = []
         
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                for dz in range(-radius, radius + 1):
-                    if dx == 0 and dy == 0 and dz == 0:
-                        continue
-                        
-                    check_pos = (x + dx, y + dy, z + dz)
-                    if check_pos in self.organisms:
-                        food.append((check_pos, self.organisms[check_pos]))
-                        
+        # Create a grid of positions to check
+        x_range = np.arange(max(0, x - radius), min(self.size, x + radius + 1))
+        y_range = np.arange(max(0, y - radius), min(self.size, y + radius + 1))
+        z_range = np.arange(max(0, z - radius), min(self.size, z + radius + 1))
+        
+        # Create meshgrid of positions
+        xx, yy, zz = np.meshgrid(x_range, y_range, z_range, indexing='ij')
+        positions = np.stack((xx.ravel(), yy.ravel(), zz.ravel()), axis=1)
+        
+        # Remove the center position
+        center_mask = ~((positions[:, 0] == x) & (positions[:, 1] == y) & (positions[:, 2] == z))
+        positions = positions[center_mask]
+        
+        # Check each position
+        for pos in positions:
+            pos_tuple = tuple(pos)
+            if pos_tuple in self.organisms:
+                food.append((pos_tuple, self.organisms[pos_tuple]))
+                
         return food
 
 class GameOfLife:
@@ -457,6 +482,10 @@ class GameOfLife:
         self.light_level = 1.0
         self.temperature = 1.0
         self.is_day = True
+        
+        # Precompute trigonometric values for performance
+        self.day_angles = np.linspace(0, np.pi, self.steps_per_day)
+        self.season_angles = np.linspace(0, 2*np.pi, self.year_length)
         
         # Initialize DPG
         dpg.create_context()
@@ -513,18 +542,21 @@ class GameOfLife:
             self.current_day = (self.current_day + 1) % self.year_length
             self.update_daylight_duration()
             
-            # Update age using numpy operations
-            for x in range(self.grid_size):
-                for y in range(self.grid_size):
-                    for z in range(self.grid_size):
-                        if self.totalgrid[x, y, z].organism is not None:
-                            self.totalgrid[x, y, z].organism.age += 1
+            # Batch age updates using numpy
+            positions = np.array(list(self.grid.organisms.keys()))
+            organisms = np.array(list(self.grid.organisms.values()), dtype=object)
+            
+            # Vectorized age update
+            for org in organisms:
+                org.age += 1
         
         self.is_day = self.current_step < self.current_daylight
         
+        # Use precomputed angles for light/temperature calculations
         if self.is_day:
             progress = self.current_step / self.current_daylight
-            self.light_level = math.sin(progress * math.pi) * 0.9 + 0.1
+            angle = self.day_angles[int(progress * (len(self.day_angles)-1))]
+            self.light_level = np.sin(angle) * 0.9 + 0.1
         else:
             night_progress = (self.current_step - self.current_daylight) / (self.steps_per_day - self.current_daylight)
             if night_progress < 0.1:
@@ -534,19 +566,22 @@ class GameOfLife:
             else:
                 self.light_level = 0.05
         
-        season_progress = (self.current_day - self.winter_solstice) % self.year_length / self.year_length
-        season_temp = 0.5 + 0.4 * np.sin(season_progress * 2 * math.pi)
+        # Vectorized season temperature calculation
+        season_angle = self.season_angles[self.current_day]
+        season_temp = 0.5 + 0.4 * np.sin(season_angle)
         
         if self.is_day:
             day_progress = self.current_step / self.current_daylight
-            daily_temp = 0.8 + 0.2 * np.sin(day_progress * math.pi)
+            day_angle = self.day_angles[int(day_progress * (len(self.day_angles)-1))]
+            daily_temp = 0.8 + 0.2 * np.sin(day_angle)
         else:
             night_progress = (self.current_step - self.current_daylight) / (self.steps_per_day - self.current_daylight)
-            daily_temp = 0.6 - 0.1 * np.sin(night_progress * math.pi)
+            night_angle = self.day_angles[int(night_progress * (len(self.day_angles)-1))]
+            daily_temp = 0.6 - 0.1 * np.sin(night_angle)
         
         self.temperature = season_temp * daily_temp
         
-        # Update UI (remain the same)
+        # Update UI
         hours = self.current_step // 2
         minutes = (self.current_step % 2) * 30
         time_str = f"{hours:02d}:{minutes:02d}"
@@ -583,40 +618,33 @@ class GameOfLife:
         species = organism.species
         energy = organism.energy
         
-        if species.type == 0:
-            # Use numpy for color calculations
-            color = np.array(species.color, dtype=np.float32)
-            r = color[0] * self.temperature * species.temperature_sensitivity
-            g = color[1] * self.light_level * species.light_sensitivity
-            b = color[2] * self.temperature * species.temperature_sensitivity
+        # Convert to numpy arrays for vectorized operations
+        base_color = np.array(species.color, dtype=np.float32)
+        
+        if species.type == 0:  # Plant
+            # Vectorized color calculation
+            color = base_color * np.array([
+                self.temperature * species.temperature_sensitivity,
+                self.light_level * species.light_sensitivity,
+                self.temperature * species.temperature_sensitivity
+            ])
             
             if not self.is_day:
-                r *= 0.3
-                g *= 0.3
-                b *= 0.3
-            
-            r = np.clip(r, 0, 255).astype(int)
-            g = np.clip(g, 0, 255).astype(int)
-            b = np.clip(b, 0, 255).astype(int)
-            
-            return (r, g, b)
-        else:
+                color *= 0.3
+        else:  # Animal
             energy_ratio = energy / species.max_energy
-            color = np.array(species.color, dtype=np.float32)
-            r = color[0] * energy_ratio
-            g = color[1] * energy_ratio * self.temperature
-            b = color[2] * energy_ratio
+            color = base_color * np.array([
+                energy_ratio,
+                energy_ratio * self.temperature,
+                energy_ratio
+            ])
             
             if self.is_animal_sleeping(organism):
-                r *= 0.5
-                g *= 0.5
-                b *= 0.5
-            
-            r = np.clip(r, 0, 255).astype(int)
-            g = np.clip(g, 0, 255).astype(int)
-            b = np.clip(b, 0, 255).astype(int)
-            
-            return (r, g, b)
+                color *= 0.5
+        
+        # Clip and convert to integers
+        color = np.clip(color, 0, 255).astype(np.uint8)
+        return tuple(color)
     
     def get_species_char(self, organism: Organism) -> str:
         if organism.species and organism.species.name:
@@ -692,70 +720,118 @@ class GameOfLife:
     def step(self):
         self.update_time_cycles()
         
-        # Track organisms to add/remove
+        # Convert to numpy arrays for batch processing
+        organisms = np.array(list(self.grid.organisms.values()), dtype=object)
+        positions = np.array(list(self.grid.organisms.keys()))
+        
+        # Precompute masks for different organism types
+        is_plant = np.array([org.species.type == 0 for org in organisms])
+        is_animal = ~is_plant
+        
+        # Track changes
         organisms_to_add = []
         organisms_to_remove = set()
         
-        # Process each organism
-        for organism in list(self.grid.organisms.values()):
+        # Process plants and animals separately for vectorization
+        if np.any(is_plant):
+            plant_indices = np.where(is_plant)[0]
+            plant_orgs = organisms[plant_indices]
+            
+            # Vectorized plant energy calculations
+            plant_species = np.array([org.species for org in plant_orgs], dtype=object)
+            light_sens = np.array([s.light_sensitivity for s in plant_species])
+            temp_sens = np.array([s.temperature_sensitivity for s in plant_species])
+            max_energies = np.array([s.max_energy for s in plant_species])
+            root_energies = np.array([s.root_energy for s in plant_species])
+            
+            current_energies = np.array([org.energy for org in plant_orgs])
+            current_root_energies = np.array([org.root_energy for org in plant_orgs])
+            
+            # Vectorized energy gain calculation
+            energy_gains = (self.light_level * light_sens * 
+                           np.array([s.energy_gain for s in plant_species]) * 
+                           (self.temperature * temp_sens))
+            energy_losses = np.array([s.energy_consumption for s in plant_species])
+            
+            net_energies = current_energies + energy_gains - energy_losses
+            
+            # Vectorized energy distribution
+            excess_mask = net_energies > max_energies
+            storage_amounts = np.where(excess_mask, 
+                                     np.minimum(net_energies - max_energies, 
+                                               root_energies - current_root_energies),
+                                     0)
+            
+            new_energies = np.where(excess_mask, max_energies, net_energies)
+            new_root_energies = current_root_energies + storage_amounts
+            
+            # Handle energy deficit
+            deficit_mask = net_energies < 0
+            energy_needed = -net_energies[deficit_mask]
+            can_survive = current_root_energies[deficit_mask] >= energy_needed
+            
+            # Update organisms
+            for i, idx in enumerate(plant_indices):
+                organism = plant_orgs[i]
+                if deficit_mask[i] and not can_survive[i]:
+                    organisms_to_remove.add(organism.id)
+                    continue
+                
+                organism.energy = new_energies[i]
+                if deficit_mask[i]:
+                    organism.energy = 0
+                    organism.root_energy = current_root_energies[i] - energy_needed[i]
+                else:
+                    organism.root_energy = new_root_energies[i]
+        
+        # Process animals
+        if np.any(is_animal):
+            animal_indices = np.where(is_animal)[0]
+            animal_orgs = organisms[animal_indices]
+            
+            # Vectorized animal calculations
+            animal_species = np.array([org.species for org in animal_orgs], dtype=object)
+            max_energies = np.array([s.max_energy for s in animal_species])
+            energy_losses = np.array([s.energy_consumption for s in animal_species])
+            max_ages = np.array([s.max_age for s in animal_species])
+            current_ages = np.array([org.age for org in animal_orgs])
+            current_energies = np.array([org.energy for org in animal_orgs])
+            
+            net_energies = current_energies - energy_losses
+            
+            # Survival checks
+            too_old = current_ages >= max_ages
+            no_energy = net_energies <= 0
+            
+            # Vectorized survival chance
+            cold_resistances = np.array([s.cold_resistance for s in animal_species])
+            coverings = np.array([1.2 if s.surface_covering == "fur" else 
+                                0.9 if s.surface_covering == "scales" else 
+                                1.0 for s in animal_species])
+            survival_chances = (self.temperature + cold_resistances) * coverings
+            survival_rolls = np.random.random(len(animal_orgs))
+            dies_from_conditions = survival_rolls > survival_chances
+            
+            # Mark organisms for removal
+            for i, idx in enumerate(animal_indices):
+                organism = animal_orgs[i]
+                if too_old[i] or no_energy[i] or dies_from_conditions[i]:
+                    organisms_to_remove.add(organism.id)
+                    continue
+                
+                organism.energy = net_energies[i]
+        
+        # Reproduction and movement logic (less vectorizable due to dependencies)
+        for organism in organisms:
             if organism.id in organisms_to_remove:
                 continue
                 
             species = organism.species
-            current_energy = organism.energy
-            current_root_energy = organism.root_energy
-            current_age = organism.age
             pos = organism.position
-            
-            energy_loss = species.energy_consumption
-            
-            if species.type == 0:  # Plant logic
-                energy_gain = ((self.light_level * species.light_sensitivity) * 
-                              species.energy_gain * (self.temperature * species.temperature_sensitivity))
-                net_energy = current_energy + energy_gain - energy_loss
-                
-                if net_energy > species.max_energy:
-                    storage = min(net_energy - species.max_energy, 
-                                species.root_energy - current_root_energy)
-                    organism.energy = species.max_energy
-                    organism.root_energy = current_root_energy + storage
-                elif net_energy > 0:
-                    organism.energy = net_energy
-                else:
-                    energy_needed = -net_energy
-                    if current_root_energy >= energy_needed:
-                        organism.energy = 0
-                        organism.root_energy = current_root_energy - energy_needed
-                    else:
-                        organisms_to_remove.add(organism.id)
-                        continue
-            else:  # Animal logic
-                net_energy = current_energy - energy_loss
-                
-                if current_age >= species.max_age:
-                    organisms_to_remove.add(organism.id)
-                    continue
-                
-                if net_energy <= 0:
-                    organisms_to_remove.add(organism.id)
-                    continue
-                
-                organism.energy = net_energy
-            
-            # Calculate survival chance
-            survival_chance = (self.temperature + species.cold_resistance)
-            if species.surface_covering == "fur":
-                survival_chance *= 1.2
-            elif species.surface_covering == "scales":
-                survival_chance *= 0.9
-            
-            if random.random() > survival_chance:
-                organisms_to_remove.add(organism.id)
-                continue
             
             # Reproduction
             if (organism.energy >= species.reproduction_cost and 
-                current_age >= species.mature_age and 
+                organism.age >= species.mature_age and 
                 self.current_day % species.reproduction_frequency == 0):
                 
                 empty_neighbors = self.grid.get_empty_neighbors(pos)
@@ -841,7 +917,7 @@ class GameOfLife:
             try:
                 self.grid.add_organism(organism)
             except ValueError:
-                pass  # Position might have been taken by another organism
+                pass
         
         self.draw_grid()
     
