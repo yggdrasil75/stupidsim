@@ -52,6 +52,7 @@ class Species:
     preferred_food_parts: List[str] = field(default_factory=list)
     toxic_food_parts: List[str] = field(default_factory=list)
     diet_type: float = 0.0  # 0=plant, 0.5=omnivore, 1=carnivore
+    edible_parts: List[str] = field(default_factory=list) 
     
     # Cached type
     _type: Optional[int] = None
@@ -88,9 +89,12 @@ class Species:
         if not self.appendages:
             self._generate_physical_characteristics()
         
-        if not self.preferred_food_parts or not self.toxic_food_parts:
+        if not self.preferred_food_parts and self.type != 0:
             self._generate_diet_preferences()
-    
+        
+        if not self.edible_parts:
+            self._generate_edible_parts()
+
     @property
     def type(self) -> int:
         if self._type is None:
@@ -138,28 +142,28 @@ class Species:
             self.covering_density = random.uniform(0.7, 1.0)
             self.height = random.uniform(0.1, 3.0)
     
+    def _generate_edible_parts(self):
+        if self.type == 0:
+            num_parts = random.randint(1, 4)
+            self.edible_parts = random.sample(self._food_parts_db['plant'], num_parts)
+        else: 
+            num_parts = random.randint(1, 3)
+            self.edible_parts = random.sample(self._food_parts_db['animal'], num_parts)
+
     def _generate_diet_preferences(self):
         if self.type == 0:  # Plants don't eat
             return
         
         if self.type == 1:  # Herbivore
-            self.diet_type = random.uniform(0.0, 0.3)
             num_preferred = random.randint(1, 3)
             self.preferred_food_parts = random.sample(self._food_parts_db['plant'], num_preferred)
-            
         elif self.type == 2:  # Carnivore
-            self.diet_type = random.uniform(0.7, 1.0)
             num_preferred = random.randint(1, 2)
             self.preferred_food_parts = random.sample(self._food_parts_db['animal'], num_preferred)
-            
         else:  # Omnivore
-            self.diet_type = random.uniform(0.3, 0.7)
             plant_parts = random.sample(self._food_parts_db['plant'], random.randint(1, 2))
             animal_parts = random.sample(self._food_parts_db['animal'], random.randint(1, 2))
             self.preferred_food_parts = plant_parts + animal_parts
-        
-        all_parts = self._food_parts_db['plant'] + self._food_parts_db['animal']
-        self.toxic_food_parts = [part for part in all_parts if random.random() < 0.2]
     
     def mutate(self) -> 'Species':
         new_species = Species(
@@ -199,7 +203,8 @@ class Species:
             appendages=self.appendages.copy(),
             preferred_food_parts=self.preferred_food_parts.copy(),
             toxic_food_parts=self.toxic_food_parts.copy(),
-            diet_type=max(0, min(1, self.diet_type * random.uniform(0.95, 1.05)))
+            diet_type=max(0, min(1, self.diet_type * random.uniform(0.95, 1.05))),
+            edible_parts=self.edible_parts.copy()
         )
         
         if random.random() < 0.05 and new_species.can_move:
@@ -246,12 +251,8 @@ class Species:
         return new_species
 
     @classmethod
-    def generate_random_species(cls) -> 'Species':
-        is_plant = random.random() < 0.5
-        
+    def generate_random_species(cls, food_sources: Optional[List['Species']] = None) -> 'Species':
         species = cls()
-        species.can_move = not is_plant
-        species.has_roots = is_plant
         
         species.max_energy = random.uniform(5, 50)
         species.energy_gain = random.uniform(0.1, 2.0)
@@ -264,6 +265,10 @@ class Species:
         species.light_sensitivity = random.uniform(0.1, 1.0)
         species.cold_resistance = random.uniform(0.1, 1.0)
         
+        is_plant = random.random() < (0.3 if food_sources else 0.5)
+        species.can_move = not is_plant
+        species.has_roots = is_plant
+        
         if is_plant:
             species.root_energy = random.uniform(5, 20)
             species.color = (random.randint(50, 150), random.randint(100, 200), random.randint(50, 150))
@@ -274,17 +279,52 @@ class Species:
             species.sleep_ratio = random.uniform(0.1, 0.3)
             species.diurnal = random.random() < 0.7
             
-            species.diet_type = random.random()
+            if food_sources:
+                plant_parts = list(set(p for s in food_sources if s.type == 0 for p in s.edible_parts))
+                animal_parts = list(set(p for s in food_sources if s.type != 0 for p in s.edible_parts))
+                
+                can_eat_plants = bool(plant_parts)
+                can_eat_animals = bool(animal_parts)
+                
+                choice = 'fallback'
+                if can_eat_plants and can_eat_animals:
+                    choice = random.choices(['herbivore', 'carnivore', 'omnivore'], weights=[25, 25, 50], k=1)[0]
+                elif can_eat_plants:
+                    choice = 'herbivore'
+                elif can_eat_animals:
+                    choice = 'carnivore'
+                
+                if choice == 'herbivore':
+                    species.diet_type = random.uniform(0.0, 0.3)
+                    num = random.randint(1, min(len(plant_parts), 3))
+                    species.preferred_food_parts = random.sample(plant_parts, num)
+                elif choice == 'carnivore':
+                    species.diet_type = random.uniform(0.7, 1.0)
+                    num = random.randint(1, min(len(animal_parts), 2))
+                    species.preferred_food_parts = random.sample(animal_parts, num)
+                elif choice == 'omnivore':
+                    species.diet_type = random.uniform(0.3, 0.7)
+                    p_num = random.randint(1, min(len(plant_parts), 2))
+                    a_num = random.randint(1, min(len(animal_parts), 2))
+                    species.preferred_food_parts = (random.sample(plant_parts, p_num) + random.sample(animal_parts, a_num))
+            
+            if not species.preferred_food_parts:
+                species.diet_type = random.random()
+                species._generate_diet_preferences()
+
             if species.diet_type < 0.3:  # Herbivore
                 species.color = (random.randint(150, 255), random.randint(150, 255), random.randint(100, 200))
             elif species.diet_type > 0.7:  # Carnivore
                 species.color = (random.randint(200, 255), random.randint(100, 150), random.randint(100, 150))
             else:  # Omnivore
                 species.color = (random.randint(150, 255), random.randint(150, 200), random.randint(100, 150))
-        
+
+        # --- 4. Finalize with helper methods ---
         species._generate_random_name()
         species._generate_physical_characteristics()
-        species._generate_diet_preferences()
+        species._generate_edible_parts()
+        all_food = cls._food_parts_db['plant'] + cls._food_parts_db['animal']
+        species.toxic_food_parts = [p for p in all_food if random.random() < 0.1 and p not in species.preferred_food_parts]
         
         return species
 
@@ -310,6 +350,7 @@ GRASS = Species(
     surface_covering="skin",
     covering_density=0.8
 )
+GRASS.__post_init__() # Ensure default species are fully initialized
 
 OMNIVORE = Species(
     name_parts=["om", "niv", "ore"],
@@ -339,6 +380,7 @@ OMNIVORE = Species(
     preferred_food_parts=["fruit", "meat"],
     toxic_food_parts=["root"]
 )
+OMNIVORE.__post_init__() # Ensure default species are fully initialized
 
 @dataclass
 class Organism:
@@ -919,28 +961,40 @@ class GameOfLife:
 
     def randomize_grid(self):
         self.clear_grid()
-        num_species = random.randint(1, 10)
-        random_species = [GRASS, OMNIVORE]
-        for _ in range(num_species):
-            random_species.append(Species.generate_random_species())
+        num_species = random.randint(5, 10)
+        created_species = [GRASS]
         
+        for _ in range(num_species - 1):
+            new_species = Species.generate_random_species(food_sources=created_species)
+            created_species.append(new_species)
+            
+        plant_species = [s for s in created_species if s.type == 0]
+        animal_species = [s for s in created_species if s.type != 0]
+
         for x in range(self.grid_size):
             for y in range(self.grid_size):
-                for z in [0]:  # Only populate bottom layer for now
-                    if random.random() < 0.3:
-                        species = random.choice(random_species)
-                        root_energy = random.uniform(0, species.root_energy) if species.type == 0 else 0
-                        organism = Organism(
-                            species=species,
-                            position=(x, y, z),
-                            energy=random.uniform(species.offspring_energy, species.max_energy * 0.5),
-                            root_energy=root_energy,
-                            age=random.randint(0, species.mature_age * 2)
-                        )
-                        try:
-                            self.grid.add_organism(organism)
-                        except ValueError:
-                            pass  # Skip if position is already taken
+                for z in [0]:
+                    if random.random() < 0.5:
+                        
+                        species = None
+                        if plant_species and (not animal_species or random.random() < 0.75):
+                            species = random.choice(plant_species)
+                        elif animal_species:
+                            species = random.choice(animal_species)
+
+                        if species:
+                            root_energy = random.uniform(0, species.root_energy) if species.type == 0 else 0
+                            organism = Organism(
+                                species=species,
+                                position=(x, y, z),
+                                energy=random.uniform(species.offspring_energy, species.max_energy * 0.5),
+                                root_energy=root_energy,
+                                age=random.randint(0, species.mature_age * 2)
+                            )
+                            try:
+                                self.grid.add_organism(organism)
+                            except ValueError:
+                                pass  # Skip if position is already taken
         
         self.draw_grid()
     
