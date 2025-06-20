@@ -221,23 +221,23 @@ AnimalSpecies.TUVEXI = AnimalSpecies(
 )
 
 @dataclass
-class cellOrganism:
+class CellOrganism:
     species: AnimalSpecies | PlantSpecies
     energy: float = 0
     root_energy: float = 0
     age: float = 0
 
 @dataclass
-class totalCell:
-    solarRay: float
-    Organism: cellOrganism = None
+class TotalCell:
+    solarRay: float = 0
+    organism: CellOrganism = None
 
 class GameOfLife:
     def __init__(self):
         self.grid_size = 50
         self.cell_size = 10
         self.running = False
-        self.totalgrid = [[[totalCell for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+        self.totalgrid = [[[TotalCell() for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
         
         # Time parameters (each step = 1/2 hour)
         self.steps_per_day = 48  # 24 hours * 2 steps per hour
@@ -296,33 +296,7 @@ class GameOfLife:
                                     height=self.grid_size*self.cell_size, 
                                     tag="drawlist"):
                         pass
-        '''
-        # Add population plots below the main window
-        with dpg.window(label="Plant Populations", width=800, height=300, pos=(0, 600)):
-            with dpg.plot(height=250, width=-1, tag="plant_population_plot"):
-                dpg.add_plot_legend()
-                dpg.add_plot_axis(dpg.mvXAxis, label="Time", tag="plant_x_axis")
-                with dpg.plot_axis(dpg.mvYAxis, label="Population", tag="plant_y_axis"):
-                    # Plant series will be added dynamically
-                    self.plant_series = {}
                 
-                # Set initial axis limits
-                dpg.set_axis_limits("plant_x_axis", 0, 100)
-                dpg.set_axis_limits("plant_y_axis", 0, 100)
-        
-        with dpg.window(label="Animal Populations", width=800, height=300, pos=(0, 900)):
-            with dpg.plot(height=250, width=-1, tag="animal_population_plot"):
-                dpg.add_plot_legend()
-                dpg.add_plot_axis(dpg.mvXAxis, label="Time", tag="animal_x_axis")
-                with dpg.plot_axis(dpg.mvYAxis, label="Population", tag="animal_y_axis"):
-                    # Animal series will be added dynamically
-                    self.animal_series = {}
-                
-                # Set initial axis limits
-                dpg.set_axis_limits("animal_x_axis", 0, 100)
-                dpg.set_axis_limits("animal_y_axis", 0, 100)
-        '''
-        
         # Set up viewport resizing
         dpg.set_viewport_resize_callback(self.on_viewport_resize)
         dpg.set_primary_window("Main Window", True)
@@ -353,8 +327,8 @@ class GameOfLife:
             for y in range(self.grid_size):
                 for x in range(self.grid_size):
                     for z in range(self.grid_size):
-                        if self.totalgrid[y][x][z].Organism is not None:
-                            self.totalgrid[y][x][z].Organism.age += 1
+                        if self.totalgrid[y][x][z].organism is not None:
+                            self.totalgrid[y][x][z].organism.age += 1
         
         # Update time of day
         self.is_day = self.current_step < self.current_daylight
@@ -434,10 +408,13 @@ class GameOfLife:
 
     def get_species_color(self, x, y, z):
         """Get color for a cell based on its species, energy, and environmental factors"""
-        species = self.totalgrid[y][x][z].Organism.species
-        energy = self.totalgrid[y][x][z].Organism.energy
-        if species.type == Species.PLANT:
+        if self.totalgrid[y][x][z].organism is None:
+            return (0, 0, 0)
             
+        species = self.totalgrid[y][x][z].organism.species
+        energy = self.totalgrid[y][x][z].organism.energy
+        
+        if species.type == Species.PLANT:
             r = species.color[0] * self.temperature * species.temperature_sensitivity
             g = species.color[1] * self.light_level * species.light_sensitivity
             b = species.color[2] * self.temperature * species.temperature_sensitivity
@@ -452,17 +429,15 @@ class GameOfLife:
             b = max(0, min(255, b))
             
             return (int(r), int(g), int(b))
-        elif species == Species.ANIMAL:
-            animal_species = self.totalgrid[y][x][z].Organism.species
-            
+        elif species.type == Species.ANIMAL:
             # Base color modified by energy and temperature
-            energy_ratio = energy / animal_species.max_energy
-            r = animal_species.color[0] * energy_ratio
-            g = animal_species.color[1] * energy_ratio * self.temperature
-            b = animal_species.color[2] * energy_ratio
+            energy_ratio = energy / species.max_energy
+            r = species.color[0] * energy_ratio
+            g = species.color[1] * energy_ratio * self.temperature
+            b = species.color[2] * energy_ratio
             
             # Darken if sleeping
-            if self.is_animal_sleeping(x, y):
+            if self.is_animal_sleeping(x, y, z):
                 r *= 0.5
                 g *= 0.5
                 b *= 0.5
@@ -476,9 +451,14 @@ class GameOfLife:
     
     def get_species_char(self, x, y, z):
         """Get character representation for a cell"""
-        species = self.totalgrid[y][x][z].Organism.species
-        if species: return species.name[0].upper()
-        else: return " "  # Empty space
+        if self.totalgrid[y][x][z].organism is None:
+            return " "
+            
+        species = self.totalgrid[y][x][z].organism.species
+        if species: 
+            return species.name[0].upper()
+        else: 
+            return " "  # Empty space
     
     def draw_grid(self):
         dpg.delete_item("drawlist", children_only=True)
@@ -487,28 +467,27 @@ class GameOfLife:
             # Draw cells
             for y in range(self.grid_size):
                 for x in range(self.grid_size):
-                    for z in range(self.grid_size):
-                        if hasattr(self.totalgrid[y][x][z], 'Organism') and self.totalgrid[y][x][z].Organism is not None:
-                            color = self.get_species_color(x,y,z)
-                            char = self.get_species_char(x,y,z)
-                                
-                            # Draw cell background
-                            dpg.draw_rectangle(
-                                (x * self.cell_size, y * self.cell_size),
-                                ((x + 1) * self.cell_size, (y + 1) * self.cell_size),
-                                fill=color,
-                                color=(100, 100, 100),
-                                thickness=1
-                            )
+                    if self.totalgrid[y][x][0].organism is not None:  # Only draw top layer for now
+                        color = self.get_species_color(x, y, 0)
+                        char = self.get_species_char(x, y, 0)
                             
-                            # Draw character
-                            dpg.draw_text(
-                                (x * self.cell_size + self.cell_size//3, y * self.cell_size + self.cell_size//4),
-                                char,
-                                color=(0, 0, 0),
-                                size=self.cell_size
-                            )
-                
+                        # Draw cell background
+                        dpg.draw_rectangle(
+                            (x * self.cell_size, y * self.cell_size),
+                            ((x + 1) * self.cell_size, (y + 1) * self.cell_size),
+                            fill=color,
+                            color=(100, 100, 100),
+                            thickness=1
+                        )
+                        
+                        # Draw character
+                        dpg.draw_text(
+                            (x * self.cell_size + self.cell_size//3, y * self.cell_size + self.cell_size//4),
+                            char,
+                            color=(0, 0, 0),
+                            size=self.cell_size
+                        )
+            
             # Draw grid lines
             for i in range(self.grid_size + 1):
                 # Vertical lines
@@ -531,26 +510,29 @@ class GameOfLife:
     
     def is_animal_sleeping(self, x, y, z):
         """Check if animal should be sleeping based on its species and time"""
-        animal_species = self.totalgrid[y][x][z].Organism.species
-        if animal_species is None:
+        if self.totalgrid[y][x][z].organism is None:
+            return False
+            
+        species = self.totalgrid[y][x][z].organism.species
+        if species is None or species.type != Species.ANIMAL:
             return False
         
         # Check if it's the wrong time of day for this species
-        wrong_time = (animal_species.diurnal and not self.is_day) or (not animal_species.diurnal and self.is_day)
+        wrong_time = (species.diurnal and not self.is_day) or (not species.diurnal and self.is_day)
         
         # Determine if sleeping based on sleep ratio and time
         if wrong_time:
             return True  # Always sleep during opposite time
         else:
             # During active time, sleep based on sleep ratio
-            return random.random() < animal_species.sleep_ratio
+            return random.random() < species.sleep_ratio
         
     def step(self):
         # Update time cycles first
         self.update_time_cycles()
         
         # Create new grids for the next generation
-        new_grid = [[[totalCell for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+        new_grid = [[[TotalCell() for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
         
         # Track which cells have moved or eaten
         moved_or_eaten = [[[False for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
@@ -562,13 +544,16 @@ class GameOfLife:
                     if moved_or_eaten[y][x][z]:
                         continue  # Skip cells that have already been processed
                         
-                    current_species = self.totalgrid[y][x][z].Organism.species
-                    current_energy = self.totalgrid[y][x][z].Organism.energy
-                    current_root_energy = self.totalgrid[y][x][z].Organism.root_energy
-                    current_age = self.totalgrid[y][x][z].Organism.age
-                    
-                    if current_species == Species.PLANT:
+                    if self.totalgrid[y][x][z].organism is None:
+                        continue
                         
+                    current_organism = self.totalgrid[y][x][z].organism
+                    current_species = current_organism.species
+                    current_energy = current_organism.energy
+                    current_root_energy = current_organism.root_energy
+                    current_age = current_organism.age
+                    
+                    if current_species.type == Species.PLANT:
                         # Plants always consume energy
                         energy_consumption = current_species.energy_consumption
                         
@@ -582,35 +567,45 @@ class GameOfLife:
                             # Store excess in roots (up to root capacity)
                             storage = min(net_energy - current_species.max_energy, 
                                         current_species.root_energy - current_root_energy)
-                            new_grid[y][x][z].Organism.energy = current_species.max_energy
-                            new_grid[y][x][z].Organism.root_energy = current_root_energy + storage
+                            new_grid[y][x][z].organism = CellOrganism(
+                                species=current_species,
+                                energy=current_species.max_energy,
+                                root_energy=current_root_energy + storage,
+                                age=current_age
+                            )
                         elif net_energy > 0:
-                            new_grid[y][x][z].Organism.energy = net_energy
-                            new_grid[y][x][z].Organism.root_energy = current_root_energy
+                            new_grid[y][x][z].organism = CellOrganism(
+                                species=current_species,
+                                energy=net_energy,
+                                root_energy=current_root_energy,
+                                age=current_age
+                            )
                         else:
                             # Use root energy if available
                             energy_needed = -net_energy
                             if current_root_energy >= energy_needed:
-                                new_grid[y][x][z].Organism.root_energy = current_root_energy - energy_needed
-                                new_grid[y][x][z].Organism.energy = 0
+                                new_grid[y][x][z].organism = CellOrganism(
+                                    species=current_species,
+                                    energy=0,
+                                    root_energy=current_root_energy - energy_needed,
+                                    age=current_age
+                                )
                             else:
                                 # Not enough energy - plant dies
-                                new_grid[y][x] = None
+                                new_grid[y][x][z].organism = None
                                 continue
-                        
-                        new_grid[y][x][z].Organism.age = current_age
                         
                         # Check if plant can survive current conditions
                         survival_chance = 1.0
-                        #if self.temperature < 0.3:  # Very cold
                         survival_chance = (self.temperature + current_species.cold_resistance) * survival_chance
                         
                         if random.random() > survival_chance:
-                            new_grid[y][x] = None
+                            new_grid[y][x][z].organism = None
                             continue
                         
                         # If plant has enough energy and is mature, it can reproduce
-                        if (new_grid[y][x][z].Organism.energy >= current_species.reproduction_cost and 
+                        if (new_grid[y][x][z].organism is not None and 
+                            new_grid[y][x][z].organism.energy >= current_species.reproduction_cost and 
                             current_age >= current_species.mature_age and 
                             self.current_day % current_species.reproduction_frequency == 0):
                             
@@ -621,14 +616,17 @@ class GameOfLife:
                                     for dz in [-1, 0, 1]:
                                         if dx == 0 and dy == 0 and dz == 0:
                                             continue
-                                        nx, ny, nz = x + dx, y + dy, z+ dz
-                                        if 0 <= nx < self.grid_size and 0 <= ny < self.grid_size:
-                                            if self.totalgrid[ny][nx][nz] is None and not moved_or_eaten[ny][nx][nz]:
-                                                empty_neighbors.append((nx, ny))
+                                        nx, ny, nz = x + dx, y + dy, z + dz
+                                        if (0 <= nx < self.grid_size and 
+                                            0 <= ny < self.grid_size and 
+                                            0 <= nz < self.grid_size):
+                                            if (self.totalgrid[ny][nx][nz].organism is None and 
+                                                not moved_or_eaten[ny][nx][nz]):
+                                                empty_neighbors.append((nx, ny, nz))
                             
                             # Reproduce to a random empty neighbor
                             if empty_neighbors:
-                                nx, ny = random.choice(empty_neighbors)
+                                nx, ny, nz = random.choice(empty_neighbors)
                                 
                                 # Small chance of mutation
                                 if random.random() < 0.05:  # 5% mutation chance
@@ -636,28 +634,23 @@ class GameOfLife:
                                 else:
                                     mutated_species = current_species
                                 
-                                new_grid[ny][nx] = Species.PLANT
-                                new_grid[y][x][z].Organism.energy = current_species.offspring_energy
-                                new_grid[y][x][z].Organism.root_energy = current_species.offspring_energy * 0.5  # Start with some root energy
-                                new_species[ny][nx] = mutated_species  
-                                new_grid[y][x][z].Organism.energy -= current_species.reproduction_cost
-                                moved_or_eaten[ny][nx] = True
-                        
-                        # Plant survives if it has energy or root energy
-                        if new_grid[y][x][z].Organism.energy > 0 or new_grid[y][x][z].Organism.root_energy > 0:
-                            new_grid[y][x] = Species.PLANT
-                        else:
-                            new_grid[y][x] = None
+                                new_grid[ny][nx][nz].organism = CellOrganism(
+                                    species=mutated_species,
+                                    energy=current_species.offspring_energy,
+                                    root_energy=current_species.offspring_energy * 0.5,
+                                    age=0
+                                )
+                                new_grid[y][x][z].organism.energy -= current_species.reproduction_cost
+                                moved_or_eaten[ny][nx][nz] = True
                     
-                    elif current_species == Species.ANIMAL:
-                        
+                    elif current_species.type == Species.ANIMAL:
                         # Check for death from old age
                         if current_age >= current_species.max_age:
-                            new_grid[y][x] = None
+                            new_grid[y][x][z].organism = None
                             continue
                         
                         # Check if animal is sleeping
-                        is_sleeping = self.is_animal_sleeping(x, y)
+                        is_sleeping = self.is_animal_sleeping(x, y, z)
                         
                         # Energy consumption (less when sleeping)
                         if is_sleeping:
@@ -665,13 +658,18 @@ class GameOfLife:
                         else:
                             energy_loss = current_species.idle_energy_consumption
                         
-                        new_grid[y][x][z].Organism.energy = current_energy - energy_loss
+                        new_energy = current_energy - energy_loss
                         
-                        if new_grid[y][x][z].Organism.energy <= 0:
-                            new_grid[y][x] = None
+                        if new_energy <= 0:
+                            new_grid[y][x][z].organism = None
                             continue
                         
-                        new_age[y][x] = current_age
+                        new_grid[y][x][z].organism = CellOrganism(
+                            species=current_species,
+                            energy=new_energy,
+                            root_energy=0,
+                            age=current_age
+                        )
                         
                         # Check if overstuffed (won't eat if already full)
                         is_overstuffed = current_energy > current_species.max_energy
@@ -691,12 +689,14 @@ class GameOfLife:
                                             if dx == 0 and dy == 0 and dz == 0:
                                                 continue
                                             nx, ny, nz = x + dx, y + dy, z + dz
-                                            if 0 <= nx < self.grid_size and 0 <= ny < self.grid_size and 0 <= nz < self.grid_size:
-                                                if (self.totalgrid[ny][nx][nz].Organism.species.type == Species.PLANT and
-                                                    not moved_or_eaten[ny][nx][nz] and 
-                                                    self.totalgrid[ny][nx][nz].Organism.species is not None):
+                                            if (0 <= nx < self.grid_size and 
+                                                0 <= ny < self.grid_size and 
+                                                0 <= nz < self.grid_size):
+                                                if (self.totalgrid[ny][nx][nz].organism is not None and
+                                                    self.totalgrid[ny][nx][nz].organism.species.type == Species.PLANT and
+                                                    not moved_or_eaten[ny][nx][nz]):
                                                     
-                                                    plant_species = self.totalgrid[ny][nx][nz].Organism.species
+                                                    plant_species = self.totalgrid[ny][nx][nz].organism.species
                                                     if plant_species.name in current_species.toxic_plants:
                                                         continue  # Skip toxic plants
                                                         
@@ -707,9 +707,9 @@ class GameOfLife:
                                 # Try to eat preferred plants first
                                 eat_targets = preferred_neighbors if preferred_neighbors else plant_neighbors
                                 
-                                if eat_targets and new_grid[y][x][z].Organism.energy < current_species.max_energy:
-                                    nx, ny = random.choice(eat_targets)
-                                    plant_species = self.totalgrid[ny][nx][nz].Organism.species
+                                if eat_targets and new_grid[y][x][z].organism.energy < current_species.max_energy:
+                                    nx, ny, nz = random.choice(eat_targets)
+                                    plant_species = self.totalgrid[ny][nx][nz].organism.species
                                     
                                     # More energy from preferred plants
                                     if plant_species.name in current_species.preferred_plants:
@@ -717,9 +717,9 @@ class GameOfLife:
                                     else:
                                         energy_gain = current_species.energy_gain_plants * 0.8
                                     
-                                    new_grid[y][x][z].Organism.energy += min(energy_gain, self.totalgrid[ny][nx][nz].Organism.energy)
-                                    moved_or_eaten[ny][nx] = True
-                                    moved_or_eaten[y][x] = True
+                                    new_grid[y][x][z].organism.energy += min(energy_gain, self.totalgrid[ny][nx][nz].organism.energy)
+                                    moved_or_eaten[ny][nx][nz] = True
+                                    moved_or_eaten[y][x][z] = True
                                     ate = True
                             
                             # If didn't eat plants (or can't), try to eat animals if this animal eats meat
@@ -733,12 +733,14 @@ class GameOfLife:
                                             if dx == 0 and dy == 0 and dz == 0:
                                                 continue
                                             nx, ny, nz = x + dx, y + dy, z + dz
-                                            if 0 <= nx < self.grid_size and 0 <= ny < self.grid_size and 0 <= nz < self.grid_size:
-                                                if (self.totalgrid[ny][nx][nz].Organism.species.type == Species.ANIMAL and
-                                                    not moved_or_eaten[ny][nx][nz] and 
-                                                    self.totalgrid[ny][nx][nz].Organism.species is not None):
+                                            if (0 <= nx < self.grid_size and 
+                                                0 <= ny < self.grid_size and 
+                                                0 <= nz < self.grid_size):
+                                                if (self.totalgrid[ny][nx][nz].organism is not None and
+                                                    self.totalgrid[ny][nx][nz].organism.species.type == Species.ANIMAL and
+                                                    not moved_or_eaten[ny][nx][nz]):
                                                     
-                                                    prey_species = self.totalgrid[ny][nx][nz].Organism.species
+                                                    prey_species = self.totalgrid[ny][nx][nz].organism.species
                                                     animal_neighbors.append((nx, ny, nz))
                                                     if prey_species.name in current_species.preferred_prey:
                                                         preferred_prey_neighbors.append((nx, ny, nz))
@@ -746,34 +748,30 @@ class GameOfLife:
                                 # Try to eat preferred prey first
                                 eat_targets = preferred_prey_neighbors if preferred_prey_neighbors else animal_neighbors
                                 
-                                if eat_targets and new_grid[y][x][z].Organism.energy < current_species.max_energy:
-                                    nx, ny = random.choice(eat_targets)
-                                    prey_energy = self.totalgrid[ny][nx][nz].Organism.energy
+                                if eat_targets and new_grid[y][x][z].organism.energy < current_species.max_energy:
+                                    nx, ny, nz = random.choice(eat_targets)
+                                    prey_energy = self.totalgrid[ny][nx][nz].organism.energy
                                     
                                     # More energy from preferred prey
-                                    prey_species = self.totalgrid[ny][nx][nz].Organism.species
+                                    prey_species = self.totalgrid[ny][nx][nz].organism.species
                                     if prey_species.name in current_species.preferred_prey:
                                         energy_gain = current_species.energy_gain_meat * 1.2
                                     else:
                                         energy_gain = current_species.energy_gain_meat * 0.8
                                     
-                                    new_grid[y][x][z].Organism.energy += min(energy_gain, prey_energy)
-                                    moved_or_eaten[ny][nx] = True
-                                    moved_or_eaten[y][x] = True
+                                    new_grid[y][x][z].organism.energy += min(energy_gain, prey_energy)
+                                    moved_or_eaten[ny][nx][nz] = True
+                                    moved_or_eaten[y][x][z] = True
                                     ate = True
-            
-        # Update the grids
+        
+        # Update the grid
         self.totalgrid = new_grid
-        
-        
-        #self.update_population_history()
         self.draw_grid()
     
     def clear_grid(self):
-        self.totalgrid = [[[totalCell for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+        self.totalgrid = [[[TotalCell() for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
         self.current_step = 0
         self.current_day = 0
-        #self.current_daylight = 24
         self.is_day = True
         self.light_level = 1.0
         self.temperature = 1.0
@@ -791,24 +789,29 @@ class GameOfLife:
         for y in range(self.grid_size):
             for x in range(self.grid_size):
                 for z in range(self.grid_size):
-                    self.totalgrid[y][x][z] = totalCell(0)
+                    self.totalgrid[y][x][z] = TotalCell()
                     rand = random.random()
                     if rand < 0.4:  # 40% chance of being a plant
-                        self.totalgrid[y][x][z].Organism = cellOrganism(random.choice([PlantSpecies.GRASS, PlantSpecies.BUSH, PlantSpecies.TREE]))
+                        plant_type = random.choice([PlantSpecies.GRASS, PlantSpecies.BUSH, PlantSpecies.TREE])
+                        self.totalgrid[y][x][z].organism = CellOrganism(
+                            species=plant_type,
+                            energy=random.uniform(2, plant_type.max_energy * 0.5),
+                            root_energy=random.uniform(2, plant_type.root_energy * 0.5),
+                            age=random.randint(0, plant_type.mature_age * 2)
+                        )
                     elif rand < 0.425:  # 2.5% chance of being an animal
-                        self.totalgrid[y][x][z].Organism = cellOrganism(random.choice([AnimalSpecies.ZORAFI, AnimalSpecies.LOPAKI, AnimalSpecies.TUVEXI]))
-                    
-                    if self.totalgrid[y][x][z].Organism is not None:
-                        self.totalgrid[y][x][z].Organism.energy = random.uniform(2, self.totalgrid[y][x][z].Organism.species.max_energy * 0.5)
-                        if self.totalgrid[y][x][z].Organism.species.type == Species.PLANT: self.totalgrid[y][x][z].Organism.root_energy = random.uniform(2, self.totalgrid[y][x][z].Organism.species.root_energy * 0.5)
-                        else: self.totalgrid[y][x][z].Organism.root_energy = 0.0
-                        self.totalgrid[y][x][z].Organism.age = random.randint(0, self.totalgrid[y][x][z].Organism.species.mature_age * 2)
+                        animal_type = random.choice([AnimalSpecies.ZORAFI, AnimalSpecies.LOPAKI, AnimalSpecies.TUVEXI])
+                        self.totalgrid[y][x][z].organism = CellOrganism(
+                            species=animal_type,
+                            energy=random.uniform(2, animal_type.max_energy * 0.5),
+                            root_energy=0,
+                            age=random.randint(0, animal_type.mature_age * 2)
+                        )
                     else:
-                        self.totalgrid[y][x][z] = None
+                        self.totalgrid[y][x][z].organism = None
         
         self.current_step = 0
         self.current_day = 0
-        #self.current_daylight = 24
         self.is_day = True
         self.light_level = 1.0
         self.temperature = 1.0
@@ -826,20 +829,8 @@ class GameOfLife:
         # Store the new grid size
         new_size = app_data
         
-        # Create new grids with the updated size
-        new_grid = [[[totalCell for _ in range(self.grid_size)] for _ in range(self.grid_size)] for _ in range(self.grid_size)]
-        
-        # reset when changing size to prevent issues
-        # # Copy existing data to the new grids (up to the minimum of old and new size)
-        # copy_size = min(self.grid_size, new_size)
-        # for y in range(copy_size):
-        #     for x in range(copy_size):
-        #         new_grid[y][x] = self.grid[y][x]
-        #         new_energy[y][x] = self.energy_grid[y][x]
-        #         new_root_energy[y][x] = self.root_energy_grid[y][x]
-        #         new_age[y][x] = self.age_grid[y][x]
-        #         new_species[y][x] = self.plant_species_grid[y][x]
-        #         herbivore_species_grid[y][x] = self.herbivore_species_grid[y][x]
+        # Create new grid with the updated size
+        new_grid = [[[TotalCell() for _ in range(new_size)] for _ in range(new_size)] for _ in range(new_size)]
         
         # Update all grid references
         self.grid_size = new_size
@@ -857,7 +848,7 @@ class GameOfLife:
         while dpg.is_dearpygui_running():
             if self.running:
                 self.step()
-                #time.sleep(0.1)  # Slow down the simulation
+                time.sleep(0.1)  # Slow down the simulation
             dpg.render_dearpygui_frame()
         
         dpg.destroy_context()
