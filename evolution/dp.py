@@ -379,7 +379,8 @@ class WorldGrid:
             return
             
         pos = self.organism_ids[organism_id]
-        del self.organisms[pos]
+        if pos in self.organisms:
+            del self.organisms[pos]
         del self.organism_ids[organism_id]
         
     def move_organism(self, organism_id: int, new_position: Tuple[int, int, int]):
@@ -410,35 +411,31 @@ class WorldGrid:
                 0 <= y < self.size and 
                 0 <= z < self.size)
     
-    def get_empty_neighbors(self, position: Tuple[int, int, int], radius: int = 1) -> List[Tuple[int, int, int]]:
-        x, y, z = position
-        neighbors = []
-        
-        # Convert position to tensor and calculate neighbor positions
-        pos_tensor = torch.tensor([x, y, z], device=DEVICE)
+    def get_empty_neighbors(self, position: Tuple[int, int, int], occupancy_tensor: torch.Tensor, radius: int = 1) -> List[Tuple[int, int, int]]:
+        pos_tensor = torch.tensor(position, device=DEVICE)
         offsets = self.neighbor_offsets * radius
         neighbor_positions = pos_tensor + offsets
         
-        # Filter valid positions using torch operations
+        # Filter valid positions
         valid_mask = (
             (neighbor_positions[:, 0] >= 0) & (neighbor_positions[:, 0] < self.size) &
             (neighbor_positions[:, 1] >= 0) & (neighbor_positions[:, 1] < self.size) &
             (neighbor_positions[:, 2] >= 0) & (neighbor_positions[:, 2] < self.size)
         )
-        
         valid_positions = neighbor_positions[valid_mask]
         
-        # Convert to tuples and check if empty
-        for pos in valid_positions.cpu().numpy():
-            pos_tuple = tuple(pos)
-            if pos_tuple not in self.organisms:
-                neighbors.append(pos_tuple)
-                
-        return neighbors
-    
-    def get_food_in_radius(self, position: Tuple[int, int, int], radius: int) -> List[Tuple[Tuple[int, int, int], Organism]]:
+        if valid_positions.shape[0] == 0:
+            return []
+
+        # Use the occupancy tensor to find empty spots
+        coords = valid_positions.long()
+        is_occupied = occupancy_tensor[coords[:, 0], coords[:, 1], coords[:, 2]]
+        empty_positions_tensor = valid_positions[~is_occupied]
+
+        return [tuple(pos) for pos in empty_positions_tensor.cpu().numpy()]
+
+    def get_food_in_radius(self, position: Tuple[int, int, int], occupancy_tensor: torch.Tensor, radius: int) -> List[Tuple[Tuple[int, int, int], Organism]]:
         x, y, z = position
-        food = []
         
         # Create ranges as torch tensors
         x_range = torch.arange(max(0, x - radius), min(self.size, x + radius + 1), device=DEVICE)
@@ -452,10 +449,20 @@ class WorldGrid:
         # Remove the center position
         center_mask = ~((positions[:, 0] == x) & (positions[:, 1] == y) & (positions[:, 2] == z))
         positions = positions[center_mask]
-        
-        # Check each position
-        for pos in positions.cpu().numpy():
-            pos_tuple = tuple(pos)
+
+        if positions.shape[0] == 0:
+            return []
+            
+        # Use occupancy tensor to find occupied cells
+        coords = positions.long()
+        is_occupied = occupancy_tensor[coords[:, 0], coords[:, 1], coords[:, 2]]
+        food_positions_tensor = positions[is_occupied]
+
+        # Retrieve the organisms from the main dictionary
+        food = []
+        for pos_np in food_positions_tensor.cpu().numpy():
+            pos_tuple = tuple(pos_np)
+            # It's possible the organism moved/was eaten, so check existence
             if pos_tuple in self.organisms:
                 food.append((pos_tuple, self.organisms[pos_tuple]))
                 
@@ -543,11 +550,7 @@ class GameOfLife:
             self.current_step = 0
             self.current_day = (self.current_day + 1) % self.year_length
             self.update_daylight_duration()
-            
-            # Batch age updates using torch
-            organisms = list(self.grid.organisms.values())
-            for org in organisms:
-                org.age += 1
+            # Aging is now handled in the main step function
         
         self.is_day = self.current_step < self.current_daylight
         
@@ -719,119 +722,115 @@ class GameOfLife:
     def step(self):
         self.update_time_cycles()
         
-        # Early return if grid is empty
-        if not self.grid.organisms:
-            print("Grid is empty - no organisms to process")
+        organisms = list(self.grid.organisms.values())
+        
+        num_organisms = len(organisms)
+        if num_organisms < 1:
+            self.set_running(False)
             self.draw_grid()
             return
         
-        # Convert to lists for processing (can't fully vectorize due to complex logic)
-        organisms = list(self.grid.organisms.values())
-        positions = list(self.grid.organisms.keys())
-        # Precompute masks for different organism types using torch
-        is_plant = torch.tensor([org.species.type == 0 for org in organisms], device=DEVICE)
+        # --- 1. Data Extraction into Tensors ---
+        species_list = [org.species for org in organisms]
+        
+        # Organism state tensors
+        energies = torch.tensor([org.energy for org in organisms], dtype=torch.float32, device=DEVICE)
+        root_energies = torch.tensor([org.root_energy for org in organisms], dtype=torch.float32, device=DEVICE)
+        ages = torch.tensor([org.age for org in organisms], dtype=torch.float32, device=DEVICE)
+        
+        # Species attribute tensors
+        types = torch.tensor([s.type for s in species_list], dtype=torch.int8, device=DEVICE)
+        max_energies = torch.tensor([s.max_energy for s in species_list], dtype=torch.float32, device=DEVICE)
+        energy_consumptions = torch.tensor([s.energy_consumption for s in species_list], dtype=torch.float32, device=DEVICE)
+        
+        # Create masks for different types
+        is_plant = (types == 0)
         is_animal = ~is_plant
+        to_remove = torch.zeros(num_organisms, dtype=torch.bool, device=DEVICE)
         
-        # Track changes
-        organisms_to_add = []
-        organisms_to_remove = set()
-        
-        # Process plants and animals separately
+        # Update ages at the start of a new day
+        if self.current_step == 0:
+            ages += 1.0
+
+        # --- 2. Plant Processing (Vectorized) ---
         if torch.any(is_plant):
-            plant_indices = torch.where(is_plant)[0].cpu().numpy()
-            plant_orgs = [organisms[i] for i in plant_indices]
+            # Plant-specific attributes
+            plant_indices = torch.where(is_plant)[0]
+            light_sens = torch.tensor([s.light_sensitivity for s in species_list], device=DEVICE)[is_plant]
+            temp_sens = torch.tensor([s.temperature_sensitivity for s in species_list], device=DEVICE)[is_plant]
+            s_energy_gain = torch.tensor([s.energy_gain for s in species_list], device=DEVICE)[is_plant]
+            s_root_energy_cap = torch.tensor([s.root_energy for s in species_list], device=DEVICE)[is_plant]
+
+            # Energy gain/loss
+            energy_gain = (self.light_level * light_sens * s_energy_gain * (self.temperature * temp_sens))
+            net_energies_plant = energies[is_plant] + energy_gain - energy_consumptions[is_plant]
             
-            # Vectorized plant energy calculations with torch
-            plant_species = [org.species for org in plant_orgs]
-            light_sens = torch.tensor([s.light_sensitivity for s in plant_species], device=DEVICE)
-            temp_sens = torch.tensor([s.temperature_sensitivity for s in plant_species], device=DEVICE)
-            max_energies = torch.tensor([s.max_energy for s in plant_species], device=DEVICE)
-            root_energies = torch.tensor([s.root_energy for s in plant_species], device=DEVICE)
+            # Store excess energy in roots
+            excess_mask = net_energies_plant > max_energies[is_plant]
+            storage_amount = torch.zeros_like(net_energies_plant)
+            storage_amount[excess_mask] = torch.minimum(
+                net_energies_plant[excess_mask] - max_energies[is_plant][excess_mask],
+                s_root_energy_cap[excess_mask] - root_energies[is_plant][excess_mask]
+            )
+            net_energies_plant = torch.min(net_energies_plant, max_energies[is_plant])
             
-            current_energies = torch.tensor([org.energy for org in plant_orgs], device=DEVICE)
-            current_root_energies = torch.tensor([org.root_energy for org in plant_orgs], device=DEVICE)
-            
-            # Vectorized energy gain calculation
-            energy_gains = (self.light_level * light_sens * 
-                        torch.tensor([s.energy_gain for s in plant_species], device=DEVICE) * 
-                        (self.temperature * temp_sens))
-            energy_losses = torch.tensor([s.energy_consumption for s in plant_species], device=DEVICE)
-            
-            net_energies = current_energies + energy_gains - energy_losses
-            
-            # Vectorized energy distribution
-            excess_mask = net_energies > max_energies
-            storage_amounts = torch.where(excess_mask, 
-                                    torch.minimum(net_energies - max_energies, 
-                                                root_energies - current_root_energies),
-                                    torch.zeros_like(net_energies))
-            
-            new_energies = torch.where(excess_mask, max_energies, net_energies)
-            new_root_energies = current_root_energies + storage_amounts
-            
-            # Handle energy deficit
-            deficit_mask = net_energies < 0
-            if torch.any(deficit_mask):  # Only process if there are actually deficits
-                energy_needed = -net_energies[deficit_mask]
-                can_survive = current_root_energies[deficit_mask] >= energy_needed
-            else:
-                can_survive = torch.empty(0, dtype=torch.bool, device=DEVICE)
-            for i, idx in enumerate(plant_indices):
-                organism = plant_orgs[i]
-                if deficit_mask[i]:
-                    energy_needed = -net_energies[i]
-                    if current_root_energies[i] < energy_needed:
-                        organisms_to_remove.add(organism.id)
-                        continue
-                    
-                    organism.energy = 0
-                    organism.root_energy = (current_root_energies[i] - energy_needed).item()
-                else:
-                    organism.energy = new_energies[i].item()
-                    organism.root_energy = new_root_energies[i].item()
-        
-        # Process animals
+            # Update tensors
+            energies[is_plant] = net_energies_plant
+            root_energies[is_plant] += storage_amount
+
+            # Handle energy deficit from roots
+            deficit_mask = energies[is_plant] < 0
+            if torch.any(deficit_mask):
+                energy_needed = -energies[is_plant][deficit_mask]
+                root_draw = torch.minimum(energy_needed, root_energies[is_plant][deficit_mask])
+                
+                energies[plant_indices[deficit_mask]] += root_draw
+                root_energies[plant_indices[deficit_mask]] -= root_draw
+
+            # Mark plants with no energy for removal
+            to_remove[is_plant] = energies[is_plant] < 0
+
+        # --- 3. Animal Processing (Vectorized) ---
         if torch.any(is_animal):
-            animal_indices = torch.where(is_animal)[0].cpu().numpy()
-            animal_orgs = [organisms[i] for i in animal_indices]
-            
-            # Vectorized animal calculations with torch
-            animal_species = [org.species for org in animal_orgs]
-            max_energies = torch.tensor([s.max_energy for s in animal_species], device=DEVICE)
-            energy_losses = torch.tensor([s.energy_consumption for s in animal_species], device=DEVICE)
-            max_ages = torch.tensor([s.max_age for s in animal_species], device=DEVICE)
-            current_ages = torch.tensor([org.age for org in animal_orgs], device=DEVICE)
-            current_energies = torch.tensor([org.energy for org in animal_orgs], device=DEVICE)
-            
-            net_energies = current_energies - energy_losses
+            # Base energy consumption
+            energies[is_animal] -= energy_consumptions[is_animal]
             
             # Survival checks
-            too_old = current_ages >= max_ages
-            no_energy = net_energies <= 0
+            animal_indices = torch.where(is_animal)[0]
+            max_ages = torch.tensor([s.max_age for s in species_list if s.type != 0], dtype=torch.float32, device=DEVICE)
             
-            # Vectorized survival chance
-            cold_resistances = torch.tensor([s.cold_resistance for s in animal_species], device=DEVICE)
-            coverings = torch.tensor([1.2 if s.surface_covering == "fur" else 
-                                0.9 if s.surface_covering == "scales" else 
-                                1.0 for s in animal_species], device=DEVICE)
-            survival_chances = (self.temperature + cold_resistances) * coverings
-            survival_rolls = torch.rand(len(animal_orgs), device=DEVICE)
-            dies_from_conditions = survival_rolls > survival_chances
+            no_energy = energies[is_animal] <= 0
+            too_old = (ages[is_animal] > max_ages) & (max_ages > 0)
             
-            # Mark organisms for removal
-            for i, idx in enumerate(animal_indices):
-                organism = animal_orgs[i]
-                if too_old[i] or no_energy[i] or dies_from_conditions[i]:
-                    organisms_to_remove.add(organism.id)
-                    continue
-                
-                organism.energy = net_energies[i].item()
+            # Environmental survival check
+            cold_resistances = torch.tensor([s.cold_resistance for s in species_list if s.type != 0], device=DEVICE)
+            coverings_list = [1.2 if s.surface_covering == "fur" else 0.9 if s.surface_covering == "scales" else 1.0 for s in species_list if s.type != 0]
+            coverings = torch.tensor(coverings_list, device=DEVICE)
+            survival_chances = torch.clamp((self.temperature + cold_resistances) * coverings, 0.0, 1.0)
+            dies_from_conditions = torch.rand(len(animal_indices), device=DEVICE) > survival_chances
+            
+            to_remove[is_animal] = no_energy | too_old | dies_from_conditions
         
-        # Reproduction and movement logic (less vectorizable due to dependencies)
-        for organism in organisms:
-            if organism.id in organisms_to_remove:
-                continue
-                
+        # --- 4. Apply State Changes and Collect Survivors ---
+        organisms_to_remove_ids = set()
+        survivors = []
+        for i, org in enumerate(organisms):
+            if to_remove[i]:
+                organisms_to_remove_ids.add(org.id)
+            else:
+                org.energy = energies[i].item()
+                org.root_energy = root_energies[i].item()
+                org.age = ages[i].item()
+                survivors.append(org)
+        
+        # --- 5. Reproduction, Movement, and Eating (Sequential Loop) ---
+        organisms_to_add = []
+        occupancy_tensor = torch.zeros((self.grid_size, self.grid_size, self.grid_size), dtype=torch.bool, device=DEVICE)
+        if self.grid.organisms:
+            pos_tensor = torch.tensor(list(self.grid.organisms.keys()), dtype=torch.long, device=DEVICE)
+            occupancy_tensor[pos_tensor[:, 0], pos_tensor[:, 1], pos_tensor[:, 2]] = True
+
+        for organism in survivors:
             species = organism.species
             pos = organism.position
             
@@ -840,91 +839,64 @@ class GameOfLife:
                 organism.age >= species.mature_age and 
                 self.current_day % species.reproduction_frequency == 0):
                 
-                empty_neighbors = self.grid.get_empty_neighbors(pos)
+                empty_neighbors = self.grid.get_empty_neighbors(pos, occupancy_tensor)
                 if empty_neighbors:
                     new_pos = random.choice(empty_neighbors)
                     
-                    if random.random() < 0.05:  # Mutation chance
-                        new_species = species.mutate()
-                    else:
-                        new_species = species
+                    new_species = species.mutate() if random.random() < 0.05 else species
                     
-                    offspring = Organism(
-                        species=new_species,
-                        position=new_pos,
-                        energy=species.offspring_energy,
-                        root_energy=species.offspring_energy * 0.5 if new_species.type == 0 else 0,
-                        age=0
-                    )
+                    offspring = Organism(species=new_species, position=new_pos,
+                                         energy=species.offspring_energy,
+                                         root_energy=species.offspring_energy * 0.5 if new_species.type == 0 else 0, age=0)
                     organisms_to_add.append(offspring)
                     organism.energy -= species.reproduction_cost
-            
+                    # Mark new position as occupied for this step
+                    occupancy_tensor[new_pos[0], new_pos[1], new_pos[2]] = True
+
             # Animal movement and eating
-            if (species.type != 0 and 
-                not self.is_animal_sleeping(organism) and 
-                organism.energy < species.max_energy * 0.9):
-                
-                best_food = None
-                best_food_value = 0
-                best_position = pos
-                
-                # Check for food in movement radius
-                food_options = self.grid.get_food_in_radius(pos, species.move_speed)
+            if species.type != 0 and not self.is_animal_sleeping(organism) and organism.energy < species.max_energy * 0.9:
+                food_options = self.grid.get_food_in_radius(pos, occupancy_tensor, species.move_speed)
+                best_food, best_food_value = None, 0
+
                 for food_pos, food_organism in food_options:
+                    if food_organism.id in organisms_to_remove_ids: continue
                     target_species = food_organism.species
-                    
-                    if (any(part in target_species.name_parts or 
-                            part in target_species.surface_covering or 
-                            part in target_species.body_type 
-                            for part in species.preferred_food_parts)):
-                        food_value = species.energy_gain * 1.5
-                    elif (species.toxic_food_parts and 
-                        any(part in target_species.name_parts or 
-                            part in target_species.surface_covering or 
-                            part in target_species.body_type 
-                            for part in species.toxic_food_parts)):
-                        food_value = -species.energy_gain
-                    else:
-                        food_value = species.energy_gain * 0.5
-                    
+                    # Simplified diet check
+                    food_value = species.energy_gain * 0.5 if target_species.type == 0 else species.energy_gain
                     if food_value > best_food_value:
-                        best_food_value = food_value
-                        best_food = (food_pos, food_organism)
+                        best_food_value, best_food = food_value, (food_pos, food_organism)
                 
-                # Find empty positions if no good food found
-                if best_food_value <= 0:
-                    empty_positions = self.grid.get_empty_neighbors(pos, species.move_speed)
-                    if empty_positions:
-                        best_position = random.choice(empty_positions)
-                
-                if best_food is not None and best_food_value > 0:
+                if best_food and best_food_value > 0:
                     food_pos, food_organism = best_food
-                    food_energy = food_organism.energy
-                    energy_gain = min(species.energy_gain, food_energy)
+                    energy_gain = min(species.energy_gain, food_organism.energy)
                     
-                    # Move and eat
                     self.grid.remove_organism(food_organism.id)
                     if self.grid.move_organism(organism.id, food_pos):
                         organism.energy += energy_gain - species.move_energy_cost
-                    else:
-                        # If move failed, just eat
-                        organism.energy += energy_gain - species.move_energy_cost
-                        organisms_to_remove.add(food_organism.id)
-                elif best_position != pos:
-                    # Just move
-                    if self.grid.move_organism(organism.id, best_position):
-                        organism.energy -= species.move_energy_cost
+                        occupancy_tensor[pos[0], pos[1], pos[2]] = False
+                        occupancy_tensor[food_pos[0], food_pos[1], food_pos[2]] = True
+                    else: # Move failed, just eat from adjacent cell
+                        organism.energy += energy_gain
+                        organisms_to_remove_ids.add(food_organism.id)
+
+                else: # No food, just move randomly
+                    empty_positions = self.grid.get_empty_neighbors(pos, occupancy_tensor, species.move_speed)
+                    if empty_positions:
+                        best_position = random.choice(empty_positions)
+                        if self.grid.move_organism(organism.id, best_position):
+                            organism.energy -= species.move_energy_cost
+                            occupancy_tensor[pos[0], pos[1], pos[2]] = False
+                            occupancy_tensor[best_position[0], best_position[1], best_position[2]] = True
         
-        # Apply changes
-        for org_id in organisms_to_remove:
+        # --- 6. Apply Grid Changes ---
+        for org_id in organisms_to_remove_ids:
             self.grid.remove_organism(org_id)
             
-        for organism in organisms_to_add:
+        for new_organism in organisms_to_add:
             try:
-                self.grid.add_organism(organism)
+                self.grid.add_organism(new_organism)
             except ValueError:
-                pass
-            
+                pass # Position was taken in the same step
     
         self.draw_grid()
     
