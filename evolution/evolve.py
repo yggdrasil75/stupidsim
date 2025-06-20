@@ -48,8 +48,8 @@ class GameOfLife:
     def initialize_random(self):
         # Initialize with random alive status, red values (0-255), and blue values (0-255)
         random_status = np.random.choice([0, 1], size=(self.height, self.width))
-        random_red = np.random.randint(0, 256, size=(self.height, self.width))
-        random_blue = np.random.randint(0, 256, size=(self.height, self.width))
+        random_red = np.random.randint(25, 128, size=(self.height, self.width))
+        random_blue = np.random.randint(128, 256, size=(self.height, self.width))
         
         combined = np.stack([random_status, random_red, random_blue], axis=-1)
         self.grid.from_numpy(combined)
@@ -89,7 +89,7 @@ class GameOfLife:
         fertility = blue / 255.0  # Normalize to 0-1
         
         # Base reproduction chance increases with fertility
-        reproduction_chance = np.random.random(size=status.shape) < (fertility * 1)
+        reproduction_chance = 1 #np.random.random(size=status.shape) < (fertility * 1)
         
         # Dead cells with exactly 3 neighbors might come alive
         reproduces = (status == 0) & (n_neighbour == 3) & reproduction_chance
