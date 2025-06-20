@@ -6,225 +6,220 @@ from enum import Enum
 from dataclasses import dataclass
 from typing import List, Optional
 
-class Species(Enum):
+class SpeciesType(Enum):
     PLANT = 0
-    ANIMAL = 1
+    HERBIVORE = 1
+    CARNIVORE = 2
+    OMNIVORE = 3
 
 @dataclass
-class PlantSpecies:
+class Species:
     name: str
-    color: tuple  # Base color (will be modified by environmental factors)
+    type: SpeciesType
+    color: tuple
     max_energy: float
-    root_energy: float  # Energy stored in roots for winter/night
-    energy_gain: float  # Per step in full light
+    energy_gain: float  # For plants: per step in full light, for animals: per food eaten
     energy_consumption: float  # Per step always
-    mature_age: int  # Days to reach maturity
+    mature_age: int
     reproduction_cost: float
     offspring_energy: float
-    reproduction_frequency: int  # Days between reproduction attempts when mature
-    temperature_sensitivity: float  # 0-1, how much temperature affects growth
-    light_sensitivity: float  # 0-1, how much light affects growth
-    cold_resistance: float  # 0-1, how well it survives cold (higher = better)
-    type: Species = Species.PLANT
+    reproduction_frequency: int
+    temperature_sensitivity: float
+    light_sensitivity: float
+    cold_resistance: float
+    # Plant-specific traits
+    root_energy: float = 0  # Energy stored in roots (plants only)
+    # Animal-specific traits
+    move_speed: int = 0
+    move_energy_cost: float = 0  # Energy cost per movement
+    max_age: int = 0
+    sleep_ratio: float = 0
+    diurnal: bool = True
+    preferred_food: List[str] = None
+    toxic_food: List[str] = None
     
-    def mutate(self) -> 'PlantSpecies':
-        """Create a slightly mutated version of this plant species"""
-        mutation_factor = random.uniform(0.9, 1.1)  # Small variation
+    def mutate(self) -> 'Species':
+        """Create a slightly mutated version of this species"""
+        mutation_factor = random.uniform(0.8, 1.2)
         
-        # Create new name by adding a number
-        new_name = f"{self.name}-{random.randint(1, 1000)}"
-        
-        return PlantSpecies(
-            name=new_name,
-            color=(
-                max(0, min(255, int(self.color[0] * random.uniform(0.95, 1.05)))),
-                max(0, min(255, int(self.color[1] * random.uniform(0.95, 1.05)))),
-                max(0, min(255, int(self.color[2] * random.uniform(0.95, 1.05))))
-            ),
-            max_energy=max(1, self.max_energy * random.uniform(0.9, 1.1)),
-            root_energy=max(0.5, self.root_energy * random.uniform(0.8, 1.2)),
-            energy_gain=max(0.05, self.energy_gain * random.uniform(0.8, 1.2)),
-            energy_consumption=max(0.01, self.energy_consumption * random.uniform(0.8, 1.2)),
-            mature_age=max(5, int(self.mature_age * random.uniform(0.8, 1.2))),
-            reproduction_cost=max(0.5, self.reproduction_cost * random.uniform(0.8, 1.2)),
-            offspring_energy=max(0.5, self.offspring_energy * random.uniform(0.8, 1.2)),
-            reproduction_frequency=max(1, int(self.reproduction_frequency * random.uniform(0.8, 1.2))),
-            temperature_sensitivity=max(0.1, min(1.0, self.temperature_sensitivity * random.uniform(0.9, 1.1))),
-            light_sensitivity=max(0.1, min(1.0, self.light_sensitivity * random.uniform(0.9, 1.1))),
-            cold_resistance=max(0.1, min(1.0, self.cold_resistance * random.uniform(0.9, 1.1)))
-        )
-
-@dataclass
-class AnimalSpecies:
-    name: str
-    color: tuple  # Base color
-    max_energy: float
-    energy_gain_plants: float  # Per plant eaten
-    energy_gain_meat: float    # Per animal eaten
-    idle_energy_consumption: float  # Per step
-    move_energy_consumption: float  # Per tile moved
-    move_speed: int  # Max tiles per move
-    mature_age: int  # Days to reach maturity
-    max_age: int  # Days until death from old age
-    offspring_energy: float  # Energy given to offspring
-    cold_resistance: float  # 0-1, how well it survives cold
-    sleep_ratio: float  # 0-1, ratio of time spent sleeping
-    diurnal: bool  # True for day-active, False for night-active
-    preferred_plants: List[str]  # Names of preferred plant species
-    toxic_plants: List[str]     # Names of toxic plant species
-    can_eat_meat: bool          # Whether this animal can eat other animals
-    preferred_prey: List[str]   # Names of preferred prey species
-    type: Species = Species.ANIMAL
-    
-    def mutate(self) -> 'AnimalSpecies':
-        """Create a slightly mutated version of this animal species"""
         # Create new name by combining syllables
         syllables = ["zo", "ra", "fi", "lo", "pa", "ki", "tu", "ve", "no", "xi"]
         new_name = "".join(random.choices(syllables, k=random.randint(2, 3))).capitalize()
         
-        return AnimalSpecies(
+        new_species = Species(
             name=new_name,
+            type=self.type,
             color=(
-                max(0, min(255, int(self.color[0] * random.uniform(0.9, 1.1)))),
-                max(0, min(255, int(self.color[1] * random.uniform(0.9, 1.1)))),
-                max(0, min(255, int(self.color[2] * random.uniform(0.9, 1.1))))
+                max(0, min(255, int(self.color[0] * random.uniform(0.8, 1.2)))),
+                max(0, min(255, int(self.color[1] * random.uniform(0.8, 1.2)))),
+                max(0, min(255, int(self.color[2] * random.uniform(0.8, 1.2))))
             ),
-            max_energy=max(1, self.max_energy * random.uniform(0.8, 1.2)),
-            energy_gain_plants=max(0.1, self.energy_gain_plants * random.uniform(0.8, 1.2)),
-            energy_gain_meat=max(0.1, self.energy_gain_meat * random.uniform(0.8, 1.2)),
-            idle_energy_consumption=max(0.05, self.idle_energy_consumption * random.uniform(0.8, 1.2)),
-            move_energy_consumption=max(0.05, self.move_energy_consumption * random.uniform(0.8, 1.2)),
-            move_speed=max(1, min(5, int(self.move_speed * random.uniform(0.8, 1.2)))),
-            mature_age=max(30, int(self.mature_age * random.uniform(0.8, 1.2))),
-            max_age=max(60, int(self.max_age * random.uniform(0.8, 1.2))),
-            offspring_energy=max(0.5, self.offspring_energy * random.uniform(0.8, 1.2)),
-            cold_resistance=max(0.1, min(1.0, self.cold_resistance * random.uniform(0.9, 1.1))),
-            sleep_ratio=max(0.05, min(0.5, self.sleep_ratio * random.uniform(0.8, 1.2))),
-            diurnal=random.random() < 0.7 if random.random() < 0.2 else self.diurnal,  # 20% chance to flip
-            preferred_plants=self.preferred_plants.copy(),
-            toxic_plants=self.toxic_plants.copy(),
-            can_eat_meat=self.can_eat_meat if random.random() < 0.8 else not self.can_eat_meat,  # 20% chance to flip
-            preferred_prey=self.preferred_prey.copy()
+            max_energy=max(1, self.max_energy * mutation_factor),
+            energy_gain=max(0.05, self.energy_gain * mutation_factor),
+            energy_consumption=max(0.01, self.energy_consumption * mutation_factor),
+            mature_age=max(5, int(self.mature_age * random.uniform(0.8, 1.2))),
+            reproduction_cost=max(0.5, self.reproduction_cost * mutation_factor),
+            offspring_energy=max(0.5, self.offspring_energy * mutation_factor),
+            reproduction_frequency=max(1, int(self.reproduction_frequency * random.uniform(0.8, 1.2))),
+            temperature_sensitivity=max(0.1, min(1.0, self.temperature_sensitivity * random.uniform(0.8, 1.2))),
+            light_sensitivity=max(0.1, min(1.0, self.light_sensitivity * random.uniform(0.8, 1.2))),
+            cold_resistance=max(0.1, min(1.0, self.cold_resistance * random.uniform(0.8, 1.2))),
+            root_energy=max(0, self.root_energy * random.uniform(0.8, 1.2)) if self.type == SpeciesType.PLANT else 0,
+            move_speed=max(0, int(self.move_speed * random.uniform(0.8, 1.2))) if self.type != SpeciesType.PLANT else 0,
+            move_energy_cost=max(0, self.move_energy_cost * random.uniform(0.8, 1.2)) if self.type != SpeciesType.PLANT else 0,
+            max_age=max(0, int(self.max_age * random.uniform(0.8, 1.2))) if self.type != SpeciesType.PLANT else 0,
+            sleep_ratio=max(0, min(0.5, self.sleep_ratio * random.uniform(0.8, 1.2))) if self.type != SpeciesType.PLANT else 0,
+            diurnal=self.diurnal if random.random() < 0.8 else not self.diurnal,
+            preferred_food=self.preferred_food.copy() if self.preferred_food else None,
+            toxic_food=self.toxic_food.copy() if self.toxic_food else None
         )
+        
+        # Small chance to change type
+        if random.random() < 0.05:
+            if new_species.type == SpeciesType.PLANT:
+                new_species.type = random.choice([SpeciesType.HERBIVORE, SpeciesType.OMNIVORE])
+                new_species.move_speed = random.randint(1, 3)
+                new_species.move_energy_cost = random.uniform(0.1, 0.5)
+                new_species.max_age = random.randint(100, 500)
+            else:
+                if random.random() < 0.1:
+                    new_species.type = SpeciesType.PLANT
+                    new_species.move_speed = 0
+                    new_species.move_energy_cost = 0
+                    new_species.max_age = 0
+                    new_species.root_energy = random.uniform(5, 20)
+        
+        return new_species
 
-# Initialize default plant species with more balanced values
-PlantSpecies.GRASS = PlantSpecies(
+def generate_random_species():
+    """Generate a completely random species"""
+    species_type = random.choice(list(SpeciesType))
+    
+    # Generate a random color based on type
+    if species_type == SpeciesType.PLANT:
+        color = (random.randint(50, 150), random.randint(100, 200), random.randint(50, 150))
+    elif species_type == SpeciesType.HERBIVORE:
+        color = (random.randint(150, 255), random.randint(150, 255), random.randint(100, 200))
+    elif species_type == SpeciesType.CARNIVORE:
+        color = (random.randint(200, 255), random.randint(100, 150), random.randint(100, 150))
+    else:  # OMNIVORE
+        color = (random.randint(150, 255), random.randint(150, 200), random.randint(100, 150))
+    
+    # Generate a name
+    syllables = ["zo", "ra", "fi", "lo", "pa", "ki", "tu", "ve", "no", "xi"]
+    name = "".join(random.choices(syllables, k=random.randint(2, 3))).capitalize()
+    
+    # Base traits
+    max_energy = random.uniform(5, 50)
+    energy_gain = random.uniform(0.1, 2.0)
+    energy_consumption = random.uniform(0.01, 0.2)
+    mature_age = random.randint(10, 100)
+    reproduction_cost = random.uniform(1, 10)
+    offspring_energy = random.uniform(1, 5)
+    reproduction_frequency = random.randint(1, 20)
+    temperature_sensitivity = random.uniform(0.1, 1.0)
+    light_sensitivity = random.uniform(0.1, 1.0)
+    cold_resistance = random.uniform(0.1, 1.0)
+    
+    # Plant-specific traits
+    root_energy = random.uniform(5, 20) if species_type == SpeciesType.PLANT else 0
+    
+    # Animal-specific traits
+    move_speed = 0
+    move_energy_cost = 0
+    max_age = 0
+    sleep_ratio = 0
+    diurnal = True
+    preferred_food = []
+    toxic_food = []
+    
+    if species_type != SpeciesType.PLANT:
+        move_speed = random.randint(1, 3)
+        move_energy_cost = random.uniform(0.1, 0.5)
+        max_age = random.randint(100, 1000)
+        sleep_ratio = random.uniform(0.1, 0.3)
+        diurnal = random.random() < 0.7
+        
+        # Generate food preferences
+        if species_type in [SpeciesType.HERBIVORE, SpeciesType.OMNIVORE]:
+            preferred_food = random.sample(["Grass", "Bush", "Algae", "Fruit"], random.randint(1, 2))
+            toxic_food = random.sample(["Poison Ivy", "Toxic Shroom"], random.randint(0, 1))
+        
+        if species_type in [SpeciesType.CARNIVORE, SpeciesType.OMNIVORE]:
+            if not preferred_food:
+                preferred_food = []
+            preferred_food.extend(random.sample(["Herbivore", "Small Carnivore"], random.randint(1, 2)))
+    
+    return Species(
+        name=name,
+        type=species_type,
+        color=color,
+        max_energy=max_energy,
+        energy_gain=energy_gain,
+        energy_consumption=energy_consumption,
+        mature_age=mature_age,
+        reproduction_cost=reproduction_cost,
+        offspring_energy=offspring_energy,
+        reproduction_frequency=reproduction_frequency,
+        temperature_sensitivity=temperature_sensitivity,
+        light_sensitivity=light_sensitivity,
+        cold_resistance=cold_resistance,
+        root_energy=root_energy,
+        move_speed=move_speed,
+        move_energy_cost=move_energy_cost,
+        max_age=max_age,
+        sleep_ratio=sleep_ratio,
+        diurnal=diurnal,
+        preferred_food=preferred_food,
+        toxic_food=toxic_food
+    )
+
+# Default species
+Species.GRASS = Species(
     name="Grass",
+    type=SpeciesType.PLANT,
     color=(100, 200, 100),
-    max_energy=12,
-    root_energy=8,  # Grass has substantial root energy
+    max_energy=15,
     energy_gain=0.3,
-    energy_consumption=0.03,
-    mature_age=15,
-    reproduction_cost=1.5,
-    offspring_energy=1.0,
+    energy_consumption=0.05,
+    mature_age=20,
+    reproduction_cost=2,
+    offspring_energy=1.5,
     reproduction_frequency=5,
     temperature_sensitivity=0.8,
     light_sensitivity=0.9,
-    cold_resistance=0.7  # Grass is fairly cold resistant
+    cold_resistance=0.7,
+    root_energy=8  # Grass has substantial root energy
 )
 
-PlantSpecies.BUSH = PlantSpecies(
-    name="Bush",
-    color=(50, 150, 50),
-    max_energy=30,
-    root_energy=15,  # Bushes have moderate root energy
-    energy_gain=0.2,
-    energy_consumption=0.05,
-    mature_age=50,
-    reproduction_cost=4,
-    offspring_energy=2.5,
-    reproduction_frequency=15,
-    temperature_sensitivity=0.6,
-    light_sensitivity=0.7,
-    cold_resistance=0.87
-)
-
-PlantSpecies.TREE = PlantSpecies(
-    name="Tree",
-    color=(0, 100, 0),
-    max_energy=100,
-    root_energy=40,  # Trees have massive root energy storage
-    energy_gain=0.15,
-    energy_consumption=0.12,
+Species.OMNIVORE = Species(
+    name="Omnivore",
+    type=SpeciesType.OMNIVORE,
+    color=(200, 150, 100),
+    max_energy=25,
+    energy_gain=2.0,
+    energy_consumption=0.2,
     mature_age=100,
-    reproduction_cost=8,
-    offspring_energy=4,
-    reproduction_frequency=40,
-    temperature_sensitivity=0.4,
-    light_sensitivity=0.6,
-    cold_resistance=0.97
-)
-
-# Initialize default herbivore species
-AnimalSpecies.ZORAFI = AnimalSpecies(
-    name="Zorafi",
-    color=(255, 220, 100),  # Light yellow
-    max_energy=15,
-    energy_gain_plants=3.0,  # Per plant eaten
-    energy_gain_meat=0.0,    # Doesn't eat meat
-    idle_energy_consumption=0.4,
-    move_energy_consumption=0.2,
-    move_speed=2,
-    mature_age=90,  # ~3 months
-    max_age=365*2,  # ~2 years
-    offspring_energy=4,
-    cold_resistance=0.6,
-    sleep_ratio=0.2,  # Sleeps 20% of time
-    diurnal=True,  # Day-active
-    preferred_plants=["Grass", "Bush"],
-    toxic_plants=["Poison Ivy"],  # Example toxic plant
-    can_eat_meat=False,
-    preferred_prey=[]
-)
-
-AnimalSpecies.LOPAKI = AnimalSpecies(
-    name="Lopaki",
-    color=(255, 200, 50),  # Orange-yellow
-    max_energy=20,
-    energy_gain_plants=4.0,
-    energy_gain_meat=2.0,  # Can eat some meat but prefers plants
-    idle_energy_consumption=0.6,
-    move_energy_consumption=0.3,
-    move_speed=1,
-    mature_age=180,  # ~6 months
-    max_age=365*3,  # ~3 years
-    offspring_energy=6,
-    cold_resistance=0.8,
-    sleep_ratio=0.15,
-    diurnal=True,
-    preferred_plants=["Bush", "Tree"],
-    toxic_plants=[],
-    can_eat_meat=True,
-    preferred_prey=["Tuvexi"]  # Prefers to eat Tuvexi
-)
-
-AnimalSpecies.TUVEXI = AnimalSpecies(
-    name="Tuvexi",
-    color=(220, 180, 30),  # Darker yellow
-    max_energy=12,
-    energy_gain_plants=2.5,
-    energy_gain_meat=5.0,  # Primarily carnivorous
-    idle_energy_consumption=0.3,
-    move_energy_consumption=0.15,
-    move_speed=3,
-    mature_age=60,  # ~2 months
-    max_age=365,  # ~1 year
+    reproduction_cost=5,
     offspring_energy=3,
-    cold_resistance=0.4,
-    sleep_ratio=0.3,
-    diurnal=False,  # Night-active
-    preferred_plants=[],  # Doesn't eat plants
-    toxic_plants=[],
-    can_eat_meat=True,
-    preferred_prey=["Zorafi"]  # Prefers to eat Zorafi
+    reproduction_frequency=10,
+    temperature_sensitivity=0.6,
+    light_sensitivity=0.3,
+    cold_resistance=0.5,
+    move_speed=2,
+    move_energy_cost=0.2,  # Energy cost per movement
+    max_age=500,
+    sleep_ratio=0.2,
+    diurnal=True,
+    preferred_food=["Grass", "Herbivore"],
+    toxic_food=["Poison Ivy"]
 )
 
 @dataclass
 class CellOrganism:
-    species: AnimalSpecies | PlantSpecies
+    species: Species
     energy: float = 0
-    root_energy: float = 0
+    root_energy: float = 0  # Only used for plants
     age: float = 0
 
 @dataclass
@@ -252,10 +247,6 @@ class GameOfLife:
         self.light_level = 1.0      # Current light level (0-1)
         self.temperature = 1.0      # Temperature factor (0-1)
         self.is_day = True
-        
-        # Population history tracking - now tracking by species
-        self.population_history = {}  # Will be populated with species names
-        self.history_length = 10000  # Keep last 200 steps of history
         
         # Initialize DPG
         dpg.create_context()
@@ -288,7 +279,6 @@ class GameOfLife:
                     self.light_level_text = dpg.add_text(f"Light: {self.light_level:.2f}", tag="light_level_text")
                     self.temp_text = dpg.add_text(f"Temp: {self.temperature:.2f}", tag="temp_text")
                     self.date_text = dpg.add_text("Date: Jan 1", tag="date_text")
-                    
                 
                 # Game display
                 with dpg.child_window(tag="game_window"):
@@ -414,7 +404,7 @@ class GameOfLife:
         species = self.totalgrid[y][x][z].organism.species
         energy = self.totalgrid[y][x][z].organism.energy
         
-        if species.type == Species.PLANT:
+        if species.type == SpeciesType.PLANT:
             r = species.color[0] * self.temperature * species.temperature_sensitivity
             g = species.color[1] * self.light_level * species.light_sensitivity
             b = species.color[2] * self.temperature * species.temperature_sensitivity
@@ -429,7 +419,7 @@ class GameOfLife:
             b = max(0, min(255, b))
             
             return (int(r), int(g), int(b))
-        elif species.type == Species.ANIMAL:
+        else:
             # Base color modified by energy and temperature
             energy_ratio = energy / species.max_energy
             r = species.color[0] * energy_ratio
@@ -447,7 +437,6 @@ class GameOfLife:
             b = max(0, min(255, b))
             
             return (int(r), int(g), int(b))
-        return (0, 0, 0)
     
     def get_species_char(self, x, y, z):
         """Get character representation for a cell"""
@@ -514,7 +503,7 @@ class GameOfLife:
             return False
             
         species = self.totalgrid[y][x][z].organism.species
-        if species is None or species.type != Species.ANIMAL:
+        if species is None or species.type == SpeciesType.PLANT:
             return False
         
         # Check if it's the wrong time of day for this species
@@ -553,14 +542,14 @@ class GameOfLife:
                     current_root_energy = current_organism.root_energy
                     current_age = current_organism.age
                     
-                    if current_species.type == Species.PLANT:
-                        # Plants always consume energy
-                        energy_consumption = current_species.energy_consumption
-                        
-                        # During day, plants gain energy from light (modified by environmental factors)
+                    # All organisms consume energy
+                    energy_loss = current_species.energy_consumption
+                    
+                    # Plants gain energy from light and can use root energy
+                    if current_species.type == SpeciesType.PLANT:
                         energy_gain = ((self.light_level * current_species.light_sensitivity) * 
-                                        current_species.energy_gain * (self.temperature * current_species.temperature_sensitivity))
-                        net_energy = current_energy + energy_gain - energy_consumption
+                                      current_species.energy_gain * (self.temperature * current_species.temperature_sensitivity))
+                        net_energy = current_energy + energy_gain - energy_loss
                         
                         # Handle energy storage and usage
                         if net_energy > current_species.max_energy:
@@ -594,175 +583,146 @@ class GameOfLife:
                                 # Not enough energy - plant dies
                                 new_grid[y][x][z].organism = None
                                 continue
+                    else:
+                        # Animals just lose energy
+                        net_energy = current_energy - energy_loss
                         
-                        # Check if plant can survive current conditions
-                        survival_chance = 1.0
-                        survival_chance = (self.temperature + current_species.cold_resistance) * survival_chance
-                        
-                        if random.random() > survival_chance:
-                            new_grid[y][x][z].organism = None
-                            continue
-                        
-                        # If plant has enough energy and is mature, it can reproduce
-                        if (new_grid[y][x][z].organism is not None and 
-                            new_grid[y][x][z].organism.energy >= current_species.reproduction_cost and 
-                            current_age >= current_species.mature_age and 
-                            self.current_day % current_species.reproduction_frequency == 0):
-                            
-                            # Find empty neighboring cells
-                            empty_neighbors = []
-                            for dy in [-1, 0, 1]:
-                                for dx in [-1, 0, 1]:
-                                    for dz in [-1, 0, 1]:
-                                        if dx == 0 and dy == 0 and dz == 0:
-                                            continue
-                                        nx, ny, nz = x + dx, y + dy, z + dz
-                                        if (0 <= nx < self.grid_size and 
-                                            0 <= ny < self.grid_size and 
-                                            0 <= nz < self.grid_size):
-                                            if (self.totalgrid[ny][nx][nz].organism is None and 
-                                                not moved_or_eaten[ny][nx][nz]):
-                                                empty_neighbors.append((nx, ny, nz))
-                            
-                            # Reproduce to a random empty neighbor
-                            if empty_neighbors:
-                                nx, ny, nz = random.choice(empty_neighbors)
-                                
-                                # Small chance of mutation
-                                if random.random() < 0.05:  # 5% mutation chance
-                                    mutated_species = current_species.mutate()
-                                else:
-                                    mutated_species = current_species
-                                
-                                new_grid[ny][nx][nz].organism = CellOrganism(
-                                    species=mutated_species,
-                                    energy=current_species.offspring_energy,
-                                    root_energy=current_species.offspring_energy * 0.5,
-                                    age=0
-                                )
-                                new_grid[y][x][z].organism.energy -= current_species.reproduction_cost
-                                moved_or_eaten[ny][nx][nz] = True
-                    
-                    elif current_species.type == Species.ANIMAL:
-                        # Check for death from old age
+                        # Check for death from old age (animals only)
                         if current_age >= current_species.max_age:
                             new_grid[y][x][z].organism = None
                             continue
                         
-                        # Check if animal is sleeping
-                        is_sleeping = self.is_animal_sleeping(x, y, z)
-                        
-                        # Energy consumption (less when sleeping)
-                        if is_sleeping:
-                            energy_loss = current_species.idle_energy_consumption * 0.5
-                        else:
-                            energy_loss = current_species.idle_energy_consumption
-                        
-                        new_energy = current_energy - energy_loss
-                        
-                        if new_energy <= 0:
+                        # Check for death from starvation
+                        if net_energy <= 0:
                             new_grid[y][x][z].organism = None
                             continue
                         
+                        # Create new organism with updated energy
                         new_grid[y][x][z].organism = CellOrganism(
                             species=current_species,
-                            energy=new_energy,
-                            root_energy=0,
+                            energy=net_energy,
+                            root_energy=0,  # Animals don't have root energy
                             age=current_age
                         )
+                    
+                    # Check if organism can survive current conditions
+                    survival_chance = (self.temperature + current_species.cold_resistance)
+                    if random.random() > survival_chance:
+                        new_grid[y][x][z].organism = None
+                        continue
+                    
+                    # Check if organism can reproduce
+                    if (new_grid[y][x][z].organism is not None and 
+                        new_grid[y][x][z].organism.energy >= current_species.reproduction_cost and 
+                        current_age >= current_species.mature_age and 
+                        self.current_day % current_species.reproduction_frequency == 0):
                         
-                        # Check if overstuffed (won't eat if already full)
-                        is_overstuffed = current_energy > current_species.max_energy
+                        # Find empty neighboring cells
+                        empty_neighbors = []
+                        for dy in [-1, 0, 1]:
+                            for dx in [-1, 0, 1]:
+                                for dz in [-1, 0, 1]:
+                                    if dx == 0 and dy == 0 and dz == 0:
+                                        continue
+                                    nx, ny, nz = x + dx, y + dy, z + dz
+                                    if (0 <= nx < self.grid_size and 
+                                        0 <= ny < self.grid_size and 
+                                        0 <= nz < self.grid_size):
+                                        if (self.totalgrid[ny][nx][nz].organism is None and 
+                                            not moved_or_eaten[ny][nx][nz]):
+                                            empty_neighbors.append((nx, ny, nz))
                         
-                        if not is_sleeping and not is_overstuffed:
-                            # Try to eat preferred food first
-                            ate = False
+                        # Reproduce to a random empty neighbor
+                        if empty_neighbors:
+                            nx, ny, nz = random.choice(empty_neighbors)
                             
-                            # Try to eat plants if this animal eats plants
-                            if current_species.preferred_plants:
-                                plant_neighbors = []
-                                preferred_neighbors = []
-                                
-                                for dy in [-1, 0, 1]:
-                                    for dx in [-1, 0, 1]:
-                                        for dz in [-1, 0, 1]:
-                                            if dx == 0 and dy == 0 and dz == 0:
-                                                continue
-                                            nx, ny, nz = x + dx, y + dy, z + dz
-                                            if (0 <= nx < self.grid_size and 
-                                                0 <= ny < self.grid_size and 
-                                                0 <= nz < self.grid_size):
-                                                if (self.totalgrid[ny][nx][nz].organism is not None and
-                                                    self.totalgrid[ny][nx][nz].organism.species.type == Species.PLANT and
-                                                    not moved_or_eaten[ny][nx][nz]):
-                                                    
-                                                    plant_species = self.totalgrid[ny][nx][nz].organism.species
-                                                    if plant_species.name in current_species.toxic_plants:
-                                                        continue  # Skip toxic plants
-                                                        
-                                                    plant_neighbors.append((nx, ny, nz))
-                                                    if plant_species.name in current_species.preferred_plants:
-                                                        preferred_neighbors.append((nx, ny, nz))
-                                
-                                # Try to eat preferred plants first
-                                eat_targets = preferred_neighbors if preferred_neighbors else plant_neighbors
-                                
-                                if eat_targets and new_grid[y][x][z].organism.energy < current_species.max_energy:
-                                    nx, ny, nz = random.choice(eat_targets)
-                                    plant_species = self.totalgrid[ny][nx][nz].organism.species
-                                    
-                                    # More energy from preferred plants
-                                    if plant_species.name in current_species.preferred_plants:
-                                        energy_gain = current_species.energy_gain_plants * 1.2
-                                    else:
-                                        energy_gain = current_species.energy_gain_plants * 0.8
-                                    
-                                    new_grid[y][x][z].organism.energy += min(energy_gain, self.totalgrid[ny][nx][nz].organism.energy)
-                                    moved_or_eaten[ny][nx][nz] = True
-                                    moved_or_eaten[y][x][z] = True
-                                    ate = True
+                            # Small chance of mutation
+                            if random.random() < 0.05:  # 5% mutation chance
+                                mutated_species = current_species.mutate()
+                            else:
+                                mutated_species = current_species
                             
-                            # If didn't eat plants (or can't), try to eat animals if this animal eats meat
-                            if not ate and current_species.can_eat_meat and current_species.preferred_prey:
-                                animal_neighbors = []
-                                preferred_prey_neighbors = []
-                                
-                                for dy in [-1, 0, 1]:
-                                    for dx in [-1, 0, 1]:
-                                        for dz in [-1, 0, 1]:
-                                            if dx == 0 and dy == 0 and dz == 0:
-                                                continue
-                                            nx, ny, nz = x + dx, y + dy, z + dz
-                                            if (0 <= nx < self.grid_size and 
-                                                0 <= ny < self.grid_size and 
-                                                0 <= nz < self.grid_size):
-                                                if (self.totalgrid[ny][nx][nz].organism is not None and
-                                                    self.totalgrid[ny][nx][nz].organism.species.type == Species.ANIMAL and
-                                                    not moved_or_eaten[ny][nx][nz]):
-                                                    
-                                                    prey_species = self.totalgrid[ny][nx][nz].organism.species
-                                                    animal_neighbors.append((nx, ny, nz))
-                                                    if prey_species.name in current_species.preferred_prey:
-                                                        preferred_prey_neighbors.append((nx, ny, nz))
-                                
-                                # Try to eat preferred prey first
-                                eat_targets = preferred_prey_neighbors if preferred_prey_neighbors else animal_neighbors
-                                
-                                if eat_targets and new_grid[y][x][z].organism.energy < current_species.max_energy:
-                                    nx, ny, nz = random.choice(eat_targets)
-                                    prey_energy = self.totalgrid[ny][nx][nz].organism.energy
+                            new_grid[ny][nx][nz].organism = CellOrganism(
+                                species=mutated_species,
+                                energy=current_species.offspring_energy,
+                                root_energy=current_species.offspring_energy * 0.5 if mutated_species.type == SpeciesType.PLANT else 0,
+                                age=0
+                            )
+                            new_grid[y][x][z].organism.energy -= current_species.reproduction_cost
+                            moved_or_eaten[ny][nx][nz] = True
+                    
+                    # Handle animal movement and eating
+                    if (current_species.type != SpeciesType.PLANT and 
+                        not self.is_animal_sleeping(x, y, z) and 
+                        new_grid[y][x][z].organism.energy < current_species.max_energy * 0.9):
+                        
+                        # Try to find food
+                        best_food = None
+                        best_food_value = 0
+                        best_position = (x, y, z)
+                        
+                        # Search nearby cells for food
+                        for dy in range(-current_species.move_speed, current_species.move_speed + 1):
+                            for dx in range(-current_species.move_speed, current_species.move_speed + 1):
+                                for dz in range(-current_species.move_speed, current_species.move_speed + 1):
+                                    if dx == 0 and dy == 0 and dz == 0:
+                                        continue
                                     
-                                    # More energy from preferred prey
-                                    prey_species = self.totalgrid[ny][nx][nz].organism.species
-                                    if prey_species.name in current_species.preferred_prey:
-                                        energy_gain = current_species.energy_gain_meat * 1.2
-                                    else:
-                                        energy_gain = current_species.energy_gain_meat * 0.8
-                                    
-                                    new_grid[y][x][z].organism.energy += min(energy_gain, prey_energy)
-                                    moved_or_eaten[ny][nx][nz] = True
-                                    moved_or_eaten[y][x][z] = True
-                                    ate = True
+                                    nx, ny, nz = x + dx, y + dy, z + dz
+                                    if (0 <= nx < self.grid_size and 
+                                        0 <= ny < self.grid_size and 
+                                        0 <= nz < self.grid_size):
+                                        
+                                        if self.totalgrid[ny][nx][nz].organism is not None:
+                                            target_species = self.totalgrid[ny][nx][nz].organism.species
+                                            
+                                            # Check if this is preferred food
+                                            if (current_species.preferred_food and 
+                                                target_species.name in current_species.preferred_food):
+                                                food_value = current_species.energy_gain * 1.5
+                                            # Check if this is toxic food
+                                            elif (current_species.toxic_food and 
+                                                  target_species.name in current_species.toxic_food):
+                                                food_value = -current_species.energy_gain  # Negative value
+                                            # Neutral food
+                                            else:
+                                                food_value = current_species.energy_gain * 0.5
+                                            
+                                            if food_value > best_food_value:
+                                                best_food_value = food_value
+                                                best_food = (nx, ny, nz)
+                                        
+                                        # Also consider empty cells as potential movement targets
+                                        elif self.totalgrid[ny][nx][nz].organism is None:
+                                            if best_food_value <= 0:  # Only move if no food found
+                                                best_position = (nx, ny, nz)
+                        
+                        # If we found food, eat it
+                        if best_food is not None and best_food_value > 0:
+                            nx, ny, nz = best_food
+                            food_energy = self.totalgrid[ny][nx][nz].organism.energy
+                            energy_gain = min(current_species.energy_gain, food_energy)
+                            
+                            # Move to food location and consume it
+                            new_grid[ny][nx][nz].organism = CellOrganism(
+                                species=current_species,
+                                energy=new_grid[y][x][z].organism.energy + energy_gain - current_species.move_energy_cost,
+                                root_energy=0,
+                                age=current_age
+                            )
+                            new_grid[y][x][z].organism = None
+                            moved_or_eaten[ny][nx][nz] = True
+                        # Otherwise, just move randomly if not staying put
+                        elif best_position != (x, y, z):
+                            nx, ny, nz = best_position
+                            new_grid[ny][nx][nz].organism = CellOrganism(
+                                species=current_species,
+                                energy=new_grid[y][x][z].organism.energy - current_species.move_energy_cost,
+                                root_energy=0,
+                                age=current_age
+                            )
+                            new_grid[y][x][z].organism = None
+                            moved_or_eaten[ny][nx][nz] = True
         
         # Update the grid
         self.totalgrid = new_grid
@@ -786,26 +746,25 @@ class GameOfLife:
         self.draw_grid()
 
     def randomize_grid(self):
+        # Generate 1-10 random species at startup
+        num_species = random.randint(1, 10)
+        random_species = [Species.GRASS, Species.OMNIVORE]  # Start with our default species
+        for _ in range(num_species):
+            random_species.append(generate_random_species())
+        
         for y in range(self.grid_size):
             for x in range(self.grid_size):
                 for z in range(self.grid_size):
                     self.totalgrid[y][x][z] = TotalCell()
                     rand = random.random()
-                    if rand < 0.4:  # 40% chance of being a plant
-                        plant_type = random.choice([PlantSpecies.GRASS, PlantSpecies.BUSH, PlantSpecies.TREE])
+                    if rand < 0.3:  # 30% chance of being an organism
+                        species = random.choice(random_species)
+                        root_energy = random.uniform(0, species.root_energy) if species.type == SpeciesType.PLANT else 0
                         self.totalgrid[y][x][z].organism = CellOrganism(
-                            species=plant_type,
-                            energy=random.uniform(2, plant_type.max_energy * 0.5),
-                            root_energy=random.uniform(2, plant_type.root_energy * 0.5),
-                            age=random.randint(0, plant_type.mature_age * 2)
-                        )
-                    elif rand < 0.425:  # 2.5% chance of being an animal
-                        animal_type = random.choice([AnimalSpecies.ZORAFI, AnimalSpecies.LOPAKI, AnimalSpecies.TUVEXI])
-                        self.totalgrid[y][x][z].organism = CellOrganism(
-                            species=animal_type,
-                            energy=random.uniform(2, animal_type.max_energy * 0.5),
-                            root_energy=0,
-                            age=random.randint(0, animal_type.mature_age * 2)
+                            species=species,
+                            energy=random.uniform(species.offspring_energy, species.max_energy * 0.5),
+                            root_energy=root_energy,
+                            age=random.randint(0, species.mature_age * 2)
                         )
                     else:
                         self.totalgrid[y][x][z].organism = None
