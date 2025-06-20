@@ -315,7 +315,7 @@ class Species:
         return species
 
 # Default species examples
-Species.GRASS = Species(
+GRASS = Species(
     name_parts=["gra", "ss"],
     color=(100, 200, 100),
     max_energy=15,
@@ -337,7 +337,7 @@ Species.GRASS = Species(
     covering_density=0.8
 )
 
-Species.OMNIVORE = Species(
+OMNIVORE = Species(
     name_parts=["om", "niv", "ore"],
     color=(200, 150, 100),
     max_energy=25,
@@ -907,7 +907,7 @@ class GameOfLife:
     def randomize_grid(self):
         # Generate 1-10 random species at startup
         num_species = random.randint(1, 10)
-        random_species = [Species.GRASS, Species.OMNIVORE]  # Start with our default species
+        random_species = [GRASS, OMNIVORE]  # Start with our default species
         for _ in range(num_species):
             random_species.append(Species.generate_random_species())
         
@@ -961,31 +961,6 @@ class GameOfLife:
         
         # Redraw the grid
         self.draw_grid()
-
-    def inspect_species(self, x, y, z):
-        if self.totalgrid[x][y][z].organism is None:
-            return "Empty cell"
-        
-        org = self.totalgrid[x][y][z].organism
-        s = org.species
-        
-        info = f"""
-        Name: {s.name}
-        Type: {'Plant' if s.type == 0 else 'Herbivore' if s.type == 1 else 'Carnivore' if s.type == 2 else 'Omnivore'}
-        Energy: {org.energy:.1f}/{s.max_energy:.1f}
-        Age: {org.age}/{s.max_age if s.max_age > 0 else '∞'}
-        
-        Physical:
-        - Height: {s.height:.1f} units
-        - Body: {s.body_type}
-        - Covering: {s.surface_covering} ({s.covering_density*100:.0f}% density)
-        - Appendages: {', '.join(s.appendages) if s.appendages else 'None'}
-        
-        Diet:
-        - Preferred: {', '.join(s.preferred_food_parts)}
-        - Toxic: {', '.join(s.toxic_food_parts) if s.toxic_food_parts else 'None'}
-        """
-        return info
     
     def run(self):
         while dpg.is_dearpygui_running():
