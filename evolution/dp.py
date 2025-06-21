@@ -399,6 +399,8 @@ class Organism:
     root_energy: float = 0  # Only used for plants
     age: float = 0
     is_dormant: bool = False
+    is_dead: bool = False
+    injury_level: float = 0.0
     id: int = field(default_factory=lambda: random.getrandbits(64))
 
 @dataclass
@@ -664,8 +666,16 @@ class GameOfLife:
     
     def get_species_color(self, organism: Organism) -> Tuple[int, int, int]:
         """Calculate display color for an organism based on environment and state"""
+        if organism.is_dead:
+            return (50, 50, 50)  # Gray for dead organisms
+        
         species, energy, is_dormant = organism.species, organism.energy, organism.is_dormant
         base_color = torch.tensor(species.color, dtype=torch.float32, device=DEVICE)
+        
+        # Apply injury effect (mix with red)
+        if organism.injury_level > 0:
+            injury_color = torch.tensor([200, 50, 50], dtype=torch.float32, device=DEVICE)
+            base_color = base_color * (1 - organism.injury_level) + injury_color * organism.injury_level
         
         if species.type == 0:  # Plant
             color = base_color * torch.tensor([self.temperature, self.light_level, self.temperature], device=DEVICE)
@@ -682,6 +692,13 @@ class GameOfLife:
     
     def get_species_char(self, organism: Organism) -> str:
         """Get display character for an organism"""
+        if organism.is_dead:
+            return "✝"
+        if organism.injury_level > 0.5:
+            return "✚"
+        if organism.injury_level > 0.2:
+            return "⚠"
+        
         if organism.species and organism.species.name:
             if organism.is_dormant: return "z"
             return organism.species.name[0].upper()
@@ -882,7 +899,6 @@ class GameOfLife:
             self.draw_grid()
             return
 
-        # --- 1. Seed Processing (once per day) ---
         organisms_from_seeds = []
         if self.current_step == 0 and self.grid.seeds:
             positions_with_seeds = list(self.grid.seeds.keys())
@@ -934,7 +950,6 @@ class GameOfLife:
         for org in organisms:
             org.is_dormant = self.temperature < org.species.dormancy_threshold
 
-        # --- 2. Prepare Tensor Data ---
         species_list = [org.species for org in organisms]
         is_dormant_tensor = torch.tensor([org.is_dormant for org in organisms], dtype=torch.bool, device=DEVICE)
         energies = torch.tensor([org.energy for org in organisms], dtype=torch.float32, device=DEVICE)
@@ -949,7 +964,6 @@ class GameOfLife:
         to_remove = torch.zeros(num_organisms, dtype=torch.bool, device=DEVICE)
         if self.current_step == 0: ages += 1.0  # Age organisms once per day
 
-        # --- 3. Plant Processing ---
         if torch.any(is_plant):
             plant_indices = torch.where(is_plant)[0]
             light_sens = torch.tensor([s.light_sensitivity for s in species_list if s.type==0], device=DEVICE)
@@ -985,7 +999,6 @@ class GameOfLife:
             # Mark plants for removal if they run out of energy
             to_remove[is_plant] = energies[is_plant] < 0
 
-        # --- 4. Animal Processing ---
         if torch.any(is_animal):
             # Basic energy consumption
             energies[is_animal] -= energy_consumptions[is_animal]
@@ -1006,16 +1019,21 @@ class GameOfLife:
                 dies_from_conditions
             )
         
-        # --- 5. Apply State Changes ---
         organisms_to_remove_ids, survivors = set(), []
         for i, org in enumerate(organisms):
             if to_remove[i]: 
                 organisms_to_remove_ids.add(org.id)
             else:
-                org.energy, org.root_energy, org.age = energies[i].item(), root_energies[i].item(), ages[i].item()
+                org.energy = max(0, energies[i].item())
+                org.root_energy = max(0, root_energies[i].item())
+                org.age = ages[i].item()
+                
+                # Healing over time for injured organisms
+                if org.injury_level > 0 and not org.is_dead:
+                    org.injury_level = max(0, org.injury_level - 0.05)  # 5% healing per step
+                
                 survivors.append(org)
         
-        # --- 6. Actions Loop ---
         organisms_to_add, seeds_to_add = [], []
         occupancy_tensor = torch.zeros((self.grid_size, self.grid_size, self.grid_size), dtype=torch.bool, device=DEVICE)
         
@@ -1064,7 +1082,7 @@ class GameOfLife:
             if (species.type != 0 and 
                 not self.is_animal_sleeping(organism) and 
                 organism.energy < species.max_energy * 0.9):
-                
+    
                 food_options = self.grid.get_food_in_radius(pos, occupancy_tensor, species.move_speed)
                 best_food = max(
                     food_options, 
@@ -1074,17 +1092,52 @@ class GameOfLife:
                 
                 if best_food:
                     food_pos, food_org = best_food
+                    
+                    # Calculate how much the animal can actually eat
+                    max_consumable = min(
+                        species.energy_gain,  # Can't eat more than their capacity
+                        food_org.energy,  # Can't eat more than what's available
+                        species.max_energy - organism.energy  # Can't eat beyond their max
+                    )
+                    
+                    # Apply partial consumption
+                    consumption_ratio = random.uniform(0.2, 0.8)  # Eat 20-80% of available
+                    energy_gain = min(max_consumable * consumption_ratio, food_org.energy)
+                    
+                    # Dormancy effect
                     dormancy_mult = 0.2 if food_org.is_dormant and food_org.species.type == 0 else 1.0
-                    energy_gain = min(species.energy_gain, food_org.energy * dormancy_mult)
+                    energy_gain *= dormancy_mult
                     
                     # Try to move to food position
+                    moved = False
                     if self.grid.move_organism(organism.id, food_pos):
                         organism.energy += energy_gain - species.move_energy_cost
                         occupancy_tensor[pos] = False
                         occupancy_tensor[food_pos] = True
+                        moved = True
                     else:
                         organism.energy += energy_gain
-                    organisms_to_remove_ids.add(food_org.id)
+                    
+                    # Apply damage to food source
+                    if food_org.species.type == 0:  # Plants
+                        # Plants lose energy and gain injury
+                        food_org.energy -= energy_gain
+                        food_org.injury_level += consumption_ratio * 0.5  # Plants heal over time
+                        if food_org.energy <= 0:
+                            organisms_to_remove_ids.add(food_org.id)
+                    else:  # Animals
+                        # Animals take more severe damage
+                        food_org.injury_level += consumption_ratio
+                        food_org.energy -= energy_gain * 1.5  # More energy loss than gain due to inefficiency
+                        
+                        # Check if food organism dies from injury
+                        if (food_org.injury_level >= 1.0 or 
+                            food_org.energy <= 0 or 
+                            (food_org.injury_level > 0.7 and random.random() < 0.3)):
+                            food_org.is_dead = True
+                            # Dead organisms become food sources but can't move/reproduce
+                            food_org.species.can_move = False
+                            food_org.species.has_roots = False
                 else:  # No food, move randomly
                     empty_pos = self.grid.get_empty_spots_in_radius(pos, occupancy_tensor, species.move_speed)
                     if empty_pos:
@@ -1094,8 +1147,6 @@ class GameOfLife:
                             occupancy_tensor[pos] = False
                             occupancy_tensor[new_pos] = True
         
-        # --- 7. Apply Grid Changes ---
-        # Remove dead organisms
         for oid in organisms_to_remove_ids: 
             self.grid.remove_organism(oid)
         
@@ -1108,6 +1159,15 @@ class GameOfLife:
                 self.grid.add_organism(org)
             except ValueError: 
                 pass
+            
+        if org.is_dead:
+            # Dead organisms decay over time
+            decay_rate = 0.1 + (0.4 * (self.temperature if self.is_day else self.temperature * 0.5))
+            org.energy = max(0, org.energy - decay_rate)
+            
+            # When energy reaches 0, remove completely
+            if org.energy <= 0:
+                organisms_to_remove_ids.add(org.id)
                 
         self.draw_grid()
     
