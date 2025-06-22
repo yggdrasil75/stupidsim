@@ -13,6 +13,10 @@ DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cp
 
 @dataclass
 class Species:
+    class MovementType(Enum):
+        TERRESTRIAL = 0
+        AVIAN = 1
+        AQUATIC = 2
     # Core attributes
     name: str = ""
     name_parts: List[str] = field(default_factory=list)
@@ -83,8 +87,12 @@ class Species:
         'plant': ["leaf", "fruit", "nut", "root", "stem", "flower"],
         'animal': ["meat", "organ", "bone", "marrow", "fat"]
     }
+    size: Tuple[float, float, float] = (1.0, 1.0, 1.0)  # width, depth, height in yards
+    occupies_multiple_cells: bool = False
     
     def __post_init__(self):
+        if not hasattr(self, 'movement_type'):
+            self._determine_movement_type()
         if not self.name and not self.name_parts:
             self._generate_random_name()
         if not self.name:
@@ -98,6 +106,44 @@ class Species:
         
         if not self.edible_parts:
             self._generate_edible_parts()
+
+        if not hasattr(self, 'size'):
+            self._generate_size()
+
+    def _determine_movement_type(self):
+        """Determine movement type based on physical characteristics"""
+        if not self.can_move:
+            self.movement_type = self.MovementType.TERRESTRIAL
+        elif "wings" in self.appendages and not self.has_roots:
+            self.movement_type = self.MovementType.AVIAN
+        elif "fins" in self.appendages and not self.has_roots:
+            self.movement_type = self.MovementType.AQUATIC
+        else:
+            self.movement_type = self.MovementType.TERRESTRIAL
+
+    def _generate_size(self):
+        """Generate size based on organism type"""
+        if self.type == 0:  # Plants
+            self.size = (
+                random.uniform(0.1, 3.0),  # width
+                random.uniform(0.1, 3.0),  # depth
+                random.uniform(0.1, 10.0)  # height
+            )
+        else:  # Animals
+            base_size = 0.5 if "wings" in self.appendages else 1.0
+            scale = 1.0
+            if self.body_type == "slim":
+                scale *= 0.8
+            elif self.body_type == "bulky":
+                scale *= 1.5
+            
+            self.size = (
+                random.uniform(0.8, 1.5) * scale,  # width
+                random.uniform(0.8, 1.5) * scale,  # depth
+                random.uniform(0.5, 2.0) * scale   # height
+            )
+        self.occupies_multiple_cells = any(dim > 0.8 for dim in self.size)
+
 
     @property
     def type(self) -> int:
@@ -266,7 +312,21 @@ class Species:
                     new_species.toxic_food_parts = []
                     new_species._generate_physical_characteristics()
 
-        
+        if random.random() < 0.01:
+            if new_species.movement_type == self.MovementType.TERRESTRIAL:
+                if "wings" in new_species.appendages:
+                    new_species.movement_type = self.MovementType.AVIAN
+                elif "fins" in new_species.appendages:
+                    new_species.movement_type = self.MovementType.AQUATIC
+            elif new_species.movement_type == self.MovementType.AVIAN:
+                if random.random() < 0.5:
+                    new_species.movement_type = self.MovementType.TERRESTRIAL
+                    new_species.appendages.remove("wings")
+            elif new_species.movement_type == self.MovementType.AQUATIC:
+                if random.random() < 0.5:
+                    new_species.movement_type = self.MovementType.TERRESTRIAL
+                    new_species.appendages.remove("fins")
+
         new_species._generate_random_name()
         return new_species
 
@@ -401,14 +461,44 @@ class Organism:
     is_dormant: bool = False
     is_dead: bool = False
     injury_level: float = 0.0
-    id: int = field(default_factory=lambda: random.getrandbits(64))
+    id: int = field(default=-1) 
+    occupied_cells: List[Tuple[int, int, int]] = field(default_factory=list)
+    
+    def __post_init__(self):
+        if self.species.type == 0 or (hasattr(self.species, 'movement_type') and 
+                                      self.species.movement_type == Species.MovementType.TERRESTRIAL):
+            self.position = (self.position[0], self.position[1], 0)
+        self._calculate_occupied_cells()
+    
+    def _calculate_occupied_cells(self):
+        """Calculate all cells this organism occupies based on its size"""
+        self.occupied_cells = [self.position]  # Always include the primary position
+        
+        if self.species.occupies_multiple_cells:
+            width, depth, height = self.species.size
+            x, y, z = self.position
+            
+            # Calculate how many cells in each dimension
+            cells_x = max(1, math.ceil(width))
+            cells_y = max(1, math.ceil(depth))
+            cells_z = max(1, math.ceil(height))
+            
+            # Generate all occupied cells
+            for dx in range(cells_x):
+                for dy in range(cells_y):
+                    for dz in range(cells_z):
+                        if dx == 0 and dy == 0 and dz == 0:
+                            continue  # Skip the primary position already added
+                        new_pos = (x + dx, y + dy, z + dz)
+                        if new_pos not in self.occupied_cells:
+                            self.occupied_cells.append(new_pos)
 
 @dataclass
 class Seed:
     species: Species
     position: Tuple[int, int, int]
     age: int = 0
-    id: int = field(default_factory=lambda: random.getrandbits(64))
+    id: int = field(default=-1)
 
 @dataclass
 class SimulationSettings:
@@ -417,6 +507,24 @@ class SimulationSettings:
     latitude: float = 45.0     # in degrees
     initial_organisms: List[Organism] = field(default_factory=list)
     initial_seeds: List[Seed] = field(default_factory=list)
+
+class IDGenerator:
+    def __init__(self):
+        self.current_id = 0
+        self.max_id = 2**63 - 1  # Max 64-bit signed integer
+        self.recycled_ids = set()
+    
+    def get_id(self) -> int:
+        if self.recycled_ids:
+            return self.recycled_ids.pop()
+        self.current_id += 1
+        if self.current_id > self.max_id:
+            self.current_id = 1  # Wrap around
+        return self.current_id
+    
+    def recycle_id(self, id: int):
+        if id > 0:
+            self.recycled_ids.add(id)
 
 class WorldGrid:
     def __init__(self, size: int):
@@ -427,6 +535,9 @@ class WorldGrid:
         # Seeds are stored in lists per tile
         self.seeds: Dict[Tuple[int, int, int], List[Seed]] = {}
         self.seed_ids: Dict[int, Tuple[int, int, int]] = {}
+        self.organism_id_gen = IDGenerator()
+        self.seed_id_gen = IDGenerator()
+        
         
         # Pre-compute neighbor offsets as tensor
         neighbor_list = [(dx, dy, dz) 
@@ -435,19 +546,68 @@ class WorldGrid:
                         for dz in range(-1, 2)
                         if not (dx == 0 and dy == 0 and dz == 0)]
         self.neighbor_offsets = torch.tensor(neighbor_list, dtype=torch.int32, device=DEVICE)
+        self.cell_occupants: Dict[Tuple[int, int, int], List[int]] = {}
+        
+    def can_occupy_position(self, organism: Organism, position: Tuple[int, int, int]) -> bool:
+        """Check if this organism can occupy the given position based on its movement type"""
+        x, y, z = position
+        if not self.is_valid_position(position):
+            return False
+            
+        # Terrestrial organisms must stay at z=0
+        if organism.species.movement_type == Species.MovementType.TERRESTRIAL:
+            return z == 0
+            
+        # Aquatic organisms must stay below z=0 (if we implement water levels)
+        elif organism.species.movement_type == Species.MovementType.AQUATIC:
+            return z <= 0  # Assuming negative z is underwater
+            
+        # Avian can be anywhere but have restrictions when injured
+        elif organism.species.movement_type == Species.MovementType.AVIAN:
+            if organism.injury_level > 0.5:  # Severely injured birds try to land
+                return z == 0
+            return True
+            
+        return True
     
     def add_organism(self, organism: Organism):
-        pos = organism.position
-        if not self.is_valid_position(pos):
-            raise ValueError(f"Invalid position {pos}")
-            
-        if pos in self.organisms:
-            raise ValueError(f"Position {pos} already occupied by an organism")
-            
-        self.organisms[pos] = organism
-        self.organism_ids[organism.id] = pos
+        """Add organism, checking all its cells are available"""
+        # Enforce terrestrial constraints
+        if organism.species.type == 0:  # Plants must be terrestrial
+            organism.position = (organism.position[0], organism.position[1], 0)
+        
+        # Check all cells are valid for this organism's movement type
+        for cell in organism.occupied_cells:
+            if not self.can_occupy_position(organism, cell):
+                raise ValueError(f"Invalid position {cell} for {organism.species.movement_type}")
+        # First calculate occupied cells if not done
+        if organism.id == -1:
+            organism.id = self.organism_id_gen.get_id()
+        if not organism.occupied_cells:
+            organism._calculate_occupied_cells()
+        
+        # Check all cells are valid
+        for cell in organism.occupied_cells:
+            if not self.is_valid_position(cell):
+                raise ValueError(f"Invalid position {cell}")
+        
+        # Check if primary position is available
+        if not self.is_position_available(organism.position):
+            raise ValueError(f"Primary position {organism.position} occupied")
+        
+        # Add to tracking structures
+        self.organisms[organism.id] = organism
+        self.organism_ids[organism.id] = organism.occupied_cells
+        
+        # Mark all occupied cells
+        for cell in organism.occupied_cells:
+            if cell not in self.cell_occupants:
+                self.cell_occupants[cell] = []
+            self.cell_occupants[cell].append(organism.id)
 
     def add_seed(self, seed: Seed):
+        if seed.id == -1:
+            seed.id = self.seed_id_gen.get_id()
         pos = seed.position
         if not self.is_valid_position(pos):
             raise ValueError(f"Invalid position for seed {pos}")
@@ -458,13 +618,55 @@ class WorldGrid:
         self.seed_ids[seed.id] = pos
         
     def remove_organism(self, organism_id: int):
+        """Remove organism from all its cells"""
         if organism_id not in self.organism_ids:
             return
             
-        pos = self.organism_ids[organism_id]
-        if pos in self.organisms:
-            del self.organisms[pos]
+        # Remove from all cells
+        for cell in self.organism_ids[organism_id]:
+            if cell in self.cell_occupants:
+                self.cell_occupants[cell] = [oid for oid in self.cell_occupants[cell] if oid != organism_id]
+                if not self.cell_occupants[cell]:
+                    del self.cell_occupants[cell]
+        
+        # Remove from other tracking
+        if organism_id in self.organisms:
+            del self.organisms[organism_id]
         del self.organism_ids[organism_id]
+        self.organism_id_gen.recycle_id(organism_id)
+
+    def remove_seed(self, seed_id: int):
+        """Remove seed and recycle its ID"""
+        if seed_id not in self.seed_positions:
+            return
+            
+        pos = self.seed_positions[seed_id]
+        if pos in self.seeds:
+            self.seeds[pos] = [s for s in self.seeds[pos] if s.id != seed_id]
+            if not self.seeds[pos]:
+                del self.seeds[pos]
+        
+        del self.seed_positions[seed_id]
+        self.seed_id_gen.recycle_id(seed_id)
+
+    def get_organisms_at_position(self, position: Tuple[int, int, int]) -> List[Organism]:
+        """Get all organisms at a position (could be multiple for small organisms)"""
+        if position not in self.cell_occupants:
+            return []
+        return [self.organisms[oid] for oid in self.cell_occupants[position]]
+    
+    def is_position_available(self, position: Tuple[int, int, int], ignore_organism: Optional[int] = None) -> bool:
+        """Check if position is available, optionally ignoring a specific organism"""
+        if not self.is_valid_position(position):
+            return False
+        if position not in self.cell_occupants:
+            return True
+        occupants = self.cell_occupants[position]
+        if not occupants:
+            return True
+        if ignore_organism and ignore_organism in occupants:
+            return len(occupants) == 1
+        return False
 
     def remove_seed(self, seed_id: int):
         if seed_id not in self.seed_ids:
@@ -477,25 +679,77 @@ class WorldGrid:
                 del self.seeds[pos]
         del self.seed_ids[seed_id]
         
-    def move_organism(self, organism_id: int, new_position: Tuple[int, int, int]):
-        if organism_id not in self.organism_ids:
+    def move_organism(self, organism_id: int, new_position: Tuple[int, int, int]) -> bool:
+        """Move organism to new position if all cells are available"""
+        if organism_id not in self.organisms:
             return False
             
-        if not self.is_valid_position(new_position):
-            return False
-            
-        if new_position in self.organisms: # Only check for other organisms
-            return False
-            
-        old_pos = self.organism_ids[organism_id]
-        organism = self.organisms[old_pos]
+        organism = self.organisms[organism_id]
         
-        del self.organisms[old_pos]
+        # Injured avian organisms try to move downward
+        if (organism.species.movement_type == Species.MovementType.AVIAN and 
+            organism.injury_level > 0.3):
+            current_z = organism.position[2]
+            if current_z > 0:
+                # Try to find a position at lower z first
+                for z in range(current_z - 1, -1, -1):
+                    test_pos = (new_position[0], new_position[1], z)
+                    if self.is_position_available(test_pos, ignore_organism=organism_id):
+                        new_position = test_pos
+                        break
+        
+        # Check if new position is valid for this organism type
+        if not self.can_occupy_position(organism,new_position):
+            return False
+            
+        new_cells = self._calculate_new_cells(organism, new_position)
+        
+        # Check all new cells are available
+        for cell in new_cells:
+            if not self.is_position_available(cell, ignore_organism=organism_id):
+                return False
+        
+        # Move is valid - update all tracking
+        old_cells = organism.occupied_cells.copy()
+        
+        # Remove from old cells
+        for cell in old_cells:
+            if cell in self.cell_occupants:
+                self.cell_occupants[cell] = [oid for oid in self.cell_occupants[cell] if oid != organism_id]
+                if not self.cell_occupants[cell]:
+                    del self.cell_occupants[cell]
+        
+        # Add to new cells
         organism.position = new_position
-        self.organisms[new_position] = organism
-        self.organism_ids[organism.id] = new_position
+        organism.occupied_cells = new_cells
+        self.organism_ids[organism_id] = new_cells
+        
+        for cell in new_cells:
+            if cell not in self.cell_occupants:
+                self.cell_occupants[cell] = []
+            self.cell_occupants[cell].append(organism_id)
+        
         return True
         
+    def _calculate_new_cells(self, organism: Organism, new_position: Tuple[int, int, int]) -> List[Tuple[int, int, int]]:
+        """Calculate new occupied cells based on size and new position"""
+        if not organism.species.occupies_multiple_cells:
+            return [new_position]
+            
+        width, depth, height = organism.species.size
+        x, y, z = new_position
+        
+        cells_x = max(1, math.ceil(width))
+        cells_y = max(1, math.ceil(depth))
+        cells_z = max(1, math.ceil(height))
+        
+        new_cells = []
+        for dx in range(cells_x):
+            for dy in range(cells_y):
+                for dz in range(cells_z):
+                    new_cells.append((x + dx, y + dy, z + dz))
+        return new_cells
+    
     def get_organism(self, position: Tuple[int, int, int]) -> Optional[Organism]:
         return self.organisms.get(position)
         
@@ -590,6 +844,11 @@ class GameOfLife:
         # Precompute angles for performance
         self.day_angles = torch.linspace(0, torch.pi, self.steps_per_day, device=DEVICE)
         self.season_angles = torch.linspace(0, 2*torch.pi, self.year_length, device=DEVICE)
+
+
+        self.z_view_mode = "slider"  # "slider", "top", "bottom"
+        self.current_z_level = 0
+        self.max_z_level = 10  # Maximum z-level to display
         
         # Initialize UI
         dpg.create_context()
@@ -629,6 +888,24 @@ class GameOfLife:
                         min_value=0.0, max_value=90.0, 
                         default_value=45.0, 
                         callback=self.update_environment_settings
+                    )
+
+                    # Z-axis viewing controls
+                    dpg.add_spacer(height=10)
+                    dpg.add_text("Z-Axis View:")
+                    with dpg.group(horizontal=True):
+                        dpg.add_radio_button(
+                            items=["Slider", "Top", "Bottom"],
+                            default_value="Slider",
+                            callback=self.change_z_view_mode
+                        )
+                    self.z_slider = dpg.add_slider_int(
+                        label="Z Level",
+                        min_value=0,
+                        max_value=self.max_z_level,
+                        default_value=0,
+                        callback=self.change_z_level,
+                        show=False  # Initially hidden unless in slider mode
                     )
                     
                     # Status displays
@@ -690,6 +967,17 @@ class GameOfLife:
         
         return tuple(torch.clamp(color, 0, 255).to(torch.uint8).cpu().numpy())
     
+    def change_z_view_mode(self, sender, app_data):
+        """Change how we view the z-axis"""
+        self.z_view_mode = app_data.lower()
+        dpg.configure_item(self.z_slider, show=(self.z_view_mode == "slider"))
+        self.draw_grid()
+
+    def change_z_level(self, sender, app_data):
+        """Change current z-level when in slider mode"""
+        self.current_z_level = app_data
+        self.draw_grid()
+
     def get_species_char(self, organism: Organism) -> str:
         """Get display character for an organism"""
         if organism.is_dead:
@@ -725,19 +1013,13 @@ class GameOfLife:
         else:
             self.light_level = 0.05
         
-        # --- Improved Temperature Calculation ---
         season_angle = self.season_angles[self.current_day]
         
-        # 1. Base temperature based on latitude (colder at poles)
         lat_deg = math.degrees(abs(self.latitude))
-        base_temp = 1.0 - (lat_deg / 90) * 0.6  # 40% variation from equator to pole
-        
-        # 2. Seasonal variation (more extreme at higher latitudes)
+        base_temp = 1.0 - (lat_deg / 90) * 0.6 
         solar_declination = self.axial_tilt * math.sin(2 * math.pi * (self.current_day - 80) / self.year_length)
         season_factor = math.cos(self.latitude - solar_declination)
-        season_variation = (0.3 + (lat_deg/90)*0.4) * math.sin(season_angle)  # More variation at poles
-        
-        # 3. Daily temperature cycle (stronger during day, weaker at night)
+        season_variation = (0.3 + (lat_deg/90)*0.4) * math.sin(season_angle) 
         if self.is_day:
             day_progress = self.current_step / self.current_daylight
             day_angle = self.day_angles[int(day_progress * (len(self.day_angles)-1))]
@@ -815,50 +1097,56 @@ class GameOfLife:
             self.winter_solstice = self.current_day
 
     def draw_grid(self):
-        """Draw the current state of the grid"""
+        """Draw the current state of the grid with z-axis handling"""
         dpg.delete_item("drawlist", children_only=True)
-        self.grid_tensor.zero_()
         
         with dpg.draw_node(parent="drawlist"):
-            # Draw organisms
-            for pos, organism in self.grid.organisms.items():
-                x, y, z = pos
-                if z == 0:  # Only draw ground level
-                    color = self.get_species_color(organism)
-                    self.grid_tensor[x, y] = torch.tensor(color, device=DEVICE) / 255.0
+            # Determine which z-levels to show based on view mode
+            if self.z_view_mode == "top":
+                z_levels = [self.max_z_level]
+            elif self.z_view_mode == "bottom":
+                z_levels = [0]
+            else:  # slider mode
+                z_levels = [self.current_z_level]
             
-            # Draw cells
-            for x in range(self.grid_size):
-                for y in range(self.grid_size):
-                    color = self.grid_tensor[x, y] * 255
-                    organism = self.grid.get_organism((x, y, 0))
-                    char = self.get_species_char(organism) if organism else " "
-                    dpg.draw_rectangle(
-                        (x * self.cell_size, y * self.cell_size), 
-                        ((x + 1) * self.cell_size, (y + 1) * self.cell_size), 
-                        fill=(int(color[0]), int(color[1]), int(color[2])), 
-                        color=(100, 100, 100), 
-                        thickness=1
-                    )
-                    dpg.draw_text(
-                        (x*self.cell_size + self.cell_size//4, y*self.cell_size), 
-                        char, 
-                        color=(0,0,0), 
-                        size=int(self.cell_size*0.8)
-                    )
+            # Draw organisms first
+            for org in self.grid.organisms.values():
+                if not org.occupied_cells:
+                    continue
+                    
+                # Check if organism is at current z-level(s)
+                org_z = org.position[2]
+                if org_z not in z_levels:
+                    continue
+                    
+                # Get primary position
+                x, y, z = org.position
+                
+                # Calculate size in cells
+                cells_x = len(set(c[0] for c in org.occupied_cells))
+                cells_y = len(set(c[1] for c in org.occupied_cells))
+                
+                color = self.get_species_color(org)
+                char = self.get_species_char(org)
+                
+                # Draw rectangle
+                dpg.draw_rectangle(
+                    (x * self.cell_size, y * self.cell_size), 
+                    ((x + cells_x) * self.cell_size, (y + cells_y) * self.cell_size), 
+                    fill=color, 
+                    color=(100, 100, 100), 
+                    thickness=1
+                )
+                
+                # Draw character
+                dpg.draw_text(
+                    (x*self.cell_size + (cells_x*self.cell_size)//2 - self.cell_size//4, 
+                    y*self.cell_size + (cells_y*self.cell_size)//2 - self.cell_size//4), 
+                    char, 
+                    color=(0,0,0), 
+                    size=int(self.cell_size*0.8)
+                )
             
-            # Draw seeds
-            for pos, seed_list in self.grid.seeds.items():
-                if seed_list:
-                    x, y, z = pos
-                    if z == 0:
-                        dpg.draw_circle(
-                            (x*self.cell_size + self.cell_size/2, y*self.cell_size + self.cell_size/2), 
-                            radius=max(1, self.cell_size/5), 
-                            color=(139, 69, 19), 
-                            fill=(139, 69, 19)
-                        )
-
             # Draw grid lines
             for i in range(self.grid_size + 1):
                 dpg.draw_line(
@@ -873,17 +1161,21 @@ class GameOfLife:
                     color=(50, 50, 50, 100), 
                     thickness=1
                 )
-    
+            
     def set_running(self, running):
         """Set simulation running state"""
         self.running = running
     
     def is_animal_sleeping(self, organism: Organism) -> bool:
-        """Check if an animal should be sleeping"""
         species = organism.species
         if species.type == 0: return False  # Plants don't sleep
-        if organism.is_dormant: return True  # Dormant animals are always "sleeping"
+        if organism.is_dormant: return True
         
+        # Avian can't sleep while in the air
+        if (species.movement_type == Species.MovementType.AVIAN and 
+            organism.position[2] > 0):
+            return False
+            
         wrong_time = (species.diurnal and not self.is_day) or (not species.diurnal and self.is_day)
         return wrong_time or random.random() < species.sleep_ratio
         
@@ -915,7 +1207,8 @@ class GameOfLife:
                     
                     # Remove old seeds
                     if seed.age > seed.species.seed_lifespan:
-                        del self.grid.seed_ids[seed.id]
+                        if seed.id in self.grid.seed_ids:  # Check if seed exists before removal
+                            del self.grid.seed_ids[seed.id]
                         continue
 
                     # Check for germination
@@ -935,20 +1228,28 @@ class GameOfLife:
                         organisms_from_seeds.append(new_organism)
                         
                         # Remove the germinated seed
-                        del self.grid.seed_ids[seed.id]
-                        surviving_seeds_at_pos.extend(s for s in seeds_at_pos if s.id != seed.id)
+                        if seed.id in self.grid.seed_ids:  # Check if seed exists before removal
+                            del self.grid.seed_ids[seed.id]
+                        surviving_seeds_at_pos = [s for s in seeds_at_pos if s.id != seed.id]
                         break  # Only one seed can germinate per position
                     else:
                         surviving_seeds_at_pos.append(seed)
-                else:  # No break occurred - no germination
-                    if surviving_seeds_at_pos:
-                        self.grid.seeds[pos] = surviving_seeds_at_pos
-                    else:
-                        del self.grid.seeds[pos]
-        
+                
+                # Update the seeds at this position
+                if surviving_seeds_at_pos:
+                    self.grid.seeds[pos] = surviving_seeds_at_pos
+                else:
+                    del self.grid.seeds[pos]
         # Update dormancy state for all organisms
         for org in organisms:
             org.is_dormant = self.temperature < org.species.dormancy_threshold
+
+        for org in organisms:
+            if org.species.occupies_multiple_cells:
+                size_factor = org.species.size[0] * org.species.size[1] * org.species.size[2]
+                org.energy *= size_factor  # Larger organisms need more energy
+                org.species.energy_consumption *= size_factor
+                org.species.max_energy *= size_factor
 
         species_list = [org.species for org in organisms]
         is_dormant_tensor = torch.tensor([org.is_dormant for org in organisms], dtype=torch.bool, device=DEVICE)
@@ -1039,7 +1340,8 @@ class GameOfLife:
         
         # Build occupancy tensor
         if self.grid.organisms:
-            pos_tensor = torch.tensor(list(self.grid.organisms.keys()), dtype=torch.long, device=DEVICE)
+            positions = [org.position for org in self.grid.organisms.values()]
+            pos_tensor = torch.tensor(positions, dtype=torch.long, device=DEVICE)
             occupancy_tensor[pos_tensor[:, 0], pos_tensor[:, 1], pos_tensor[:, 2]] = True
 
         for organism in survivors:
@@ -1079,9 +1381,31 @@ class GameOfLife:
                         occupancy_tensor[new_pos[0], new_pos[1], new_pos[2]] = True
 
             # Animal Movement and Eating
+            if (organism.species.movement_type == Species.MovementType.AVIAN and 
+                organism.injury_level < 0.3 and 
+                not self.is_animal_sleeping(organism)):
+                
+                current_z = organism.position[2]
+                # Random chance to change altitude
+                if random.random() < 0.2:
+                    new_z = current_z
+                    if random.random() < 0.5 and current_z > 0:
+                        new_z = current_z - 1  # Descend
+                    elif current_z < self.max_z_level:
+                        new_z = current_z + 1  # Ascend
+                    
+                    if new_z != current_z:
+                        new_pos = (organism.position[0], organism.position[1], new_z)
+                        if self.grid.move_organism(organism.id, new_pos):
+                            organism.energy -= organism.species.move_energy_cost
+
             if (species.type != 0 and 
                 not self.is_animal_sleeping(organism) and 
                 organism.energy < species.max_energy * 0.9):
+                if species.occupies_multiple_cells:
+                    move_cost = species.move_energy_cost * size_factor
+                    move_speed = max(1, int(species.move_speed / size_factor))
+
     
                 food_options = self.grid.get_food_in_radius(pos, occupancy_tensor, species.move_speed)
                 best_food = max(
@@ -1182,7 +1506,7 @@ class GameOfLife:
         self.draw_grid()
 
     def randomize_grid(self):
-        """Randomly populate the grid with organisms"""
+        """Modified to properly place organisms based on movement type"""
         self.clear_grid()
         num_species = random.randint(5, 10)
         created_species = [GRASS]
@@ -1195,30 +1519,39 @@ class GameOfLife:
         plant_species = [s for s in created_species if s.type == 0]
         animal_species = [s for s in created_species if s.type != 0]
 
-        # Populate grid
-        for x in range(self.grid_size):
-            for y in range(self.grid_size):
-                for z in [0]:  # Only populate ground level
-                    if random.random() < 0.5:
-                        species = None
-                        if plant_species and (not animal_species or random.random() < 0.75):
-                            species = random.choice(plant_species)
-                        elif animal_species:
-                            species = random.choice(animal_species)
-
-                        if species:
-                            root_energy = random.uniform(0, species.root_energy) if species.type == 0 else 0
-                            organism = Organism(
-                                species=species,
-                                position=(x, y, z),
-                                energy=random.uniform(species.offspring_energy, species.max_energy * 0.5),
-                                root_energy=root_energy,
-                                age=random.randint(0, species.mature_age * 2)
-                            )
-                            try:
-                                self.grid.add_organism(organism)
-                            except ValueError:
-                                pass
+        # Populate grid with proper z-levels
+        for _ in range(self.grid_size * self.grid_size // 4):
+            x = random.randint(0, self.grid_size-1)
+            y = random.randint(0, self.grid_size-1)
+            
+            # Choose z-level based on species type
+            species = None
+            if plant_species and (not animal_species or random.random() < 0.75):
+                species = random.choice(plant_species)
+                z = 0  # Plants always at ground level
+            elif animal_species:
+                species = random.choice(animal_species)
+                if species.movement_type == Species.MovementType.TERRESTRIAL:
+                    z = 0
+                elif species.movement_type == Species.MovementType.AQUATIC:
+                    z = random.randint(-3, 0)  # Underwater
+                else:  # Avian
+                    z = random.randint(0, 3)  # Can be in air
+                    
+            if species and not self.grid.get_organisms_at_position((x, y, z)):
+                root_energy = random.uniform(0, species.root_energy) if species.type == 0 else 0
+                organism = Organism(
+                    species=species,
+                    position=(x, y, z),
+                    energy=random.uniform(species.offspring_energy, species.max_energy * 0.5),
+                    root_energy=root_energy,
+                    age=random.randint(0, species.mature_age * 2)
+                )
+                try:
+                    self.grid.add_organism(organism)
+                except ValueError as e:
+                    print(f"Failed to add organism: {e}")
+        
         self.draw_grid()
     
     def change_grid_size(self, sender, app_data):
