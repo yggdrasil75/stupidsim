@@ -848,7 +848,7 @@ class GameOfLife:
 
         self.z_view_mode = "slider"  # "slider", "top", "bottom"
         self.current_z_level = 0
-        self.max_z_level = 10  # Maximum z-level to display
+        self.max_z_level = self.grid_size  # Maximum z-level to display
         
         # Initialize UI
         dpg.create_context()
