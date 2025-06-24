@@ -1,7 +1,14 @@
-from dataclasses import dataclass
+from abc import abstractmethod
+from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
 import random
+from typing import Optional
 import dearpygui.dearpygui as dpg
+import string
+
+ALPHABET = string.ascii_letters
+RANDOMCHAR = string.printable
 
 @dataclass
 class part: # each part is baked into the species stats, separted here to allow for organisms to lose a limb
@@ -14,8 +21,20 @@ class part: # each part is baked into the species stats, separted here to allow 
     regrowth_rate: float = 0.0  # how quickly the part regrows (0 for no regrowth)
     energyCost: float = 0.1  # energy cost to maintain this part
     energyProducer: bool = False
-    subparts: list['part'] = []
-    statCache = None
+    subparts: list['part'] = field(default_factory=list)
+    statCache: Optional[dict[str, float|bool]] = None
+    minTemp: float = -50.0  
+    maxTemp: float = 150.0
+    mutationRate: float = 0.0001
+
+    def __post_init__(self):
+        if len(self.subparts) == 0:
+            self.setup_default_subparts()
+        self.calculateStats(True)
+
+    @abstractmethod
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         if self.statCache is not None and recalc == False:
@@ -24,6 +43,12 @@ class part: # each part is baked into the species stats, separted here to allow 
         stats['health'] = self.health
         stats['regrowthrate'] = self.regrowth_rate
         stats['idleE'] = self.energyCost
+        if self.vital:
+            stats['tempSensCold'] = self.minTemp
+            stats['tempSensHot'] = self.maxTemp
+        else:
+            stats[f'{self.name}.tempSensCold'] = self.minTemp
+            stats[f'{self.name}.tempSensHot'] = self.maxTemp
         if self.energyProducer:
             stats['sleepE'] = self.energyCost * 0.5
             stats['dormE'] = self.energyCost * 0.1
@@ -35,7 +60,7 @@ class part: # each part is baked into the species stats, separted here to allow 
             substats = subpart.calculateStats(recalc)
             for key in substats:
                 if key in stats:
-                    stats[key] += (substats[key] * subpart.size) + stats[key]
+                    stats[key] += (substats[key] * subpart.size)
                 else:
                     stats[key] += (substats[key] * subpart.size)
         self.statCache = stats
@@ -72,19 +97,25 @@ class skin(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
-        stats['armor'] = self.thickness * 0.5  # Thicker skin provides more armor
-        stats['camouflage'] = self.camouflage_effectiveness
-        stats['insulation'] = self.insulation_factor
-        stats['cooling'] = self.cooling_factor
-        stats['water_retention'] = self.water_retention
-        stats['gas_exchange'] = self.gas_exchange
+        substats = {}
+        substats['armor'] = self.thickness * 0.5  # Thicker skin provides more armor
+        substats['camouflage'] = self.camouflage_effectiveness
+        substats['insulation'] = self.insulation_factor
+        substats['cooling'] = self.cooling_factor
+        substats['water_retention'] = self.water_retention
+        substats['gas_exchange'] = self.gas_exchange
         
         if self.can_photosynthesize:
-            stats['photosynthesis'] = 0.5 * self.thickness  # Photosynthetic capability
+            substats['photosynthesis'] = 0.5 * self.thickness  # Photosynthetic capability
         if self.luminescent:
-            stats['luminescence'] = self.luminense  # Basic luminescence value
-            stats['camouflage'] -= self.luminense
+            substats['luminescence'] = self.luminense  # Basic luminescence value
+            substats['camouflage'] -= self.luminense
             
+        for stat, value in substats.items():
+            if stat in stats:
+                stats[stat] += (value * self.thickness)
+            else:
+                stats[stat] = (value * self.thickness)
         return stats
 
 class limb(part):
@@ -111,32 +142,65 @@ class limb(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
-        stats['strength'] = self.strength * self.size
-        stats['dexterity'] = self.dexterity
-        stats['reach'] = self.reach * self.size
-        stats['movement_speed'] = self.movement_speed * self.size
-        stats['movement_cost'] = self.movement_cost * self.size
+        substats  = {}
+        substats['strength'] = self.strength * self.size
+        substats['dexterity'] = self.dexterity
+        substats['reach'] = self.reach * self.size
+        substats['movement_speed'] = self.movement_speed * self.size
+        substats['movement_cost'] = self.movement_cost * self.size
         
         if self.prehensile:
-            stats['manipulation'] = 0.7 * self.dexterity
+            substats['manipulation'] = 0.7 * self.dexterity
         else:
-            stats['manipulation'] = 0.1 * self.dexterity
+            substats['manipulation'] = 0.1 * self.dexterity
             
         # Movement capabilities
         if self.can_climb:
-            stats['climbing'] = (0.5 * self.strength) + (self.dexterity * 0.1)
+            substats['climbing'] = (0.5 * self.strength) + (self.dexterity * 0.1)
         else:
-            stats['climbing'] = (0.1 * self.strength) + (self.dexterity * 0.1)
+            substats['climbing'] = (0.1 * self.strength) + (self.dexterity * 0.1)
         if self.can_swim:
-            stats['swimming'] = 0.6 * self.strength + (self.dexterity * 0.1)
+            substats['swimming'] = 0.6 * self.strength + (self.dexterity * 0.1)
         else:
-            stats['swimming'] = 0.1 * self.strength + (self.dexterity * 0.1)
+            substats['swimming'] = 0.1 * self.strength + (self.dexterity * 0.1)
         if self.can_dig:
-            stats['digging'] = 0.7 * self.strength + (self.dexterity * 0.1)
+            substats['digging'] = 0.7 * self.strength + (self.dexterity * 0.1)
         else:
-            stats['digging'] = 0.05 * self.strength + (self.dexterity * 0.1)
+            substats['digging'] = 0.05 * self.strength + (self.dexterity * 0.1)
             
+        for stat, value in substats.items():
+            if stat in stats:
+                stats[stat] += (value * self.size)
+            else:
+                stats[stat] = (value * self.size)
         return stats
+    
+    def setup_default_subparts(self):
+        skin_type = skin.Skin.FUR if self.type != self.LimbType.FIN else skin.Skin.SCALES
+        self.subparts.append(skin(
+            name=f"{self.name}_covering",
+            type=skin_type,
+            size=0.8,
+            thickness=0.3,
+            energyCost=0.05
+        ))
+        
+        self.subparts.append(internal(
+            name="muscles",
+            type=internal.InternalType.OTHER,
+            efficiency=self.strength,
+            capacity=self.dexterity,
+            size=0.7,
+            energyCost=0.1
+        ))
+        if self.type in [self.LimbType.ARM, self.LimbType.LEG, self.LimbType.TAIL]:
+            self.subparts.append(weapon(
+                name="claws",
+                type=weapon.WeaponType.CLAW,
+                size=0.05,
+                damage=0.5,
+                energyCost=0.01
+            ))
 
 class sensory(part):
     class SensoryType(Enum):
@@ -160,26 +224,32 @@ class sensory(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
-        # Base sensory stats
-        stats['sensory_range'] = self.range * self.size
-        stats['sensory_sensitivity'] = self.sensitivity
-        stats['sensory_precision'] = self.precision
-        stats['sensory_angle'] = self.angle
+        substats = {}
+        substats['sensory_range'] = self.range * self.size
+        substats['sensory_sensitivity'] = self.sensitivity
+        substats['sensory_precision'] = self.precision
+        substats['sensory_angle'] = self.angle
         if self.night_vision:
-            stats['night_vision'] = 0.5 * self.sensitivity
+            substats['night_vision'] = 0.5 * self.sensitivity
         if self.thermal_vision:
-            stats['thermal_vision'] = 0.3 * self.sensitivity
+            substats['thermal_vision'] = 0.3 * self.sensitivity
         if not self.can_see_colors:
-            stats['color_vision'] = 0
+            substats['color_vision'] = 0
         else:
-            stats['color_vision'] = 1.0
+            substats['color_vision'] = 1.0
         if self.underwater_effective:
-            stats['underwater_sensing'] = 1.0
+            substats['underwater_sensing'] = 1.0
         if not self.air_effective:
-            stats['air_sensing'] = 0.8
-        stats['sensory_active_cost'] = self.active_cost
-        stats['sensory_passive_cost'] = self.passive_cost
+            substats['air_sensing'] = 0.8
+        substats['sensory_active_cost'] = self.active_cost
+        substats['sensory_passive_cost'] = self.passive_cost
+        substats['visionangle'] = self.angle
         
+        for stat, value in substats.items():
+            if stat in substats:
+                stats[stat] += (value * self.sensitivity)
+            else:
+                stats[stat] = (value * self.sensitivity)
         return stats
 
 class internal(part):
@@ -201,32 +271,38 @@ class internal(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
+        substats = {}
         # Internal organ stats
-        stats['efficiency'] = self.efficiency
-        stats['capacity'] = self.capacity
+        substats[f'{self.type}.efficiency'] = self.efficiency
+        substats[f'{self.type}.capacity'] = self.capacity
         
         # Type-specific bonuses
         if self.type == self.InternalType.HEART:
-            stats['circulation'] = self.efficiency * 2.0
+            substats['circulation'] = self.efficiency * 2.0
         elif self.type == self.InternalType.LUNG:
-            stats['oxygenation'] = self.efficiency * 1.5
+            substats['oxygenation'] = self.efficiency * 1.5
         elif self.type == self.InternalType.GILL:
-            stats['water_oxygenation'] = self.efficiency * 2.0
+            substats['water_oxygenation'] = self.efficiency * 2.0
         elif self.type == self.InternalType.BRAIN:
-            stats['intelligence'] = self.efficiency * 0.5
-            stats['nerve_speed'] = self.efficiency * 1.0
+            substats['intelligence'] = self.efficiency * 0.5
+            substats['nerve_speed'] = self.efficiency * 1.0
         elif self.type == self.InternalType.STOMACH:
-            stats['digestion'] = self.efficiency * 1.5
+            substats['digestion'] = self.efficiency * 1.5
         elif self.type == self.InternalType.LIVER:
-            stats['toxin_processing'] = self.efficiency * 1.0
+            substats['toxin_processing'] = self.efficiency * 1.0
         elif self.type == self.InternalType.KIDNEY:
-            stats['filtration'] = self.efficiency * 1.2
+            substats['filtration'] = self.efficiency * 1.2
         elif self.type == self.InternalType.GLAND:
-            stats['chemical_production'] = self.efficiency * 1.0
+            substats['chemical_production'] = self.efficiency * 1.0
             
         if self.can_regenerate:
-            stats['regeneration'] = 0.2  # Small regeneration bonus
+            substats['regeneration'] = 0.2  # Small regeneration bonus
             
+        for stat, value in substats.items():
+            if stat in substats:
+                stats[stat] += (value)
+            else:
+                stats[stat] = (value)
         return stats
 
 class weapon(part):
@@ -253,36 +329,52 @@ class weapon(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
+        substats = {}
         # Base weapon stats
-        stats['damage'] = self.damage * self.size
-        stats['attack_speed'] = self.attack_speed
-        stats['attack_reach'] = self.reach
-        stats['attack_cost'] = self.attack_cost
+        substats['damage'] = self.damage * self.size
+        substats['attack_speed'] = self.attack_speed
+        substats['attack_reach'] = self.reach
+        substats['attack_cost'] = self.attack_cost
         
         # Damage types
-        stats['slash_damage'] = self.slash_damage * self.size
-        stats['pierce_damage'] = self.pierce_damage * self.size
-        stats['blunt_damage'] = self.blunt_damage * self.size
+        substats['slash_damage'] = self.slash_damage * self.size
+        substats['pierce_damage'] = self.pierce_damage * self.size
+        substats['blunt_damage'] = self.blunt_damage * self.size
         
         # Special properties
         if self.venomous:
-            stats['venom_potency'] = 0.5  # Base venom potency
+            substats['venom_potency'] = 0.5  # Base venom potency
         if self.retractable:
-            stats['concealment'] = 0.3  # Bonus to hiding the weapon
+            substats['concealment'] = 0.3  # Bonus to hiding the weapon
             
         # Type-specific bonuses
         if self.type == self.WeaponType.CLAW:
-            stats['slash_damage'] += 0.5 * self.damage
+            substats['slash_damage'] += 0.5 * self.damage
         elif self.type == self.WeaponType.FANG:
-            stats['pierce_damage'] += 0.7 * self.damage
+            substats['pierce_damage'] += 0.7 * self.damage
         elif self.type == self.WeaponType.HORN:
-            stats['pierce_damage'] += 0.5 * self.damage
-            stats['blunt_damage'] += 0.3 * self.damage
+            substats['pierce_damage'] += 0.5 * self.damage
+            substats['blunt_damage'] += 0.3 * self.damage
         elif self.type == self.WeaponType.STINGER:
-            stats['pierce_damage'] += 0.3 * self.damage
-            stats['venom_potency'] = stats.get('venom_potency', 0) + 0.5
+            substats['pierce_damage'] += 0.3 * self.damage
+            substats['venom_potency'] = substats.get('venom_potency', 0) + 0.5
             
+        for stat, value in substats.items():
+            if stat in substats:
+                stats[stat] += (value)
+            else:
+                stats[stat] = (value)
         return stats
+    
+    def setup_default_subparts(self):
+        if self.venomous:
+            self.subparts.append(internal(
+                name="venom_gland",
+                type=internal.InternalType.GLAND,
+                efficiency=1.0,
+                size=0.3,
+                energyCost=0.05
+            ))
 
 class appendage(part):
     class AppendageType(Enum):
@@ -307,34 +399,40 @@ class appendage(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
+        substats = {}
         # Base appendage stats
-        stats['coverage'] = self.coverage
-        stats['hardness'] = self.hardness
+        substats['coverage'] = self.coverage
+        substats['hardness'] = self.hardness
         
         # Storage capabilities
         if self.storesE:
-            stats['energy_storage'] = 0.5 * self.size
+            substats['energy_storage'] = 0.5 * self.size
         if self.stores_water:
-            stats['water_storage'] = 0.3 * self.size
+            substats['water_storage'] = 0.3 * self.size
         if self.stores_air:
-            stats['air_storage'] = 0.2 * self.size
+            substats['air_storage'] = 0.2 * self.size
             
         # Special properties
         if self.poison_production:
-            stats['poison_production'] = 0.3
+            substats['poison_production'] = 0.3
         if self.venom_production:
-            stats['venom_production'] = 0.4
+            substats['venom_production'] = 0.4
             
         # Type-specific bonuses
         if self.type == self.AppendageType.SHELL:
-            stats['armor'] = 1.0 * self.hardness * self.coverage
+            substats['armor'] = 1.0 * self.hardness * self.coverage
         elif self.type == self.AppendageType.SPINE:
-            stats['defense'] = 0.5 * self.hardness
+            substats['defense'] = 0.5 * self.hardness
         elif self.type == self.AppendageType.PLATE:
-            stats['armor'] = 0.7 * self.hardness * self.coverage
+            substats['armor'] = 0.7 * self.hardness * self.coverage
         elif self.type == self.AppendageType.TENDRIL:
-            stats['manipulation'] = 0.3 * self.coverage
+            substats['manipulation'] = 0.3 * self.coverage
             
+        for stat, value in substats.items():
+            if stat in substats:
+                stats[stat] += (value)
+            else:
+                stats[stat] = (value)
         return stats
 
 class root(part):
@@ -355,28 +453,34 @@ class root(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
+        substats = {}
         # Root system stats
-        stats['root_depth'] = self.depth
-        stats['root_spread'] = self.spread
-        stats['absorption_rate'] = self.absorption_rate
+        substats['root_depth'] = self.depth
+        substats['root_spread'] = self.spread
+        substats['absorption_rate'] = self.absorption_rate
         
         # Special capabilities
         if self.nitrogen_fixing:
-            stats['nitrogen_fixing'] = 0.5
+            substats['nitrogen_fixing'] = 0.5
         if self.storage_capacity > 0:
-            stats['root_storage'] = self.storage_capacity
+            substats['root_storage'] = self.storage_capacity
         if self.can_propagate:
-            stats['vegetative_propagation'] = 0.3
+            substats['vegetative_propagation'] = 0.3
             
         # Type-specific bonuses
         if self.type == self.RootType.TAP:
-            stats['root_depth'] *= 1.5
-            stats['absorption_rate'] *= 1.2
+            substats['root_depth'] *= 1.5
+            substats['absorption_rate'] *= 1.2
         elif self.type == self.RootType.AERIAL:
-            stats['air_absorption'] = 0.5
+            substats['air_absorption'] = 0.5
         elif self.type == self.RootType.STORAGE:
-            stats['root_storage'] = stats.get('root_storage', 0) + 1.0
+            substats['root_storage'] = substats.get('root_storage', 0) + 1.0
             
+        for stat, value in substats.items():
+            if stat in substats:
+                stats[stat] += (value)
+            else:
+                stats[stat] = (value)
         return stats
 
 class stem(part):
@@ -399,30 +503,54 @@ class stem(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
+        substats = {}
         # Stem structure stats
-        stats['height'] = self.height
-        stats['flexibility'] = self.flexibility
-        stats['structural_strength'] = self.structural_strength
+        substats['height'] = self.height
+        substats['flexibility'] = self.flexibility
+        substats['structural_strength'] = self.structural_strength
         
         # Special capabilities
         if self.photosynthetic:
-            stats['photosynthesis'] = 0.3 * self.height
+            substats['photosynthesis'] = 0.3 * self.height
         if self.storage_capacity > 0:
-            stats['stem_storage'] = self.storage_capacity
+            substats['stem_storage'] = self.storage_capacity
         if self.annual_growth_rings:
-            stats['age_recording'] = 1.0  # Can determine age
+            substats['age_recording'] = 1.0  # Can determine age
             
         # Type-specific bonuses
         if self.type == self.StemType.WOODY:
-            stats['structural_strength'] *= 2.0
-            stats['durability'] = 1.0
+            substats['structural_strength'] *= 2.0
+            substats['durability'] = 1.0
         elif self.type == self.StemType.VINE:
-            stats['climbing'] = 0.7 * self.flexibility
+            substats['climbing'] = 0.7 * self.flexibility
         elif self.type == self.StemType.TUBER:
-            stats['stem_storage'] = stats.get('stem_storage', 0) + 1.5
+            substats['stem_storage'] = substats.get('stem_storage', 0) + 1.5
             
+        for stat, value in substats.items():
+            if stat in substats:
+                stats[stat] += (value)
+            else:
+                stats[stat] = (value)
         return stats
     
+    def setup_default_subparts(self):
+        if self.type == self.StemType.WOODY:
+            self.subparts.append(skin(
+                name="bark",
+                type=skin.Skin.BARK,
+                size=0.9,
+                thickness=0.5,
+                energyCost=0.02
+            ))
+        else:
+            self.subparts.append(skin(
+                name="epidermis",
+                type=skin.Skin.CUTICLE,
+                size=0.9,
+                thickness=0.1,
+                energyCost=0.01
+            ))
+
 class leaf(part):
     class LeafType(Enum):
         NEEDLE = 0 # Conifer needles
@@ -443,26 +571,32 @@ class leaf(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
+        substats = {}
         # Leaf properties
-        stats['surface_area'] = self.surface_area
-        stats['photosynthetic_rate'] = self.photosynthetic_rate
-        stats['water_loss_rate'] = self.water_loss_rate
+        substats['surface_area'] = self.surface_area
+        substats['photosynthetic_rate'] = self.photosynthetic_rate
+        substats['water_loss_rate'] = self.water_loss_rate
         
         # Special properties
         if self.seasonal:
-            stats['seasonal_adaptation'] = 0.5
+            substats['seasonal_adaptation'] = 0.5
         if self.defense_rating > 0:
-            stats['defense'] = self.defense_rating
+            substats['defense'] = self.defense_rating
             
         # Type-specific bonuses
         if self.type == self.LeafType.NEEDLE:
-            stats['water_loss_rate'] *= 0.3  # Reduced water loss
-            stats['cold_resistance'] = 0.5
+            substats['water_loss_rate'] *= 0.3  # Reduced water loss
+            substats['cold_resistance'] = 0.5
         elif self.type == self.LeafType.SUCCULENT:
-            stats['water_storage'] = 0.8 * self.thickness
+            substats['water_storage'] = 0.8 * self.thickness
         elif self.type == self.LeafType.TRAP:
-            stats['carnivorous'] = 0.7  # Carnivorous capability
+            substats['carnivorous'] = 0.7  # Carnivorous capability
             
+        for stat, value in substats.items():
+            if stat in substats:
+                stats[stat] += (value)
+            else:
+                stats[stat] = (value)
         return stats
 
 class flower(part):
@@ -483,22 +617,28 @@ class flower(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
+        substats = {}
         # Flower properties
-        stats['pollination_efficiency'] = 1.0
-        stats['nectar_production'] = self.nectar_production
-        stats['scent_strength'] = self.scent_strength
-        stats['color_variety'] = self.color_variety
-        stats['bloom_duration'] = self.blooming_period
-        stats['seed_production'] = self.seed_production
+        substats['pollination_efficiency'] = 1.0
+        substats['nectar_production'] = self.nectar_production
+        substats['scent_strength'] = self.scent_strength
+        substats['color_variety'] = self.color_variety
+        substats['bloom_duration'] = self.blooming_period
+        substats['seed_production'] = self.seed_production
         
         # Pollination method bonuses
         if self.pollination_method == "wind":
-            stats['wind_pollination'] = 1.0
+            substats['wind_pollination'] = 1.0
         elif self.pollination_method == "insect":
-            stats['insect_attraction'] = 0.8 + (self.scent_strength * 0.2)
+            substats['insect_attraction'] = 0.8 + (self.scent_strength * 0.2)
         elif self.pollination_method == "bird":
-            stats['bird_attraction'] = 0.7 + (self.color_variety * 0.1)
-            
+            substats['bird_attraction'] = 0.7 + (self.color_variety * 0.1)
+        
+        for stat, value in substats.items():
+            if stat in substats:
+                stats[stat] += (value)
+            else:
+                stats[stat] = (value)    
         return stats
 
 class fruit(part):
@@ -519,36 +659,226 @@ class fruit(part):
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
+        substats = {}
         # Fruit properties
-        stats['seed_count'] = self.seed_count
-        stats['nutritional_value'] = self.nutritional_value
-        stats['ripening_speed'] = self.ripening_time
-        stats['toxicity'] = self.toxicity
+        substats['seed_count'] = self.seed_count
+        substats['nutritional_value'] = self.nutritional_value
+        substats['ripening_speed'] = self.ripening_time
+        substats['toxicity'] = self.toxicity
         
         # Dispersal method bonuses
         if self.dispersal_method == "animal":
-            stats['animal_dispersal'] = 0.8 + (self.nutritional_value * 0.2)
+            substats['animal_dispersal'] = 0.8 + (self.nutritional_value * 0.2)
         elif self.dispersal_method == "wind":
-            stats['wind_dispersal'] = 1.0
+            substats['wind_dispersal'] = 1.0
         elif self.dispersal_method == "water":
-            stats['water_dispersal'] = 1.0
+            substats['water_dispersal'] = 1.0
         elif self.dispersal_method == "explosive":
-            stats['explosive_dispersal'] = 1.0
+            substats['explosive_dispersal'] = 1.0
             
         # Type-specific bonuses
         if self.type == self.FruitType.NUT:
-            stats['durability'] = 1.0
-            stats['longevity'] = 1.5
+            substats['durability'] = 1.0
+            substats['longevity'] = 1.5
         elif self.type == self.FruitType.BERRY:
-            stats['animal_attraction'] = 0.7 + (self.nutritional_value * 0.3)
+            substats['animal_attraction'] = 0.7 + (self.nutritional_value * 0.3)
             
+        for stat, value in substats.items():
+            if stat in substats:
+                stats[stat] += (value)
+            else:
+                stats[stat] = (value)
         return stats
+
+class reproductive(part):
+    class ReproductiveType(Enum):
+        GONAD = 0         # General reproductive organ
+        OVARY = 1         # Egg production
+        TESTIS = 2        # Sperm production
+        UTERUS = 3        # Gestation chamber
+        SPORE_SAC = 4     # Fungal/plant spore production
+        FLOWER_BUD = 5    # Plant flower precursor
+        CONE = 6          # Gymnosperm reproductive structure
+        
+    type: ReproductiveType = ReproductiveType.GONAD
+    fertility: float = 1.0         # Reproductive success rate
+    gestation_period: float = 0.0  # Time for development (if applicable)
+    offspring_count: int = 1       # Typical number of offspring
+    mating_frequency: float = 1.0  # How often reproduction can occur
+    resource_cost: float = 0.5     # Energy/nutrient cost per reproduction
+    seasonal: bool = False         # Only functions in certain seasons
+
+    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
+        stats = super().calculateStats(recalc)
+        substats = {}
+        # Base reproductive stats
+        substats['fertility'] = self.fertility
+        substats['offspring_count'] = self.offspring_count
+        substats['reproduction_cost'] = self.resource_cost
+        
+        # Special capabilities
+        if self.gestation_period > 0:
+            substats['gestation_period'] = self.gestation_period
+        if self.seasonal:
+            substats['seasonal_breeding'] = 1.0
+            
+        # Type-specific bonuses
+        if self.type == self.ReproductiveType.OVARY:
+            substats['egg_quality'] = 0.5 * self.fertility
+        elif self.type == self.ReproductiveType.TESTIS:
+            substats['sperm_count'] = 2.0 * self.fertility
+        elif self.type == self.ReproductiveType.UTERUS:
+            substats['gestation_efficiency'] = 1.5
+        elif self.type == self.ReproductiveType.SPORE_SAC:
+            substats['spore_production'] = 10.0 * self.fertility
+        elif self.type == self.ReproductiveType.CONE:
+            substats['wind_pollination'] = 1.0
+            
+        for stat, value in substats.items():
+            if stat in stats:
+                stats[stat] += (value * self.size)
+            else:
+                stats[stat] = (value * self.size)
+        return stats
+
+class egg_sac(part):
+    class EggType(Enum):
+        SOFT = 0          # Amphibian-style eggs
+        HARD_SHELL = 1    # Bird/reptile eggs
+        GELATINOUS = 2    # Fish/insect eggs
+        RESISTANT = 3     # Extremophile eggs (tardigrades)
+        
+    type: EggType = EggType.SOFT
+    egg_count: int = 1
+    protection: float = 0.5    # Physical protection
+    nutrient_store: float = 1.0 # Yolk/resources
+    incubation_time: float = 1.0
+    desiccation_resistance: float = 0.0
+    camouflage: float = 0.0
+
+    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
+        stats = super().calculateStats(recalc)
+        substats = {}
+        # Egg properties
+        substats['egg_count'] = self.egg_count
+        substats['egg_protection'] = self.protection
+        substats['egg_nutrients'] = self.nutrient_store
+        substats['incubation_time'] = self.incubation_time
+        
+        # Special properties
+        if self.desiccation_resistance > 0:
+            substats['desiccation_resistance'] = self.desiccation_resistance
+        if self.camouflage > 0:
+            substats['egg_camouflage'] = self.camouflage
+            
+        # Type-specific bonuses
+        if self.type == self.EggType.HARD_SHELL:
+            substats['egg_protection'] *= 2.0
+            substats['gas_exchange'] = 0.8
+        elif self.type == self.EggType.GELATINOUS:
+            substats['water_retention'] = 1.0
+        elif self.type == self.EggType.RESISTANT:
+            substats['environmental_resistance'] = 2.0
+            
+        for stat, value in substats.items():
+            if stat in stats:
+                stats[stat] += (value * self.size)
+            else:
+                stats[stat] = (value * self.size)
+        return stats
+
+class pollen(part):
+    class PollenType(Enum):
+        LIGHT = 0      # Wind-dispersed
+        STICKY = 1     # Animal-dispersed
+        EXPLOSIVE = 2  # Self-dispersed
+        WATER = 3      # Water-dispersed
+        
+    type: PollenType = PollenType.LIGHT
+    quantity: float = 1.0          # Production amount
+    viability: float = 1.0         # Success rate
+    dispersal_range: float = 1.0   # How far it spreads
+    allergenicity: float = 0.0     # Irritation to others
+    nutrient_content: float = 0.0  # For pollinator attraction
+
+    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
+        stats = super().calculateStats(recalc)
+        substats = {}
+        # Pollen properties
+        substats['pollen_quantity'] = self.quantity
+        substats['pollen_viability'] = self.viability
+        substats['dispersal_range'] = self.dispersal_range
+        
+        # Special properties
+        if self.allergenicity > 0:
+            substats['allergenicity'] = self.allergenicity
+        if self.nutrient_content > 0:
+            substats['pollinator_reward'] = self.nutrient_content
+            
+        # Type-specific bonuses
+        if self.type == self.PollenType.LIGHT:
+            substats['wind_dispersal'] = 1.5 * self.dispersal_range
+        elif self.type == self.PollenType.STICKY:
+            substats['animal_attachment'] = 1.2
+        elif self.type == self.PollenType.EXPLOSIVE:
+            substats['dispersal_force'] = 1.0
+        elif self.type == self.PollenType.WATER:
+            substats['water_dispersal'] = 1.0
+            
+        for stat, value in substats.items():
+            if stat in stats:
+                stats[stat] += (value * self.size)
+            else:
+                stats[stat] = (value * self.size)
+        return stats
+
+class seed:
+    class SeedType(Enum):
+        NAKED = 0       # Gymnosperm
+        ENCLOSED = 1    # Angiosperm
+        SPORE = 2       # Fungal/fern
+        TUBER = 3       # Underground storage
+        BULBIL = 4      # Aerial propagation
+        
+    type: SeedType = SeedType.ENCLOSED
+    viability: float = 1.0          # Chance to germinate
+    dormancy: float = 0.0           # Can remain dormant
+    dispersal: float = 1.0          # Spread effectiveness
+    nutrient_store: float = 1.0     # Endosperm/resources
+    defense: float = 0.0            # Anti-predation
+    subparts: list['part'] = field(default_factory=list)
+
+
+    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
+        substats = {}
+        # Seed properties
+        substats['seed_viability'] = self.viability
+        substats['dispersal_efficiency'] = self.dispersal
+        substats['seed_nutrients'] = self.nutrient_store
+        
+        # Special properties
+        if self.dormancy > 0:
+            substats['dormancy_period'] = self.dormancy
+        if self.defense > 0:
+            substats['seed_defense'] = self.defense
+            
+        # Type-specific bonuses
+        if self.type == self.SeedType.NAKED:
+            substats['germination_speed'] = 1.2
+        elif self.type == self.SeedType.SPORE:
+            substats['quantity'] = 10.0  # Spores are numerous
+        elif self.type == self.SeedType.TUBER:
+            substats['vegetative_growth'] = 1.5
+        elif self.type == self.SeedType.BULBIL:
+            substats['aerial_propagation'] = 1.0
+            
+        return substats
 
 class Species:
     def __init__(self):
         self.name: str = "" # generate from something stupid
         self.color: tuple = (0,0,0) # generate from something stupid as well
-        self.symbol: str = '' # random ascii character to distinguish similar color species
+        self.symbol: str = random.choice(RANDOMCHAR) # random ascii character to distinguish similar color species
 
         #energy
         self.maxE: float = 10.0 # maximum energy, organisms will average a normal curve of σ = 5% for plants at same age, but 500% overall, 30% for animals at maturity
@@ -589,6 +919,8 @@ class Species:
             PARTHENOGENESIS = 7
         self.reproMethod: ReproMethod = ReproMethod.EXPANSIVE_GROWTH
         self.flowering: bool = False # another state to track for reproduction cause why not.
+        self.mutationRate: float = 0.001
+        self.speciesParents: list['Species'] = []
         
         #movement
         self.canMove: bool = False # plants will almost always be false. but this is a fictional world.
@@ -612,10 +944,32 @@ class Species:
         self.natArmor: float = 0 
         self.natAttack: float = 0
 
+        #behavior
+        self.aggression: float = 0.0
+        self.curious: float = 0.0
+        self.social: float = 0.0
+        self.adapative: float = 0.0 # how much behavior changes while alive. nothing related to physical attributes.
+
         self.parts: list[part] = [] # part factory.
 
+
         def __post_init__(self):
+            self.statcache = {}
+            for key, value in self.dir():
+                self.statcache[key] = value
+            for part in self.parts:
+                for key, value in part.calculatestats(True):
+                    if key in self.statcache:
+                        self.statcache[key] += value
+                    else:
+                        print(f'improperly handled default stat: {key}')
+                        self.statcache[key] = value
+
+        def _generate_name(self): 
+            self.name = str(random.sample(ALPHABET, 20))
             
+            
+
         
 
 
