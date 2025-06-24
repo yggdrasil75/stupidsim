@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import copy
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
@@ -35,6 +36,46 @@ class part(ABC): # each part is baked into the species stats, separted here to a
     @abstractmethod
     def setup_default_subparts(self):
         pass
+
+    def mutate(self):
+        for attr_name in self.__dataclass_fields__:
+            if attr_name in ['name', 'subparts', 'statCache', 'mutationRate']:
+                continue
+
+            if random.random() < self.mutationRate:
+                current_val = getattr(self, attr_name)
+
+                if isinstance(current_val, bool): #bools probably should be far less often switched.
+                    if random.random() < self.mutationRate:
+                        setattr(self, attr_name, not current_val)
+                elif isinstance(current_val, (int, float)):
+                    new_val = current_val * random.uniform(1-self.mutationRate, 1+self.mutationRate)
+                    setattr(self, attr_name, new_val)
+                elif isinstance(current_val, Enum):
+                    enum_class = type(current_val)
+                    choices = [e for e in enum_class]
+                    if choices:
+                        setattr(self, attr_name, random.choice(choices))
+        
+        for subpart in self.subparts:
+            if random.random() < self.mutationRate and random.random() < self.mutationRate:
+                self.subparts.remove(subpart)
+            subpart.mutate()
+        if random.random() < self.mutationRate and random.random() < self.mutationRate:
+            self.subparts.append(self.randomize())
+        self.statCache = None
+    
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'part':
+        """Create a randomized part based on organism type."""
+        part_type = random.choice([
+            skin, limb, sensory, internal, weapon, appendage,
+            root, stem, leaf, flower, fruit, reproductive,
+            egg_sac, pollen
+        ])
+        
+        # Call the specific part's randomize method
+        return part_type.randomize(name, organism_type)
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         if self.statCache is not None and not recalc:
@@ -96,6 +137,11 @@ class skin(part):
     water_retention: float = 0.0  # Important for plants
     gas_exchange: float = 1.0 # For stomata-like structures
 
+    def mutate(self):
+        super().mutate()
+        if random.random() < self.mutationRate:
+            self.pattern = random.choice(["solid", "stripes", "spots", "marbled", "mottled"])
+
     def setup_default_subparts(self):
         pass
 
@@ -122,6 +168,40 @@ class skin(part):
                 stats[stat] = (value * self.thickness)
         return stats
 
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'skin':
+        skin_type = random.choice(list(skin.Skin))
+        
+        if organism_type == "plant":
+            thickness = random.uniform(0.05, 0.3)
+            can_photosynthesize = True
+            water_retention = random.uniform(0.5, 2.0)
+            camouflage = random.uniform(0.0, 0.3)
+        else:
+            thickness = random.uniform(0.1, 1.0)
+            can_photosynthesize = random.random() < 0.1
+            water_retention = random.uniform(0.0, 0.5)
+            camouflage = random.uniform(0.0, 0.8)
+            
+        return cls(
+            name=name or "skin",
+            type=skin_type,
+            thickness=thickness,
+            max_thickness=thickness * random.uniform(1.2, 3.0),
+            pattern=random.choice(["solid", "stripes", "spots", "marbled", "mottled"]),
+            camouflage_effectiveness=camouflage,
+            color_change_speed=random.uniform(0.0, 1.0),
+            insulation_factor=random.uniform(0.2, 1.5),
+            cooling_factor=random.uniform(0.2, 1.0),
+            can_photosynthesize=can_photosynthesize,
+            luminescent=random.random() < 0.05,
+            luminense=random.uniform(0.0, 1.0) if random.random() < 0.05 else 0.0,
+            water_retention=water_retention,
+            gas_exchange=random.uniform(0.5, 1.5),
+            energyCost=random.uniform(0.05, 0.2),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
+    
 @dataclass
 class limb(part):
     class LimbType(Enum):
@@ -208,6 +288,33 @@ class limb(part):
                 slash_damage=0.5
             ))
 
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'limb':
+        limb_type = random.choice(list(limb.LimbType))
+        
+        if not name:
+            name = f"{limb_type.name.lower()}_{random.randint(0, 1000)}"
+            
+        new_limb = cls(
+            name=name,
+            type=limb_type,
+            size=random.uniform(0.2, 1.5),
+            strength=random.uniform(0.5, 3.0),
+            dexterity=random.uniform(0.1, 2.0),
+            reach=random.uniform(0.3, 3.0),
+            prehensile=random.random() < 0.3,
+            movement_speed=random.uniform(0.5, 3.0),
+            movement_cost=random.uniform(0.05, 0.3),
+            can_climb=random.random() < 0.4,
+            can_swim=random.random() < 0.4,
+            can_dig=random.random() < 0.3,
+            energyCost=random.uniform(0.1, 0.3),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
+        
+        new_limb.setup_default_subparts()
+        return new_limb
+
 @dataclass
 class sensory(part):
     class SensoryType(Enum):
@@ -261,6 +368,39 @@ class sensory(part):
             else:
                 stats[stat] = (value * self.sensitivity)
         return stats
+    
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'sensory':
+        sensory_type = random.choice(list(sensory.SensoryType))
+        if not name:
+            name = f"{sensory_type.name.lower()}_{random.randint(0, 1000)}"
+            
+        if sensory_type == sensory.SensoryType.EYE:
+            can_see_colors = random.random() < 0.8
+            night_vision = random.random() < 0.4
+            thermal_vision = random.random() < 0.2
+        else:
+            can_see_colors = False
+            night_vision = False
+            thermal_vision = False
+            
+        return cls(
+            name=name,
+            type=sensory_type,
+            range=random.uniform(0.5, 10.0),
+            sensitivity=random.uniform(0.5, 2.0),
+            precision=random.uniform(0.5, 1.5),
+            night_vision=night_vision,
+            thermal_vision=thermal_vision,
+            can_see_colors=can_see_colors,
+            underwater_effective=random.random() < 0.5,
+            air_effective=True,
+            angle=random.uniform(30, 180),
+            active_cost=random.uniform(0.001, 0.01),
+            passive_cost=random.uniform(0.0001, 0.001),
+            energyCost=random.uniform(0.01, 0.05),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
 
 @dataclass
 class internal(part):
@@ -318,6 +458,30 @@ class internal(part):
             else:
                 stats[stat] = (value)
         return stats
+
+    
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'internal':
+        internal_type = random.choice(list(internal.InternalType))
+        
+        if not name:
+            name = f"{internal_type.name.lower()}_{random.randint(0, 1000)}"
+        if internal_type in [internal.InternalType.HEART, internal.InternalType.LUNG, internal.InternalType.GILL]:
+            efficiency = random.uniform(0.8, 1.5)
+            capacity = random.uniform(0.8, 2.0)
+        else:
+            efficiency = random.uniform(0.5, 1.5)
+            capacity = random.uniform(0.5, 2.0)
+            
+        return cls(
+            name=name,
+            type=internal_type,
+            efficiency=efficiency,
+            capacity=capacity,
+            can_regenerate=random.random() < 0.2,
+            energyCost=random.uniform(0.05, 0.2),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
 
 @dataclass
 class weapon(part):
@@ -390,6 +554,30 @@ class weapon(part):
                 size=0.3,
                 energyCost=0.05
             ))
+            
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'weapon':
+        weapon_type = random.choice(list(weapon.WeaponType))
+        if not name:
+            name = f"{weapon_type.name.lower()}_{random.randint(0, 1000)}"
+        
+        new_weapon = cls(
+            name=name,
+            type=weapon_type,
+            damage=random.uniform(0.5, 3.0),
+            attack_speed=random.uniform(0.5, 2.0),
+            reach=random.uniform(0.1, 1.5),
+            slash_damage=random.uniform(0.0, 2.0),
+            pierce_damage=random.uniform(0.0, 2.0),
+            blunt_damage=random.uniform(0.0, 1.0),
+            venomous=random.random() < 0.3,
+            retractable=random.random() < 0.2,
+            attack_cost=random.uniform(0.05, 0.3),
+            energyCost=random.uniform(0.05, 0.2),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
+        new_weapon.setup_default_subparts()
+        return new_weapon
 
 @dataclass
 class appendage(part):
@@ -402,7 +590,7 @@ class appendage(part):
         POD = 5
         SAC = 6
         TENDRIL = 7
-        THRON = 8
+        THORN = 8
     
     type: AppendageType = AppendageType.SHELL
     coverage: float = 0.5  # how much of the body it covers (0-1)
@@ -453,6 +641,25 @@ class appendage(part):
             else:
                 stats[stat] = (value)
         return stats
+    
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'appendage':
+        appendage_type = random.choice(list(appendage.AppendageType))
+        if not name:
+            name = f"{appendage_type.name.lower()}_{random.randint(0, 1000)}"
+        return cls(
+            name=name,
+            type=appendage_type,
+            coverage=random.uniform(0.1, 0.8),
+            hardness=random.uniform(0.5, 3.0),
+            poison_production=random.random() < 0.2,
+            venom_production=random.random() < 0.05,
+            storesE=random.random() < 0.3,
+            stores_water=random.random() < 0.4,
+            stores_air=random.random() < 0.1,
+            energyCost=random.uniform(0.05, 0.3),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
 
 @dataclass
 class root(part):
@@ -505,6 +712,24 @@ class root(part):
             else:
                 stats[stat] = (value)
         return stats
+    
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "plant") -> 'root':
+        root_type = random.choice(list(root.RootType))
+        
+        return cls(
+            name=name or "root_system",
+            type=root_type,
+            depth=random.uniform(0.5, 5.0),
+            spread=random.uniform(0.5, 10.0),
+            absorption_rate=random.uniform(0.5, 2.0),
+            nitrogen_fixing=random.random() < 0.3,
+            storage_capacity=random.uniform(0.0, 3.0),
+            can_propagate=random.random() < 0.2,
+            energyCost=random.uniform(0.1, 0.5),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
+
 
 @dataclass
 class stem(part):
@@ -574,6 +799,28 @@ class stem(part):
                 thickness=0.1,
                 energyCost=0.01
             ))
+    
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "plant") -> 'stem':
+        stem_type = random.choice(list(stem.StemType))
+        
+        new_stem = cls(
+            name=name or "stem",
+            type=stem_type,
+            height=random.uniform(0.1, 20.0),
+            flexibility=random.uniform(0.1, 1.0),
+            structural_strength=random.uniform(0.5, 3.0),
+            storage_capacity=random.uniform(0.0, 2.0),
+            photosynthetic=random.random() < 0.8,
+            annual_growth_rings=random.random() < 0.5,
+            energyCost=random.uniform(0.1, 0.5),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
+        
+        # Let the stem setup its own subparts
+        new_stem.setup_default_subparts()
+        return new_stem
+
 
 @dataclass
 class leaf(part):
@@ -626,6 +873,23 @@ class leaf(part):
             else:
                 stats[stat] = (value)
         return stats
+    
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "plant") -> 'leaf':
+        leaf_type = random.choice(list(leaf.LeafType))
+        
+        return cls(
+            name=name or "leaf",
+            type=leaf_type,
+            surface_area=random.uniform(0.5, 5.0),
+            thickness=random.uniform(0.01, 0.5),
+            photosynthetic_rate=random.uniform(0.5, 2.0),
+            water_loss_rate=random.uniform(0.1, 1.0),
+            seasonal=random.random() < 0.5,
+            defense_rating=random.uniform(0.0, 1.0),
+            energyCost=random.uniform(0.05, 0.2),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
 
 @dataclass
 class flower(part):
@@ -644,6 +908,11 @@ class flower(part):
     blooming_period: float = 1.0 # How long flowers last
     seed_production: float = 1.0 # Seed yield per flower
 
+    def mutate(self):
+        super().mutate()
+        if random.random() < self.mutationRate:
+            self.pollination_method = random.choice(["wind", "insect", "bird", "bat", "water"])
+    
     def setup_default_subparts(self):
         pass
 
@@ -672,6 +941,25 @@ class flower(part):
             else:
                 stats[stat] = (value)    
         return stats
+    
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "plant") -> 'flower':
+        flower_type = random.choice(list(flower.FlowerType))
+        pollination_method = random.choice(["wind", "insect", "bird", "bat", "water"])
+        
+        return cls(
+            name=name or "flower",
+            type=flower_type,
+            pollination_method=pollination_method,
+            nectar_production=random.uniform(0.0, 1.0),
+            scent_strength=random.uniform(0.0, 1.0),
+            color_variety=random.randint(1, 3),
+            blooming_period=random.uniform(0.5, 3.0),
+            seed_production=random.uniform(0.5, 5.0),
+            energyCost=random.uniform(0.1, 0.5),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
+
 
 @dataclass
 class fruit(part):
@@ -725,6 +1013,22 @@ class fruit(part):
             else:
                 stats[stat] = (value)
         return stats
+    
+    @classmethod
+    def randomize(cls, name: str = "", organism_type: str = "plant") -> 'fruit':
+        fruit_type = random.choice(list(fruit.FruitType))
+        
+        return cls(
+            name=name or "fruit",
+            type=fruit_type,
+            seed_count=random.randint(1, 100),
+            dispersal_method=random.choice(["animal", "wind", "water", "explosive"]),
+            nutritional_value=random.uniform(0.1, 2.0),
+            ripening_time=random.uniform(0.5, 3.0),
+            toxicity=random.uniform(0.0, 1.0),
+            energyCost=random.uniform(0.1, 0.5),
+            mutationRate=random.uniform(0.0001, 0.001)
+        )
 
 @dataclass
 class reproductive(part):
@@ -981,7 +1285,7 @@ class Species:
     reproMethod: ReproMethod = ReproMethod.EXPANSIVE_GROWTH
     flowering: bool = False # another state to track for reproduction cause why not.
     mutationRate: float = 0.001
-    speciesParents: list['Species'] = []
+    speciesParents: list['Species'] = field(default_factory=list)
     
     #movement
     canMove: bool = False # plants will almost always be false. but this is a fictional world.
@@ -991,8 +1295,8 @@ class Species:
     canFly: bool = False # requires some vertical lift option.
 
     #eating
-    preferredFood: dict[str, float] = {} # list of types of parts that this species prefers. float shows how much preference with 1.0 being always goes for, and 0.01 being barely ever
-    inedibleFood: dict[str, float]  = {} # list of parts that are inedible, greater than 1.0 means deadly, 0.01 means minor issues. item can be in both preferred and inedible if both are less than 0.5, though should be rare (think spicy food)
+    preferredFood: dict[str, float] = field(default_factory=dict)
+    inedibleFood: dict[str, float]  = field(default_factory=dict)
     
     #survival
     tempSensCold: float = 85.0 # minimum temperature for reasonable health. in fahrenheit
@@ -1011,21 +1315,386 @@ class Species:
     social: float = 0.0
     adapative: float = 0.0 # how much behavior changes while alive. nothing related to physical attributes.
 
-    parts: list[part] = [] # part factory.
-    statcache: Optional[dict] = {}
+    parts: list[part] = field(default_factory=list)
+    statcache: Optional[dict] = field(default_factory=dict)
 
     def _generate_name(self): 
         return "".join(random.sample(ALPHABET, 10))
 
     def __post_init__(self):
+        self.genStats(True)
+
+    def genStats(self, regen=False):
+        if self.statcache is not None and len(self.statcache) > 1 and not regen:
+            return self.statcache
         self.statcache = {}
         for key, value in self.__dict__.items():
             if isinstance(value, (int, float, bool)):
                 self.statcache[key] = float(value)
         for part in self.parts:
-            for key, value in part.calculateStats(True).items():
+            part_stats = part.calculateStats(False)
+            for key, value in part_stats.items():
                 self.statcache[key] = self.statcache.get(key, 0.0) + value
-        return self
+        return self.statcache
+
+    def mutate(self) -> 'Species':
+        offspring = copy.deepcopy(self)
+        offspring.speciesParents.append(self)
+        offspring.name = self._generate_name()
+        offspring.color = (
+            max(0, min(255, int(self.color[0] + random.randint(-10, 10)))),
+            max(0, min(255, int(self.color[1] + random.randint(-10, 10)))),
+            max(0, min(255, int(self.color[2] + random.randint(-10, 10))))
+        )
+        offspring.mutationRate *= random.uniform(0.8, 1.1) # 0.8-1.1 to encourage settling over time
+
+        for attr_name in offspring.__dataclass_fields__:
+            if attr_name in ['name', 'color', 'symbol', 'parts', 'statcache', 'speciesParents', 'preferredFood', 'inedibleFood']:
+                continue
+
+            if random.random() < offspring.mutationRate:
+                current_val = getattr(offspring, attr_name)
+
+                if isinstance(current_val, bool):
+                    setattr(offspring, attr_name, not current_val)
+                elif isinstance(current_val, (int, float)):
+                    new_val = current_val * random.uniform(0.95, 1.05)
+                    setattr(offspring, attr_name, new_val)
+                elif isinstance(current_val, Enum):
+                    enum_class = type(current_val)
+                    choices = [e for e in enum_class if e != current_val]
+                    if choices:
+                        setattr(offspring, attr_name, random.choice(choices))
+
+        for part_item in offspring.parts:
+            part_item.mutate()
+
+        offspring.genStats(True)
+
+        return offspring
+    
+    def generate_random_species(existing_species: Optional[list['Species']] = None,  # type: ignore
+                           organism_type: Optional[str] = None) -> 'Species':
+        if organism_type is None:
+            organism_type = random.choice(['plant', 'animal'])
+        color = (random.randint(0, 255), (random.randint(0, 255)), (random.randint(0, 255)))
+        symbol = random.choice(RANDOMCHAR)
+        name = "".join(random.sample(ALPHABET, random.randint(5, 12)))
+        new_species = Species(
+            name=name,
+            color=color,
+            symbol=symbol,
+            mutationRate=random.uniform(0.0005, 0.002)
+        )
+        if organism_type == 'plant':
+            new_species = Species._configure_plant(new_species)
+        else:  # animal
+            new_species = Species._configure_animal(new_species)
+        
+        if existing_species:
+            new_species = Species._configure_consumer(new_species, existing_species)
+        new_species.parts = Species._generate_random_parts(new_species, organism_type)
+        
+        # Calculate final stats
+        new_species.genStats(True)
+        
+        return new_species
+
+    def _configure_plant(species: 'Species') -> 'Species':
+        species.Rooted = True
+        species.canMove = False
+        species.moveSpeed = 0.0
+        species.moveCost = 0.0
+        species.sleepHabits = Species.habits.NONE
+        species.sleepRatio = 0.0
+        species.dormancy = random.random() < 0.7  # Most plants can go dormant
+        species.dormanThresh = random.uniform(0.1, 0.5)
+        species.reproMethod = random.choice([
+            Species.ReproMethod.EXPANSIVE_GROWTH,
+            Species.ReproMethod.BROADCAST,
+            Species.ReproMethod.SPORES,
+            Species.ReproMethod.BUDDING
+        ])
+        species.flowering = random.random() < 0.5
+        species.tempProduction = random.uniform(0, 5)  # Plants generate little heat
+        
+        # Plant life cycle parameters
+        species.maturity = random.randint(1000, 10000)  # 20-200 days
+        species.reproFrequency = random.randint(200, 2000)  # 4-40 days
+        species.seedAge = random.randint(50, 500)  # 1-10 days
+        species.seedMaturity = random.randint(20, 200)  # 0.5-4 days
+        species.pMS = random.randint(5000, 50000)  # 100-1000 days
+        
+        return species
+
+    def _configure_animal(species: 'Species') -> 'Species':
+        species.Rooted = False
+        species.canMove = True
+        species.moveSpeed = random.uniform(0.1, 5.0)
+        species.moveCost = random.uniform(0.01, 0.5)
+        species.sleepHabits = random.choice(list(Species.habits))
+        species.sleepRatio = random.uniform(0.2, 0.8)
+        species.dormancy = random.random() < 0.3  # Some animals can hibernate
+        species.dormanThresh = random.uniform(0.05, 0.3) if species.dormancy else 0.3
+        species.reproMethod = random.choice([
+            Species.ReproMethod.OVIPARITY,
+            Species.ReproMethod.VIVIPARITY,
+            Species.ReproMethod.OVOVIPARITY,
+            Species.ReproMethod.PARTHENOGENESIS
+        ])
+        species.flowering = False
+        species.tempProduction = random.uniform(10, 30)  # Animals generate more heat
+        
+        # Animal life cycle parameters
+        species.maturity = random.randint(500, 5000)  # 10-100 days
+        species.reproFrequency = random.randint(100, 1000)  # 2-20 days
+        species.seedAge = random.randint(20, 200)  # 0.5-4 days
+        species.seedMaturity = random.randint(10, 100)  # 0.2-2 days
+        species.pMS = random.randint(2500, 25000)  # 50-500 days
+        
+        # Behavioral traits
+        species.aggression = random.uniform(0.0, 1.0)
+        species.curious = random.uniform(0.0, 1.0)
+        species.social = random.uniform(0.0, 1.0)
+        species.adapative = random.uniform(0.0, 1.0)
+        
+        return species
+
+    def _configure_consumer(species: 'Species', existing_species: list['Species']) -> 'Species':
+        """Configure species to consume other species"""
+        # Clear any existing food preferences
+        species.preferredFood = {}
+        species.inedibleFood = {}
+        
+        # Determine how many species to consume (1 to all)
+        num_to_consume = random.randint(1, len(existing_species))
+        consumed_species = random.sample(existing_species, num_to_consume)
+        
+        for prey in consumed_species:
+            # Randomly decide if this is preferred or inedible (with small chance)
+            if random.random() < 0.9:  # 90% chance to be preferred
+                # Value represents preference strength (0.1-1.0)
+                species.preferredFood[prey.name] = random.uniform(0.1, 1.0)
+            else:
+                # Value represents inedibility (0.0 would mean completely inedible)
+                species.inedibleFood[prey.name] = random.uniform(0.0, 0.5)
+        
+        return species
+
+    def _generate_random_parts(species: 'Species', organism_type: str) -> list[part]:
+        """Generate random parts based on organism type"""
+        parts = []
+        if organism_type == 'plant':
+            # All plants have some kind of root system
+            root_types = list(root.RootType)
+            parts.append(root.randomize())
+            
+            # Most plants have a stem
+            if random.random() < 0.9:
+                stem_types = list(stem.StemType)
+                parts.append(stem.randomize())
+            
+            # Add leaves if photosynthetic
+            if any(p.photosynthetic for p in parts) or random.random() < 0.7:
+                leaf_types = list(leaf.LeafType)
+                leaf_count = random.randint(1, 3)  # Multiple leaf types possible
+                for i in range(leaf_count):
+                    parts.append(leaf(
+                        name=f"leaf_{i}",
+                        type=random.choice(leaf_types),
+                        surface_area=random.uniform(0.5, 5.0),
+                        thickness=random.uniform(0.01, 0.5),
+                        photosynthetic_rate=random.uniform(0.5, 2.0),
+                        water_loss_rate=random.uniform(0.1, 1.0),
+                        seasonal=random.random() < 0.5,
+                        defense_rating=random.uniform(0.0, 1.0)
+                    ))
+            
+            # Add reproductive structures
+            if species.flowering:
+                parts.append(flower(
+                    name="flower",
+                    type=random.choice(list(flower.FlowerType)),
+                    pollination_method=random.choice(["wind", "insect", "bird"]),
+                    nectar_production=random.uniform(0.0, 1.0),
+                    scent_strength=random.uniform(0.0, 1.0),
+                    color_variety=random.randint(1, 3),
+                    blooming_period=random.uniform(0.5, 3.0),
+                    seed_production=random.uniform(0.5, 5.0)
+                ))
+                
+                parts.append(fruit(
+                    name="fruit",
+                    type=random.choice(list(fruit.FruitType)),
+                    seed_count=random.randint(1, 100),
+                    dispersal_method=random.choice(["animal", "wind", "water", "explosive"]),
+                    nutritional_value=random.uniform(0.1, 2.0),
+                    ripening_time=random.uniform(0.5, 3.0),
+                    toxicity=random.uniform(0.0, 1.0)
+                ))
+            else:
+                parts.append(reproductive(
+                    name="reproductive_structure",
+                    type=random.choice([
+                        reproductive.ReproductiveType.SPORE_SAC,
+                        reproductive.ReproductiveType.CONE,
+                        reproductive.ReproductiveType.FLOWER_BUD
+                    ]),
+                    fertility=random.uniform(0.5, 2.0),
+                    offspring_count=random.randint(10, 1000),
+                    mating_frequency=random.uniform(0.5, 3.0),
+                    resource_cost=random.uniform(0.1, 1.0),
+                    seasonal=random.random() < 0.7
+                ))
+                
+                parts.append(pollen(
+                    name="pollen",
+                    type=random.choice(list(pollen.PollenType)),
+                    quantity=random.uniform(0.5, 5.0),
+                    viability=random.uniform(0.5, 1.0),
+                    dispersal_range=random.uniform(0.5, 5.0),
+                    allergenicity=random.uniform(0.0, 1.0),
+                    nutrient_content=random.uniform(0.0, 0.5)
+                ))
+            
+            # Add defensive structures
+            if random.random() < 0.5:
+                parts.append(appendage(
+                    name="defensive_structure",
+                    type=random.choice([
+                        appendage.AppendageType.SHELL,
+                        appendage.AppendageType.SPINE,
+                        appendage.AppendageType.PLATE,
+                        appendage.AppendageType.THORN
+                    ]),
+                    coverage=random.uniform(0.1, 0.8),
+                    hardness=random.uniform(0.5, 3.0),
+                    poison_production=random.random() < 0.2,
+                    venom_production=random.random() < 0.05,
+                    storesE=random.random() < 0.3,
+                    stores_water=random.random() < 0.4,
+                    stores_air=random.random() < 0.1
+                ))
+        
+        else:  # animal
+            # All animals have skin
+            skin_types = list(skin.Skin)
+            parts.append(skin(
+                name="skin",
+                type=random.choice(skin_types),
+                thickness=random.uniform(0.1, 1.0),
+                max_thickness=random.uniform(0.2, 2.0),
+                pattern=random.choice(["solid", "stripes", "spots", "marbled"]),
+                camouflage_effectiveness=random.uniform(0.0, 0.8),
+                insulation_factor=random.uniform(0.2, 1.5),
+                cooling_factor=random.uniform(0.2, 1.0),
+                can_photosynthesize=random.random() < 0.1,  # Rare
+                luminescent=random.random() < 0.05,
+                luminense=random.uniform(0.0, 1.0) if random.random() < 0.05 else 0.0
+            ))
+            
+            # Add limbs
+            limb_types = list(limb.LimbType)
+            limb_count = random.randint(0, 10)  # Some animals might have no limbs (worms)
+            for i in range(limb_count):
+                limb_type = random.choice(limb_types)
+                parts.append(limb(
+                    name=f"{limb_type.name.lower()}_{i}",
+                    type=limb_type,
+                    size=random.uniform(0.2, 1.5),
+                    strength=random.uniform(0.5, 3.0),
+                    dexterity=random.uniform(0.1, 2.0),
+                    reach=random.uniform(0.3, 3.0),
+                    prehensile=random.random() < 0.3,
+                    movement_speed=random.uniform(0.5, 3.0),
+                    movement_cost=random.uniform(0.05, 0.3),
+                    can_climb=random.random() < 0.4,
+                    can_swim=random.random() < 0.4,
+                    can_dig=random.random() < 0.3
+                ))
+            
+            # Add sensory organs
+            sensory_types = list(sensory.SensoryType)
+            sensory_count = random.randint(1, 4)  # Multiple sensory types
+            for i in range(sensory_count):
+                sensory_type = random.choice(sensory_types)
+                parts.append(sensory(
+                    name=f"{sensory_type.name.lower()}_{i}",
+                    type=sensory_type,
+                    range=random.uniform(0.5, 10.0),
+                    sensitivity=random.uniform(0.5, 2.0),
+                    precision=random.uniform(0.5, 1.5),
+                    night_vision=random.random() < 0.4,
+                    thermal_vision=random.random() < 0.2,
+                    can_see_colors=random.random() < 0.8,
+                    underwater_effective=random.random() < 0.5,
+                    air_effective=True,  # Most work in air
+                    angle=random.uniform(30, 180)
+                ))
+            
+            # Add internal organs
+            internal_types = list(internal.InternalType)
+            for internal_type in internal_types:
+                # Not all animals have all organ types
+                if random.random() < 0.7:  # 70% chance to have each organ type
+                    parts.append(internal(
+                        name=f"{internal_type.name.lower()}",
+                        type=internal_type,
+                        efficiency=random.uniform(0.5, 1.5),
+                        capacity=random.uniform(0.5, 2.0),
+                        can_regenerate=random.random() < 0.2
+                    ))
+            
+            # Add weapons (if any)
+            if random.random() < 0.7:  # 70% chance to have some weapon
+                weapon_types = list(weapon.WeaponType)
+                weapon_count = random.randint(1, 3)
+                for i in range(weapon_count):
+                    weapon_type = random.choice(weapon_types)
+                    parts.append(weapon(
+                        name=f"{weapon_type.name.lower()}_{i}",
+                        type=weapon_type,
+                        damage=random.uniform(0.5, 3.0),
+                        attack_speed=random.uniform(0.5, 2.0),
+                        reach=random.uniform(0.1, 1.5),
+                        slash_damage=random.uniform(0.0, 2.0),
+                        pierce_damage=random.uniform(0.0, 2.0),
+                        blunt_damage=random.uniform(0.0, 1.0),
+                        venomous=random.random() < 0.3,
+                        retractable=random.random() < 0.2
+                    ))
+            
+            # Add reproductive organs
+            parts.append(reproductive(
+                name="reproductive_organ",
+                type=random.choice([
+                    reproductive.ReproductiveType.GONAD,
+                    reproductive.ReproductiveType.OVARY,
+                    reproductive.ReproductiveType.TESTIS,
+                    reproductive.ReproductiveType.UTERUS
+                ]),
+                fertility=random.uniform(0.5, 1.5),
+                gestation_period=random.uniform(0.0, 30.0),
+                offspring_count=random.randint(1, 20),
+                mating_frequency=random.uniform(0.5, 3.0),
+                resource_cost=random.uniform(0.1, 1.0),
+                seasonal=random.random() < 0.4
+            ))
+            
+            # Add egg sac if oviparous
+            if species.reproMethod == Species.ReproMethod.OVIPARITY:
+                parts.append(egg_sac(
+                    name="egg_sac",
+                    type=random.choice(list(egg_sac.EggType)),
+                    egg_count=random.randint(1, 100),
+                    protection=random.uniform(0.5, 2.0),
+                    nutrient_store=random.uniform(0.5, 3.0),
+                    incubation_time=random.uniform(1.0, 30.0),
+                    desiccation_resistance=random.uniform(0.0, 1.0),
+                    camouflage=random.uniform(0.0, 0.8)
+                ))
+        
+        return parts
 
 TREE = Species(
     name="Tree",
@@ -1084,19 +1753,78 @@ TREE = Species(
             ])]   
 ).__post_init__()
 
-
 BUSH = Species(
     name="bush",
     Rooted=True,
     canMove=False,
-    reproMethod=Species.ReproMethod.BROADCAST
-    tempSensCold=50.0
-    tempSensHot=130.0
-
+    reproMethod=Species.ReproMethod.BROADCAST,
+    tempSensCold=50.0,
+    tempSensHot=130.0,
+    parts=[
+        stem(name="stem_0", type=stem.StemType.HERBACEOUS, vital=False, size=1.0, height=1.5,
+             flexibility=0.8, structural_strength=0.7, minTemp=40.0, maxTemp=140.0, subparts=[
+                skin(name="waxy_cuticle", type=skin.Skin.CUTICLE, size=0.9, thickness=0.2, 
+                     water_retention=1.5, cooling_factor=1.2, energyCost=0.01),
+                leaf(name="succulent_leaf_0", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_1", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_2", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_3", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_4", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_5", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                flower(name="bright_flower", type=flower.FlowerType.SIMPLE, size=0.1, 
+                       pollination_method="insect", nectar_production=0.5, scent_strength=0.3, 
+                       color_variety=3, seed_production=5)
+             ]),
+        stem(name="stem_1", type=stem.StemType.HERBACEOUS, vital=False, size=1.0, height=1.5,
+             flexibility=0.8, structural_strength=0.7, minTemp=40.0, maxTemp=140.0, subparts=[
+                skin(name="waxy_cuticle", type=skin.Skin.CUTICLE, size=0.9, thickness=0.2, 
+                     water_retention=1.5, cooling_factor=1.2, energyCost=0.01),
+                leaf(name="succulent_leaf_0", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_1", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_2", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_3", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_4", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_5", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                flower(name="bright_flower", type=flower.FlowerType.SIMPLE, size=0.1, 
+                       pollination_method="insect", nectar_production=0.5, scent_strength=0.3, 
+                       color_variety=3, seed_production=5)
+             ]),
+        stem(name="stem_2", type=stem.StemType.HERBACEOUS, vital=False, size=1.0, height=1.5,
+             flexibility=0.8, structural_strength=0.7, minTemp=40.0, maxTemp=140.0, subparts=[
+                skin(name="waxy_cuticle", type=skin.Skin.CUTICLE, size=0.9, thickness=0.2, 
+                     water_retention=1.5, cooling_factor=1.2, energyCost=0.01),
+                leaf(name="succulent_leaf_0", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_1", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_2", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_3", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_4", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                leaf(name="succulent_leaf_5", type=leaf.LeafType.SUCCULENT, size=0.05, 
+                     thickness=0.8, photosynthetic_rate=0.9, water_loss_rate=0.2),
+                flower(name="bright_flower", type=flower.FlowerType.SIMPLE, size=0.1, 
+                       pollination_method="insect", nectar_production=0.5, scent_strength=0.3, 
+                       color_variety=3, seed_production=5)
+             ]),
+        root(name="fibrous_roots", type=root.RootType.FIBROUS, size=0.5, spread=3.0, absorption_rate=1.2)
+    ]
 ).__post_init__()
 
-
-        
 
 
 
