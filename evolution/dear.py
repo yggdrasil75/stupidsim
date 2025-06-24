@@ -1,4 +1,4 @@
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
@@ -11,7 +11,7 @@ ALPHABET = string.ascii_letters
 RANDOMCHAR = string.printable
 
 @dataclass
-class part: # each part is baked into the species stats, separted here to allow for organisms to lose a limb
+class part(ABC): # each part is baked into the species stats, separted here to allow for organisms to lose a limb
     name: str = ""
     size: float = 1.0  # percent of parent part
     vital: bool = False  # whether losing this part is fatal
@@ -37,7 +37,7 @@ class part: # each part is baked into the species stats, separted here to allow 
         pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        if self.statCache is not None and recalc == False:
+        if self.statCache is not None and not recalc:
             return self.statCache
         stats = {}
         stats['health'] = self.health
@@ -58,14 +58,15 @@ class part: # each part is baked into the species stats, separted here to allow 
 
         for subpart in self.subparts:
             substats = subpart.calculateStats(recalc)
-            for key in substats:
+            for key, value in substats.items():
                 if key in stats:
-                    stats[key] += (substats[key] * subpart.size)
+                    stats[key] += (value * subpart.size)
                 else:
-                    stats[key] += (substats[key] * subpart.size)
+                    stats[key] = (value * subpart.size)
         self.statCache = stats
         return self.statCache
 
+@dataclass
 class skin(part):
     name: str = ""
     #type: str = random.choice(["fur", "scales", "bark"])
@@ -95,6 +96,9 @@ class skin(part):
     water_retention: float = 0.0  # Important for plants
     gas_exchange: float = 1.0 # For stomata-like structures
 
+    def setup_default_subparts(self):
+        pass
+
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
         substats = {}
@@ -118,6 +122,7 @@ class skin(part):
                 stats[stat] = (value * self.thickness)
         return stats
 
+@dataclass
 class limb(part):
     class LimbType(Enum):
         ARM = 0
@@ -199,9 +204,11 @@ class limb(part):
                 type=weapon.WeaponType.CLAW,
                 size=0.05,
                 damage=0.5,
-                energyCost=0.01
+                energyCost=0.01,
+                slash_damage=0.5
             ))
 
+@dataclass
 class sensory(part):
     class SensoryType(Enum):
         EYE = 0
@@ -221,6 +228,9 @@ class sensory(part):
     active_cost: float = 0.005  # cost when actively used
     passive_cost: float = 0.001  # cost when just present
     angle: float = 90 # angle of perception.
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -246,12 +256,13 @@ class sensory(part):
         substats['visionangle'] = self.angle
         
         for stat, value in substats.items():
-            if stat in substats:
+            if stat in stats:
                 stats[stat] += (value * self.sensitivity)
             else:
                 stats[stat] = (value * self.sensitivity)
         return stats
 
+@dataclass
 class internal(part):
     class InternalType(Enum):
         HEART = 0
@@ -268,6 +279,9 @@ class internal(part):
     efficiency: float = 1.0  # how well it performs its function
     capacity: float = 1.0  # how much it can handle
     can_regenerate: bool = False
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -299,12 +313,13 @@ class internal(part):
             substats['regeneration'] = 0.2  # Small regeneration bonus
             
         for stat, value in substats.items():
-            if stat in substats:
+            if stat in stats:
                 stats[stat] += (value)
             else:
                 stats[stat] = (value)
         return stats
 
+@dataclass
 class weapon(part):
     class WeaponType(Enum):
         CLAW = 0
@@ -360,7 +375,7 @@ class weapon(part):
             substats['venom_potency'] = substats.get('venom_potency', 0) + 0.5
             
         for stat, value in substats.items():
-            if stat in substats:
+            if stat in stats:
                 stats[stat] += (value)
             else:
                 stats[stat] = (value)
@@ -376,6 +391,7 @@ class weapon(part):
                 energyCost=0.05
             ))
 
+@dataclass
 class appendage(part):
     class AppendageType(Enum):
         SHELL = 0
@@ -396,6 +412,9 @@ class appendage(part):
     storesE: bool = False
     stores_water: bool = False
     stores_air: bool = False
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -429,12 +448,13 @@ class appendage(part):
             substats['manipulation'] = 0.3 * self.coverage
             
         for stat, value in substats.items():
-            if stat in substats:
+            if stat in stats:
                 stats[stat] += (value)
             else:
                 stats[stat] = (value)
         return stats
 
+@dataclass
 class root(part):
     class RootType(Enum):
         FIBROUS = 0
@@ -450,6 +470,9 @@ class root(part):
     nitrogen_fixing: bool = False # Can fix nitrogen from air
     storage_capacity: float = 0.0 # For storing water/nutrients
     can_propagate: bool = False  # Can grow new plants from roots
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -477,12 +500,13 @@ class root(part):
             substats['root_storage'] = substats.get('root_storage', 0) + 1.0
             
         for stat, value in substats.items():
-            if stat in substats:
+            if stat in stats:
                 stats[stat] += (value)
             else:
                 stats[stat] = (value)
         return stats
 
+@dataclass
 class stem(part):
     class StemType(Enum):
         WOODY = 0 # Tree trunks
@@ -527,7 +551,7 @@ class stem(part):
             substats['stem_storage'] = substats.get('stem_storage', 0) + 1.5
             
         for stat, value in substats.items():
-            if stat in substats:
+            if stat in stats:
                 stats[stat] += (value)
             else:
                 stats[stat] = (value)
@@ -551,6 +575,7 @@ class stem(part):
                 energyCost=0.01
             ))
 
+@dataclass
 class leaf(part):
     class LeafType(Enum):
         NEEDLE = 0 # Conifer needles
@@ -568,6 +593,9 @@ class leaf(part):
     water_loss_rate: float = 0.5 # Transpiration rate
     seasonal: bool = False # Sheds seasonally
     defense_rating: float = 0.0  # Protection against herbivores
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -593,12 +621,13 @@ class leaf(part):
             substats['carnivorous'] = 0.7  # Carnivorous capability
             
         for stat, value in substats.items():
-            if stat in substats:
+            if stat in stats:
                 stats[stat] += (value)
             else:
                 stats[stat] = (value)
         return stats
 
+@dataclass
 class flower(part):
     class FlowerType(Enum):
         SIMPLE = 0 # Single flower
@@ -614,6 +643,9 @@ class flower(part):
     color_variety: int = 1 # Number of colors
     blooming_period: float = 1.0 # How long flowers last
     seed_production: float = 1.0 # Seed yield per flower
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -635,12 +667,13 @@ class flower(part):
             substats['bird_attraction'] = 0.7 + (self.color_variety * 0.1)
         
         for stat, value in substats.items():
-            if stat in substats:
+            if stat in stats:
                 stats[stat] += (value)
             else:
                 stats[stat] = (value)    
         return stats
 
+@dataclass
 class fruit(part):
     class FruitType(Enum):
         BERRY = 0 # Fleshy, many seeds
@@ -656,6 +689,9 @@ class fruit(part):
     nutritional_value: float = 1.0 # Food value for animals
     ripening_time: float = 1.0 # Time to mature
     toxicity: float = 0.0 # Defense against herbivores
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -684,12 +720,13 @@ class fruit(part):
             substats['animal_attraction'] = 0.7 + (self.nutritional_value * 0.3)
             
         for stat, value in substats.items():
-            if stat in substats:
+            if stat in stats:
                 stats[stat] += (value)
             else:
                 stats[stat] = (value)
         return stats
 
+@dataclass
 class reproductive(part):
     class ReproductiveType(Enum):
         GONAD = 0         # General reproductive organ
@@ -707,6 +744,9 @@ class reproductive(part):
     mating_frequency: float = 1.0  # How often reproduction can occur
     resource_cost: float = 0.5     # Energy/nutrient cost per reproduction
     seasonal: bool = False         # Only functions in certain seasons
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -741,6 +781,7 @@ class reproductive(part):
                 stats[stat] = (value * self.size)
         return stats
 
+@dataclass
 class egg_sac(part):
     class EggType(Enum):
         SOFT = 0          # Amphibian-style eggs
@@ -755,6 +796,9 @@ class egg_sac(part):
     incubation_time: float = 1.0
     desiccation_resistance: float = 0.0
     camouflage: float = 0.0
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -787,6 +831,7 @@ class egg_sac(part):
                 stats[stat] = (value * self.size)
         return stats
 
+@dataclass
 class pollen(part):
     class PollenType(Enum):
         LIGHT = 0      # Wind-dispersed
@@ -800,6 +845,9 @@ class pollen(part):
     dispersal_range: float = 1.0   # How far it spreads
     allergenicity: float = 0.0     # Irritation to others
     nutrient_content: float = 0.0  # For pollinator attraction
+
+    def setup_default_subparts(self):
+        pass
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -832,6 +880,7 @@ class pollen(part):
                 stats[stat] = (value * self.size)
         return stats
 
+@dataclass
 class seed:
     class SeedType(Enum):
         NAKED = 0       # Gymnosperm
@@ -847,9 +896,13 @@ class seed:
     nutrient_store: float = 1.0     # Endosperm/resources
     defense: float = 0.0            # Anti-predation
     subparts: list['part'] = field(default_factory=list)
+    statCache: dict[str, float] = {}
 
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
+        if self.statCache is not None and not recalc:
+            return self.statCache
+        stats = {}
         substats = {}
         # Seed properties
         substats['seed_viability'] = self.viability
@@ -872,103 +925,176 @@ class seed:
         elif self.type == self.SeedType.BULBIL:
             substats['aerial_propagation'] = 1.0
             
+        for subpart in self.subparts:
+            substats = subpart.calculateStats(recalc)
+            for key, value in substats.items():
+                if key in stats:
+                    stats[key] += (value * subpart.size)
+                else:
+                    stats[key] = (value * subpart.size)
+        self.statCache = stats
         return substats
 
+@dataclass
 class Species:
-    def __init__(self):
-        self.name: str = "" # generate from something stupid
-        self.color: tuple = (0,0,0) # generate from something stupid as well
-        self.symbol: str = random.choice(RANDOMCHAR) # random ascii character to distinguish similar color species
+    name: str = "" # generate from something stupid
+    color: tuple = (0,0,0) # generate from something stupid as well
+    symbol: str = random.choice(RANDOMCHAR) # random ascii character to distinguish similar color species
 
-        #energy
-        self.maxE: float = 10.0 # maximum energy, organisms will average a normal curve of σ = 5% for plants at same age, but 500% overall, 30% for animals at maturity
-        self.rootE: float = 10.0 # if rooted, this is extra energy stored in roots. not valid for non-rooted species. σ of 500% but based on terrain
-        self.idleE: float = 10.0 # how much energy is consumed when just standing around
-        self.sleepE: float = 5.0 # energy usage during sleep
-        self.dormE: float = 1.0 # energy usage while dormant
+    #energy
+    maxE: float = 10.0 # maximum energy, organisms will average a normal curve of σ = 5% for plants at same age, but 500% overall, 30% for animals at maturity
+    rootE: float = 10.0 # if rooted, this is extra energy stored in roots. not valid for non-rooted species. σ of 500% but based on terrain
+    idleE: float = 10.0 # how much energy is consumed when just standing around
+    sleepE: float = 5.0 # energy usage during sleep
+    dormE: float = 1.0 # energy usage while dormant
 
-        #sleep
-        self.dormancy: bool = False # in extreme conditions, this can be ignored
-        self.dormanThresh: float = 0.3 # when to activate for a normal dormancy. 1% is "extreme", 30% (default) is "normal" for something like a bear
-        self.sleepRatio: float = 0.5 # percent of time spent asleep
-        class habits(Enum):
-            NONE = 0
-            NOCTURNAL = 1
-            CREPUSCULAR = 2
-            CATHERMERAL = 3
-            ULTRADIAN = 4
-            UNICAMERAL = 5
-            DIURNAL = 6
-        self.sleepHabits: habits = habits.NONE #sleep method. plants use "none"
+    #sleep
+    dormancy: bool = False # in extreme conditions, this can be ignored
+    dormanThresh: float = 0.3 # when to activate for a normal dormancy. 1% is "extreme", 30% (default) is "normal" for something like a bear
+    sleepRatio: float = 0.5 # percent of time spent asleep
+    class habits(Enum):
+        NONE = 0
+        NOCTURNAL = 1
+        CREPUSCULAR = 2
+        CATHERMERAL = 3
+        ULTRADIAN = 4
+        UNICAMERAL = 5
+        DIURNAL = 6
+    sleepHabits: habits = habits.NONE #sleep method. plants use "none"
 
-        #reproduction
-        self.maturity: int = 4320 # number of steps to be considered mature. σ of 9%. divide by 48 for days.
-        self.reproCost: float = 5.0 # how much energy it costs to either produce an egg or to produce a new organism. σ of 10%
-        self.reproFrequency: int = 480 #maximum frequency of reproduction. σ of 15%
-        self.seedAge: int = 100 # seed includes external eggs. This is in steps. after this time seed will die. σ of 10%
-        self.seedMaturity: int = 90 # minimum age to attempt to hatch. certain things may prevent this from occurring. σ of 10%
-        self.pMS: int = 5000 # age at which reproduction is no longer possible. σ of 5%
-        class ReproMethod(Enum):
-            EXPANSIVE_GROWTH = 0
-            OVIPARITY = 1
-            VIVIPARITY = 2
-            OVOVIPARITY = 3
-            BROADCAST = 4
-            BUDDING = 5
-            SPORES = 6
-            PARTHENOGENESIS = 7
-        self.reproMethod: ReproMethod = ReproMethod.EXPANSIVE_GROWTH
-        self.flowering: bool = False # another state to track for reproduction cause why not.
-        self.mutationRate: float = 0.001
-        self.speciesParents: list['Species'] = []
-        
-        #movement
-        self.canMove: bool = False # plants will almost always be false. but this is a fictional world.
-        self.moveSpeed: float = 0.0 # in yards, each cell is 1 cubic yard. σ of 5% at maturity.
-        self.moveCost: float = 0.0 # energy cost for each movement. σ of 5% at maturity.
-        self.Rooted: bool = True # if it has underground roots. This should set the movement to 0 and canmove to false.
-        self.canFly: bool = False # requires some vertical lift option.
+    #reproduction
+    maturity: int = 4320 # number of steps to be considered mature. σ of 9%. divide by 48 for days.
+    reproCost: float = 5.0 # how much energy it costs to either produce an egg or to produce a new organism. σ of 10%
+    reproFrequency: int = 480 #maximum frequency of reproduction. σ of 15%
+    seedAge: int = 100 # seed includes external eggs. This is in steps. after this time seed will die. σ of 10%
+    seedMaturity: int = 90 # minimum age to attempt to hatch. certain things may prevent this from occurring. σ of 10%
+    pMS: int = 5000 # age at which reproduction is no longer possible. σ of 5%
+    class ReproMethod(Enum):
+        EXPANSIVE_GROWTH = 0
+        OVIPARITY = 1
+        VIVIPARITY = 2
+        OVOVIPARITY = 3
+        BROADCAST = 4
+        BUDDING = 5
+        SPORES = 6
+        PARTHENOGENESIS = 7
+    reproMethod: ReproMethod = ReproMethod.EXPANSIVE_GROWTH
+    flowering: bool = False # another state to track for reproduction cause why not.
+    mutationRate: float = 0.001
+    speciesParents: list['Species'] = []
+    
+    #movement
+    canMove: bool = False # plants will almost always be false. but this is a fictional world.
+    moveSpeed: float = 0.0 # in yards, each cell is 1 cubic yard. σ of 5% at maturity.
+    moveCost: float = 0.0 # energy cost for each movement. σ of 5% at maturity.
+    Rooted: bool = True # if it has underground roots. This should set the movement to 0 and canmove to false.
+    canFly: bool = False # requires some vertical lift option.
 
-        #eating
-        self.preferredFood: dict[str, float] # list of types of parts that this species prefers. float shows how much preference with 1.0 being always goes for, and 0.01 being barely ever
-        self.inedibleFood: dict[str, float] # list of parts that are inedible, greater than 1.0 means deadly, 0.01 means minor issues. item can be in both preferred and inedible if both are less than 0.5, though should be rare (think spicy food)
-        
-        #survival
-        self.tempSensCold: float = 85.0 # minimum temperature for reasonable health. in fahrenheit
-        self.tempSensHot: float = 100.0 # maximum temperature for reasonable health. 
-        self.tempResis: float = 1.0 # resistance of changes to temperature
-        self.tempProduction: float = 15.0 # automatic production of heat above normal
-        self.tempShed: float = 1.0 # shedding of heat rate
+    #eating
+    preferredFood: dict[str, float] = {} # list of types of parts that this species prefers. float shows how much preference with 1.0 being always goes for, and 0.01 being barely ever
+    inedibleFood: dict[str, float]  = {} # list of parts that are inedible, greater than 1.0 means deadly, 0.01 means minor issues. item can be in both preferred and inedible if both are less than 0.5, though should be rare (think spicy food)
+    
+    #survival
+    tempSensCold: float = 85.0 # minimum temperature for reasonable health. in fahrenheit
+    tempSensHot: float = 100.0 # maximum temperature for reasonable health. 
+    tempResis: float = 1.0 # resistance of changes to temperature
+    tempProduction: float = 15.0 # automatic production of heat above normal
+    tempShed: float = 1.0 # shedding of heat rate
 
-        #violence
-        self.natArmor: float = 0 
-        self.natAttack: float = 0
+    #violence
+    natArmor: float = 0 
+    natAttack: float = 0
 
-        #behavior
-        self.aggression: float = 0.0
-        self.curious: float = 0.0
-        self.social: float = 0.0
-        self.adapative: float = 0.0 # how much behavior changes while alive. nothing related to physical attributes.
+    #behavior
+    aggression: float = 0.0
+    curious: float = 0.0
+    social: float = 0.0
+    adapative: float = 0.0 # how much behavior changes while alive. nothing related to physical attributes.
 
-        self.parts: list[part] = [] # part factory.
+    parts: list[part] = [] # part factory.
+    statcache: Optional[dict] = {}
+
+    def _generate_name(self): 
+        return "".join(random.sample(ALPHABET, 10))
+
+    def __post_init__(self):
+        self.statcache = {}
+        for key, value in self.__dict__.items():
+            if isinstance(value, (int, float, bool)):
+                self.statcache[key] = float(value)
+        for part in self.parts:
+            for key, value in part.calculateStats(True).items():
+                self.statcache[key] = self.statcache.get(key, 0.0) + value
+        return self
+
+TREE = Species(
+    name="Tree",
+    Rooted=True,
+    canMove=False,
+    reproMethod=Species.ReproMethod.BROADCAST,
+    tempSensCold=-20,
+    tempSensHot=75,
+    parts=[stem(name="trunk", type=stem.StemType.WOODY, vital=True, size= 1.0,
+            height=20.0, structural_strength=2.5, annual_growth_rings=True,
+            minTemp=-30, maxTemp=80.0, subparts=[
+                skin(name="bark", type=skin.Skin.BARK, size=0.9, thickness=1.5,
+                     insulation_factor=1.8, energyCost=0.01),
+                root(name="taproot", type=root.RootType.TAP, size=0.4,
+                     depth=15.0, absorption_rate=0.8),
+                reproductive(name="cones", type=reproductive.ReproductiveType.CONE, size=0.1,
+                             fertility=0.8, resource_cost=1.0, seasonal=True),
+                leaf(name="needle_cluster_0", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_1", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_2", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_3", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_4", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_5", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_6", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_7", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_8", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_9", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_10", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_11", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_12", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_13", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_14", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_15", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_16", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_17", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+                leaf(name="needle_cluster_18", type=leaf.LeafType.NEEDLE, size=0.02, surface_area=0.5,
+                     photosynthetic_rate=0.7, water_loss_rate=0.1, seasonal=False),
+            ])]   
+).__post_init__()
 
 
-        def __post_init__(self):
-            self.statcache = {}
-            for key, value in self.dir():
-                self.statcache[key] = value
-            for part in self.parts:
-                for key, value in part.calculatestats(True):
-                    if key in self.statcache:
-                        self.statcache[key] += value
-                    else:
-                        print(f'improperly handled default stat: {key}')
-                        self.statcache[key] = value
+BUSH = Species(
+    name="bush",
+    Rooted=True,
+    canMove=False,
+    reproMethod=Species.ReproMethod.BROADCAST
+    tempSensCold=50.0
+    tempSensHot=130.0
 
-        def _generate_name(self): 
-            self.name = str(random.sample(ALPHABET, 20))
-            
-            
+).__post_init__()
+
 
         
 
