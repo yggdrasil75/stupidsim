@@ -8,6 +8,7 @@ import random
 from typing import Optional, Any
 import dearpygui.dearpygui as dpg
 import string
+import numpy as np
 import torch
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -77,6 +78,7 @@ class part(ABC): # each part is baked into the species stats, separted here to a
     minTemp: float = -50.0  
     maxTemp: float = 150.0
     mutationRate: float = 0.0001
+    injuries: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self):
         if len(self.subparts) == 0:
@@ -117,46 +119,14 @@ class part(ABC): # each part is baked into the species stats, separted here to a
     
     @classmethod
     def randomize(cls, name: str = "", organism_type: str = "animal") -> 'part':
-        """Create a randomized part based on organism type."""
         part_type = random.choice([
             skin, limb, sensory, internal, weapon, appendage,
             root, stem, leaf, flower, fruit, reproductive,
             egg_sac, pollen
         ])
-        
-        # Call the specific part's randomize method
+
         return part_type.randomize(name, organism_type)
 
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        if self.statCache is not None and not recalc:
-            return self.statCache
-        stats = {}
-        stats['health'] = self.health
-        stats['regrowthrate'] = self.regrowth_rate
-        stats['idleE'] = self.energyCost
-        if self.vital:
-            stats['tempSensCold'] = self.minTemp
-            stats['tempSensHot'] = self.maxTemp
-        else:
-            stats[f'{self.name}.tempSensCold'] = self.minTemp
-            stats[f'{self.name}.tempSensHot'] = self.maxTemp
-        if self.energyProducer:
-            stats['sleepE'] = self.energyCost * 0.5
-            stats['dormE'] = self.energyCost * 0.1
-        else:
-            stats['sleepE'] = self.energyCost * 0.1
-            stats['dormE'] = self.energyCost * 0.01
-
-        for subpart in self.subparts:
-            substats = subpart.calculateStats(recalc)
-            for key, value in substats.items():
-                if key in stats:
-                    stats[key] += (value * subpart.size)
-                else:
-                    stats[key] = (value * subpart.size)
-        self.statCache = stats
-        return self.statCache
-    
     def to_torch(self, device = DEVICE) -> dict[str, Any]:
         tensor_dict = {}
         
@@ -178,6 +148,94 @@ class part(ABC): # each part is baked into the species stats, separted here to a
             tensor_dict['subparts'] = subpart_tensors
             
         return tensor_dict
+    
+    def is_healthy(self, threshold: float = 0.7) -> bool:
+        current_health = self.health - self.injuries.get(self.name, 0.0)
+        return (current_health / self.health) >= threshold
+
+    def count_healthy_subparts(self, part_type: type, threshold: float = 0.7) -> tuple[int, int]:
+        total = 0
+        healthy = 0
+        
+        for subpart in self.subparts:
+            if isinstance(subpart, part_type):
+                total += 1
+                if subpart.is_healthy(threshold):
+                    healthy += 1
+                    
+        return healthy, total
+
+    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
+        if self.statCache is not None and not recalc:
+            return self.statCache
+            
+        stats = {}
+        # Base stats
+        stats['health'] = self.health
+        stats['regrowthrate'] = self.regrowth_rate
+        stats['idleE'] = self.energyCost
+        
+        if self.vital:
+            stats['tempSensCold'] = self.minTemp
+            stats['tempSensHot'] = self.maxTemp
+        else:
+            stats[f'{self.name}.tempSensCold'] = self.minTemp
+            stats[f'{self.name}.tempSensHot'] = self.maxTemp
+            
+        if self.energyProducer:
+            stats['sleepE'] = self.energyCost * 0.5
+            stats['dormE'] = self.energyCost * 0.1
+        else:
+            stats['sleepE'] = self.energyCost * 0.1
+            stats['dormE'] = self.energyCost * 0.01
+
+        # Calculate subpart contributions with health checks
+        for subpart in self.subparts:
+            substats = subpart.calculateStats(recalc)
+            
+            # Apply health multiplier to all stats from this subpart
+            health_multiplier = (subpart.health - subpart.injuries.get(subpart.name, 0.0)) / subpart.health
+            health_multiplier = max(0, min(1, health_multiplier))  # Clamp between 0-1
+            
+            for key, value in substats.items():
+                weighted_value = value * subpart.size * health_multiplier
+                if key in stats:
+                    stats[key] += weighted_value
+                else:
+                    stats[key] = weighted_value
+
+        # Special part count dependencies
+        if isinstance(self, limb) and self.type == limb.LimbType.WING:
+            # Flying capability depends on having enough healthy wings
+            healthy_wings, total_wings = self.count_healthy_subparts(limb)
+            if total_wings > 1:
+                # Flying effectiveness scales with ratio of healthy wings
+                wing_ratio = healthy_wings / total_wings
+                if wing_ratio < 0.5:  # Less than half wings healthy
+                    stats['can_fly'] = 0.0
+                else:
+                    stats['flight_efficiency'] = wing_ratio * self.movement_speed
+                    
+        elif isinstance(self, sensory) and self.type == sensory.SensoryType.EYE:
+            # Vision quality depends on healthy eyes
+            healthy_eyes, total_eyes = self.count_healthy_subparts(sensory)
+            if total_eyes > 0:
+                eye_ratio = healthy_eyes / total_eyes
+                stats['vision_quality'] = eye_ratio * self.precision
+                if eye_ratio < 0.3:  # Most eyes damaged
+                    stats['blindness'] = 1.0 - eye_ratio
+                    
+        elif isinstance(self, internal) and self.type == internal.InternalType.HEART:
+            # Circulatory efficiency drops with heart damage
+            healthy_hearts, total_hearts = self.count_healthy_subparts(internal)
+            if total_hearts > 0:
+                heart_ratio = healthy_hearts / total_hearts
+                stats['circulation'] *= heart_ratio
+                if heart_ratio < 0.5:
+                    stats['circulatory_shock'] = 1.0 - heart_ratio
+
+        self.statCache = stats
+        return stats
 
 @dataclass
 class skin(part):
@@ -272,7 +330,7 @@ class skin(part):
             energyCost=random.uniform(0.05, 0.2),
             mutationRate=random.uniform(0.0001, 0.001)
         )
-    
+
 @dataclass
 class limb(part):
     class LimbType(Enum):
@@ -1336,7 +1394,7 @@ class seed:
     nutrient_store: float = 1.0     # Endosperm/resources
     defense: float = 0.0            # Anti-predation
     subparts: list['part'] = field(default_factory=list)
-    statCache: dict[str, float] = {}
+    statCache: dict[str, float] = field(default_factory=dict)
 
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
@@ -2048,13 +2106,162 @@ class Organism:
     parts: list[part] = field(default_factory=list)
     asleep: bool = False
     dormant: bool = False
-    current_stats: dict[str, Any] = field(default_factory=dict)
+    current_stats: dict = field(default_factory=dict)
 
     #the below will be used for basically "world history".
     history: list[str] = field(default_factory=list) # probably shouldnt use this. might cause memory issues
     parents: Optional[list['Organism']] = field(default_factory=list) #optional only for first gen. after that, required. 
     memory: dict[str, Any] = field(default_factory=dict) # this probably wont be used either, but potentially somehow track "known bad" and "known good" areas. 
     
+    @property
+    def energy(self) -> float:
+        return self._energy
+
+    @energy.setter
+    def energy(self, value: float) -> None:
+        self._energy = max(0, min(value, self.species.maxE))
+
+    @property
+    def rootE(self) -> float:
+        return self._rootE
+
+    @rootE.setter
+    def rootE(self, value: float) -> None:
+        self._rootE = max(0, min(value, self.species.rootE))
+
+    @property
+    def reproductiveCooldown(self) -> int:
+        return getattr(self, '_reproductiveCooldown', 0)
+
+    @reproductiveCooldown.setter
+    def reproductiveCooldown(self, value: int) -> None:
+        self._reproductiveCooldown = max(0, value)
+
+    @property
+    def gestationProg(self) -> float:
+        return getattr(self, '_gestationProg', 0.0)
+
+    @gestationProg.setter
+    def gestationProg(self, value: float) -> None:
+        self._gestationProg = max(0.0, value)
+
+    @property
+    def floweringCycle(self) -> int:
+        return getattr(self, '_floweringCycle', 0)
+
+    @floweringCycle.setter
+    def floweringCycle(self, value: int) -> None:
+        self._floweringCycle = max(0, value)
+
+    @property
+    def current_temp(self) -> float:
+        return getattr(self, '_current_temp', (self.species.tempSensCold + self.species.tempSensHot)/2)
+
+    @current_temp.setter
+    def current_temp(self, value: float) -> None:
+        self._current_temp = value
+
+    @property
+    def can_fly(self) -> bool:
+        if not self.species.canMove:
+            return False
+            
+        wing_stats = self._get_part_stats(limb)
+        if not wing_stats:
+            return False
+            
+        healthy_wings = sum(1 for wing in wing_stats if wing['health_ratio'] >= 0.7)
+        total_wings = len(wing_stats)
+        
+        if total_wings >= 4:
+            return healthy_wings >= 2
+        elif total_wings == 2:
+            return healthy_wings >= 2
+        else:
+            return healthy_wings >= 1
+
+    @property
+    def flight_efficiency(self) -> float:
+        if not self.can_fly:
+            return 0.0
+            
+        wing_stats = self._get_part_stats(limb)
+        total_efficiency = sum(
+            wing['movement_speed'] * wing['health_ratio'] 
+            for wing in wing_stats 
+            if wing['health_ratio'] >= 0.7
+        )
+
+        healthy_wings = sum(1 for wing in wing_stats if wing['health_ratio'] >= 0.7)
+        if healthy_wings >= 4:
+            return total_efficiency * 1.5
+        elif healthy_wings == 3:
+            return total_efficiency * 1.2
+        elif healthy_wings == 2:
+            return total_efficiency * 1.0
+        else:
+            return total_efficiency * 0.2
+
+    @property
+    def vital_health(self) -> float:
+        total_health = 0.0
+        vital_count = 0
+        
+        for part in self.parts:
+            if part.vital:
+                health_ratio = (part.health - part.injuries.get(part.name, 0.0)) / part.health
+                total_health += health_ratio
+                vital_count += 1
+                
+        if vital_count == 0:
+            return 1.0
+        return total_health / vital_count
+
+    @property
+    def is_alive(self) -> bool:
+        for part in self.parts:
+            if part.vital:
+                health_ratio = (part.health - part.injuries.get(part.name, 0.0)) / part.health
+                if health_ratio <= 0:
+                    return False
+        return True
+
+    @property
+    def move_cost(self) -> float:
+        return self.current_stats.get('moveCost', 0.1)
+
+    @property
+    def idle_energy_cost(self) -> float:
+        return self.current_stats.get('idleE', 0.1)
+
+    @property
+    def sleep_energy_cost(self) -> float:
+        return self.current_stats.get('sleepE', 0.05)
+
+    @property
+    def dormancy_energy_cost(self) -> float:
+        return self.current_stats.get('dormE', 0.01)
+
+    @property
+    def can_climb(self) -> bool:
+        return self.current_stats.get('climbing', 0) > 0.5
+
+    @property
+    def can_swim(self) -> bool:
+        return self.current_stats.get('swimming', 0) > 0.5
+
+    @property
+    def can_dig(self) -> bool:
+        return self.current_stats.get('digging', 0) > 0.5
+
+    @property
+    def vision_quality(self) -> float:
+        return self.current_stats.get('vision_quality', 0)
+
+    @property
+    def is_mature(self) -> bool:
+        return self.age >= self.species.maturity and self.age <= self.species.pMS
+
 
     def __post_init__(self):
         self.current_stats = copy.deepcopy(self.species.statcache)
@@ -2066,8 +2273,8 @@ class Organism:
             self.rootE = self.species.rootE
         if self.age > self.species.maturity:
             self.reproductiveCooldown = self.age % self.species.reproFrequency
-            if hasattr(self.species.statcache['gestation_period']) and self.species.statcache['gestation_period'] is not 0 and self.sex == 0:
-                self.gestationProg = random.uniform(0, self.species.statcache['gestation_period'])
+            if hasattr(self.current_stats, 'gestation_period') and self.current_stats['gestation_period'] != 0 and self.sex == 0:
+                self.gestationProg = random.uniform(0, self.current_stats['gestation_period'])
         self.flowering = self.species.flowering
         return self
     
@@ -2089,8 +2296,7 @@ class Organism:
             if self.floweringCycle >= self.current_stats.get('flowering_frequency', 1000):
                 self.floweringCycle = 0
                 self.flowering = not self.flowering
-
-    
+ 
     def updateTemp(self, env_temp: float) -> float:
         temp_diff = env_temp - self.current_stats.get('tempSensCold', 50)
         resistance = self.current_stats.get('tempResis', 1.0)
@@ -2229,7 +2435,7 @@ class Organism:
                 if self.injuries[part_name] == 0:
                     del self.injuries[part_name]
     
-    def attemptMove(self, dx: float, dy: float, dz: float):
+    def Move(self, dx: float, dy: float, dz: float):
         if self.species.Rooted or not self.species.canMove:
             return (self.x, self.y, self.z)
         
@@ -2249,30 +2455,57 @@ class Organism:
             self.facing = math.atan2(dy, dx)
         
         return (self.x, self.y, self.z)
-
-
-
-
-
-
-
-
-
-
-
-class SimulationUI:
-    def __init__(self):
-        dpg.create_context()
-        self.game = GameOfLife()
-        self.setup_ui()
-
-
-    def run(self):
-        while dpg.is_dearpygui_running():
-            dpg.render_dearpygui_frame()
-        dpg.destroy_context()
+    
+    def tryMove(self, dx: float, dy: float, dz: float) -> bool:
+        if not self.species.canMove:
+            return False
             
+        distance = math.sqrt(dx**2 + dy**2 + dz**2)
+        cost = distance * self.species.moveCost
+        
+        if dz != 0 and not self.can_fly:
+            return False
+            
+        if self.energy < cost:
+            return False
+            
+        self.energy -= cost
+        self.x += dx
+        self.y += dy
+        self.z += dz
+        return True
 
-if __name__ == "__main__":
-    UI = SimulationUI()
-    UI.run()
+    def _get_part_stats(self, part_type: type) -> list[dict]:
+        stats = []
+        for part in self.parts:
+            if isinstance(part, part_type):
+                health_ratio = (part.health - part.injuries.get(part.name, 0.0)) / part.health
+                part_stats = part.calculateStats()
+                part_stats['health_ratio'] = health_ratio
+                stats.append(part_stats)
+        return stats
+
+    def get_vital_health(self) -> float:
+        total_health = 0.0
+        vital_count = 0
+        
+        for part in self.parts:
+            if part.vital:
+                health_ratio = (part.health - part.injuries.get(part.name, 0.0)) / part.health
+                total_health += health_ratio
+                vital_count += 1
+                
+        if vital_count == 0:
+            return 1.0
+        return total_health / vital_count
+
+@dataclass
+class WorldGrid:
+    maxX: int = 50
+    maxY: int = 50
+    maxZ: int = 10
+    organisms: list[Organism] = field(default_factory=list)
+
+    def addOrganism(self, organism: Organism):
+        self.organisms.append(organism)
+        
