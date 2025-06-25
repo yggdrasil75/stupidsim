@@ -5,14 +5,61 @@ from enum import Enum
 import hashlib
 import math
 import random
-from typing import Optional
+from typing import Optional, Any
 import dearpygui.dearpygui as dpg
 import string
-
 import torch
 
+DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 ALPHABET = string.ascii_letters
 RANDOMCHAR = string.printable
+
+def compare_dicts(dict1: dict[str, Any], dict2: dict[str, Any]) -> float:
+    all_keys = set(dict1.keys()).union(set(dict2.keys()))
+    if not all_keys:
+        return 1.0
+    
+    total_score = 0.0
+    total_weight = 0.0
+    
+    for key in all_keys:
+        if key not in dict1 or key not in dict2:
+            continue
+            
+        val1 = dict1[key]
+        val2 = dict2[key]
+        
+        weight = 2.0 if isinstance(val1, bool) or isinstance(val2, bool) else 1.0
+        if type(val1) != type(val2):
+            total_weight += weight
+            continue
+        if isinstance(val1, bool):
+            score = 1.0 if val1 == val2 else 0.0
+        elif isinstance(val1, (int, float)):
+            if val1 == 0 and val2 == 0:
+                score = 1.0
+            else:
+                max_val = max(abs(val1), abs(val2))
+                diff = abs(val1 - val2)
+                score = 1.0 - min(diff / max_val, 1.0)
+        elif isinstance(val1, dict):
+            score = compare_dicts(val1, val2)
+        elif isinstance(val1, (list, tuple, set)):
+            try:
+                score = 1.0 if val1 == val2 else 0.0
+            except:
+                score = 0.0
+        elif hasattr(val1, "__dict__") and hasattr(val2, "__dict__"):
+            score = compare_dicts(val1.__dict__, val2.__dict__)
+        else:
+            score = 1.0 if val1 == val2 else 0.0
+            
+        total_score += score * weight
+        total_weight += weight
+    if total_weight == 0:
+        return 0.0
+    
+    return total_score / total_weight
 
 @dataclass
 class part(ABC): # each part is baked into the species stats, separted here to allow for organisms to lose a limb
@@ -109,11 +156,32 @@ class part(ABC): # each part is baked into the species stats, separted here to a
                     stats[key] = (value * subpart.size)
         self.statCache = stats
         return self.statCache
+    
+    def to_torch(self, device = DEVICE) -> dict[str, Any]:
+        tensor_dict = {}
+        
+        for field_name, field_value in self.__dict__.items():
+            if field_name in ['subparts', 'statCache']:
+                continue
+                
+            if isinstance(field_value, (int, float)):
+                tensor_dict[field_name] = torch.tensor([field_value], dtype=torch.float32, device=device)
+            elif isinstance(field_value, bool):
+                tensor_dict[field_name] = torch.tensor([int(field_value)], dtype=torch.float32, device=device)
+            elif isinstance(field_value, Enum):
+                tensor_dict[field_name] = torch.tensor([field_value.value], dtype=torch.float32, device=device)
+        
+        if hasattr(self, 'subparts') and self.subparts:
+            subpart_tensors = []
+            for subpart in self.subparts:
+                subpart_tensors.append(subpart.to_torch(device=device))
+            tensor_dict['subparts'] = subpart_tensors
+            
+        return tensor_dict
 
 @dataclass
 class skin(part):
     name: str = ""
-    #type: str = random.choice(["fur", "scales", "bark"])
     class Skin(Enum):
         FUR = 0
         SCALES = 1
@@ -224,9 +292,10 @@ class limb(part):
     movement_speed: float = 1.0  # contributes to overall speed
     movement_cost: float = 0.1  # energy cost per movement
     # Special abilities - assume these mean that this is for the task, if not, then it can still be used to do the task, just at a lower rate.
-    can_climb: bool = False
-    can_swim: bool = False
-    can_dig: bool = False
+    can_climb: bool = False if type == LimbType.PSEUDOPOD else True
+    can_swim: bool = True if type == LimbType.FIN else False
+    can_dig: bool = False if (type == LimbType.PSEUDOPOD or type == LimbType.TENTACLE or type == LimbType.WING) else True
+    can_fly: bool = True if type == LimbType.WING else False
 
     def calculateStats(self, recalc: bool = False) -> dict[str, float]:
         stats = super().calculateStats(recalc)
@@ -733,7 +802,6 @@ class root(part):
             mutationRate=random.uniform(0.0001, 0.001)
         )
 
-
 @dataclass
 class stem(part):
     class StemType(Enum):
@@ -823,7 +891,6 @@ class stem(part):
         # Let the stem setup its own subparts
         new_stem.setup_default_subparts()
         return new_stem
-
 
 @dataclass
 class leaf(part):
@@ -962,7 +1029,6 @@ class flower(part):
             energyCost=random.uniform(0.1, 0.5),
             mutationRate=random.uniform(0.0001, 0.001)
         )
-
 
 @dataclass
 class fruit(part):
@@ -1356,14 +1422,18 @@ class Species:
     flowering: bool = False # another state to track for reproduction cause why not.
     mutationRate: float = 0.001
     speciesParents: list['Species'] = field(default_factory=list)
+    compatibility_cache: dict[str, float] = field(default_factory=dict)
+    reproCache: dict[str, bool] = field(default_factory=dict)
+    reprocacheOffspring: dict[str, 'Species'] = field(default_factory=dict)
     
     #movement
     canMove: bool = False # plants will almost always be false. but this is a fictional world.
     moveSpeed: float = 0.0 # in yards, each cell is 1 cubic yard. σ of 5% at maturity.
     moveCost: float = 0.0 # energy cost for each movement. σ of 5% at maturity.
     Rooted: bool = True # if it has underground roots. This should set the movement to 0 and canmove to false.
-    canFly: bool = False # requires some vertical lift option.
-
+    canDig: bool = False
+    canSwim: bool = False
+    
     #eating
     preferredFood: dict[str, float] = field(default_factory=dict)
     inedibleFood: dict[str, float]  = field(default_factory=dict)
@@ -1388,11 +1458,12 @@ class Species:
     parts: list[part] = field(default_factory=list)
     statcache: Optional[dict] = field(default_factory=dict)
 
-    def _generate_name(self): 
-        return "".join(random.sample(ALPHABET, 10))
-
-    def __post_init__(self):
+    def __post_init__(self) -> 'Species':
         self.genStats(True)
+        return self
+
+    def _generate_name(self) -> str: 
+        return "".join(random.sample(ALPHABET, 10))
 
     def genStats(self, regen=False):
         if self.statcache is not None and len(self.statcache) > 1 and not regen:
@@ -1443,6 +1514,159 @@ class Species:
 
         return offspring
     
+    def _simkey(self, other: 'Species') -> tuple[str, str]:
+        selfkey = f'{self.name}_{other.name}'
+        otherkey = f'{other.name}_{self.name}'
+        return selfkey, otherkey
+
+    def calcdiff(self, other: 'Species') -> float:
+        if self == other:
+            return 1.0
+        simkey,othersimkey = self._simkey(other)
+        if simkey in self.compatibility_cache:
+            return self.compatibility_cache[simkey]
+        diff = compare_dicts(self.__dict__, other.__dict__)
+
+        self.compatibility_cache[simkey] = diff
+        other.compatibility_cache[othersimkey] = diff
+        return diff
+
+    def can_reproduce_with(self, other: 'Species') -> bool:
+        if self == other:
+            return True
+        simkey, othersimkey = self._simkey(other)
+        can = False
+        if simkey in self.reproCache:
+            return self.reproCache[simkey]
+        if other in self.speciesParents or self in other.speciesParents:
+            can = True
+        
+        common_parents = set(self.speciesParents) & set(other.speciesParents)
+        if can == False and common_parents:
+            can = True
+        
+        diff = self.calcdiff(other)
+        relationship_degree = self._get_relationship_degree(other)
+        if can == False and relationship_degree <= 2:
+            can = True
+        if can == False and relationship_degree == 3:
+            return random.random() < (2 * diff)
+        
+        
+        if can == False:
+            can = random.random() < diff
+        self.reproCache[simkey] = can
+        other.reproCache[othersimkey] = can
+        return can
+
+    def _get_relationship_degree(self, other: 'Species') -> int:
+        if self == other:
+            return 0
+        if other in self.speciesParents or self in other.speciesParents:
+            return 1
+        common_parents = set(self.speciesParents) & set(other.speciesParents)
+        if common_parents:
+            return 2
+        self_parents = set(self.speciesParents)
+        other_parents = set(other.speciesParents)
+        self_grandparents = set()
+        for parent in self_parents:
+            self_grandparents.update(parent.speciesParents)
+        
+        other_grandparents = set()
+        for parent in other_parents:
+            other_grandparents.update(parent.speciesParents)
+        if self_grandparents & other_grandparents:
+            return 3
+        self_great_grandparents = set()
+        for gp in self_grandparents:
+            self_great_grandparents.update(gp.speciesParents)
+        
+        other_great_grandparents = set()
+        for gp in other_grandparents:
+            other_great_grandparents.update(gp.speciesParents)
+        
+        if self_great_grandparents & other_great_grandparents:
+            return 4
+        
+        return 999
+
+    def get_hybrid_offspring(self, other: 'Species') -> Optional['Species']:
+        if not self.can_reproduce_with(other):
+            return None
+        
+        mother_key = f"{self.name}_mother_{other.name}_father"
+        father_key = f"{other.name}_father_{self.name}_mother"
+        
+        # Check cache first
+        if mother_key in self.reproCache:
+            return self.reprocacheOffspring[mother_key]
+        if father_key in other.reproCache:
+            return other.reprocacheOffspring[father_key]
+        offspring = copy.deepcopy(self)
+        offspring.speciesParents = [self, other]
+        offspring.name = self._generate_name()
+        offspring.color = (
+            (self.color[0] + other.color[0]) // 2,
+            (self.color[1] + other.color[1]) // 2,
+            (self.color[2] + other.color[2]) // 2
+        )
+        
+        similarity = self.calcdiff(other)
+        relationship_degree = self._get_relationship_degree(other)
+        
+        if relationship_degree <= 1:
+            # Parent/child - equal weighting
+            self_weight = 0.5 * self.mutationRate
+            other_weight = 0.5 * other.mutationRate
+        elif relationship_degree == 2:
+            # Siblings - slight random variation
+            self_weight = random.uniform(0.4, 0.6) * self.mutationRate
+            other_weight = 1 - self_weight * other.mutationRate
+        else:
+            # More distant or unrelated - use similarity
+            self_weight = 0.5 + (similarity / 2) * self.mutationRate
+            other_weight = 1 - self_weight * other.mutationRate
+        for attr_name in offspring.__dataclass_fields__:
+            if attr_name in ['name', 'color', 'symbol', 'parts', 'statcache', 'speciesParents', 'preferredFood', 'inedibleFood']:
+                continue
+            
+            self_val = getattr(self, attr_name)
+            other_val = getattr(other, attr_name)
+            
+            if isinstance(self_val, (int, float)):
+                new_val = (self_val * self_weight) + (other_val * other_weight)
+                setattr(offspring, attr_name, new_val)
+            elif isinstance(self_val, Enum):
+                if random.random() < self_weight:
+                    setattr(offspring, attr_name, self_val)
+                else:
+                    setattr(offspring, attr_name, other_val)
+        offspring.parts = []
+        parts_from_self = random.sample(self.parts, max(1, int(len(self.parts) * self_weight)))
+        parts_from_other = random.sample(other.parts, max(1, int(len(other.parts) * other_weight)))
+        offspring.parts.extend(parts_from_self)
+        offspring.parts.extend(parts_from_other)
+        
+        # Blend mutation rate
+        offspring.mutationRate = (self.mutationRate + other.mutationRate) / 2
+        offspring = offspring.mutate()
+        offspring.genStats(True)
+        
+        # Cache the result for both parent orders
+        self.reprocacheOffspring[mother_key] = offspring
+        other.reprocacheOffspring[father_key] = offspring
+        
+        return offspring
+    
+    @property
+    def canFly(self) -> bool:
+        """Calculate flight capability based on wing parts"""
+        if not self.canMove:
+            return False
+        # Need at least one functional wing to fly
+        return any(part.can_fly for part in self.parts if isinstance(part, limb))
+    
     @classmethod
     def generate_random_species(cls, existing_species: Optional[list['Species']] = None,  # type: ignore
                            organism_type: Optional[str] = None) -> 'Species':
@@ -1471,7 +1695,8 @@ class Species:
         
         return new_species
 
-    def _configure_plant(species: 'Species') -> 'Species':
+    @classmethod
+    def _configure_plant(cls, species: 'Species') -> 'Species':
         species.Rooted = True
         species.canMove = False
         species.moveSpeed = 0.0
@@ -1498,7 +1723,8 @@ class Species:
         
         return species
 
-    def _configure_animal(species: 'Species') -> 'Species':
+    @classmethod
+    def _configure_animal(cls, species: 'Species') -> 'Species':
         species.Rooted = False
         species.canMove = True
         species.moveSpeed = random.uniform(0.1, 5.0)
@@ -1531,7 +1757,8 @@ class Species:
         
         return species
 
-    def _configure_consumer(species: 'Species', existing_species: list['Species']) -> 'Species':
+    @classmethod
+    def _configure_consumer(cls, species: 'Species', existing_species: list['Species']) -> 'Species':
         """Configure species to consume other species"""
         # Clear any existing food preferences
         species.preferredFood = {}
@@ -1552,7 +1779,8 @@ class Species:
         
         return species
 
-    def _generate_random_parts(species: 'Species', organism_type: str) -> list[part]:
+    @classmethod
+    def _generate_random_parts(cls, species: 'Species', organism_type: str) -> list[part]:
         """Generate random parts based on organism type"""
         parts = []
         if organism_type == 'plant':
@@ -1641,7 +1869,7 @@ class Species:
         
         return parts
     
-    def to_torch(self, device: str = "cpu") -> dict[str, any]:
+    def to_torch(self, device=DEVICE) -> dict[str, Any]:
         """Convert species attributes to PyTorch tensors for GPU computation."""
         tensor_dict = {}
         
@@ -1672,7 +1900,7 @@ class Species:
         if hasattr(self, 'parts') and self.parts:
             part_tensors = []
             for part in self.parts:
-                part_tensors.append(part.to_torch(device))
+                part_tensors.append(part.to_torch(device=device))
             tensor_dict['parts'] = part_tensors
             
         return tensor_dict
@@ -1805,6 +2033,222 @@ BUSH = Species(
         root(name="fibrous_roots", type=root.RootType.FIBROUS, size=0.5, spread=3.0, absorption_rate=1.2)
     ]
 ).__post_init__()
+
+@dataclass
+class Organism:
+    #creature is created from a species, at a position.
+    species: Species
+    x: float
+    y: float
+    z: float
+    age: int = 0
+    facing: float = 0.0
+    sex: int = 0 # 0 is female, 1 is male
+    injuries: dict[str, float] = field(default_factory=dict)
+    parts: list[part] = field(default_factory=list)
+    asleep: bool = False
+    dormant: bool = False
+    current_stats: dict[str, Any] = field(default_factory=dict)
+
+    #the below will be used for basically "world history".
+    history: list[str] = field(default_factory=list) # probably shouldnt use this. might cause memory issues
+    parents: Optional[list['Organism']] = field(default_factory=list) #optional only for first gen. after that, required. 
+    memory: dict[str, Any] = field(default_factory=dict) # this probably wont be used either, but potentially somehow track "known bad" and "known good" areas. 
+    
+
+    def __post_init__(self):
+        self.current_stats = copy.deepcopy(self.species.statcache)
+        if self.age < self.species.maturity:
+            self.energy = self.species.maxE * (self.age + random.uniform(1, self.species.maturity) / self.species.maturity) # start at less than normal energy
+            self.rootE = self.species.rootE * (self.age + random.uniform(1, self.species.maturity) / self.species.maturity)
+        else:
+            self.energy = self.species.maxE
+            self.rootE = self.species.rootE
+        if self.age > self.species.maturity:
+            self.reproductiveCooldown = self.age % self.species.reproFrequency
+            if hasattr(self.species.statcache['gestation_period']) and self.species.statcache['gestation_period'] is not 0 and self.sex == 0:
+                self.gestationProg = random.uniform(0, self.species.statcache['gestation_period'])
+        self.flowering = self.species.flowering
+        return self
+    
+    def ageUp(self, steps: int = 1) -> None:
+        self.age += steps
+        if self.asleep or self.dormant:
+            energy_cost = (self.current_stats.get('sleepE', 0) if self.asleep else (self.current_stats.get('dormE', 0)))
+            self.energy -= energy_cost * steps
+        else:
+            self.energy -= self.current_stats.get('idleE', 0) * steps
+        if hasattr(self, 'reproductiveCooldown'):
+            self.reproductiveCooldown = max(0, self.reproductiveCooldown - steps)
+        if hasattr(self, 'gestationProg'):
+            self.gestationProg += steps
+            if self.gestationProg >= self.current_stats.get('gestation_period', 0):
+                self.gestationProg = 0
+        if self.species.flowering and hasattr(self, 'floweringCycle'):
+            self.floweringCycle += steps
+            if self.floweringCycle >= self.current_stats.get('flowering_frequency', 1000):
+                self.floweringCycle = 0
+                self.flowering = not self.flowering
+
+    
+    def updateTemp(self, env_temp: float) -> float:
+        temp_diff = env_temp - self.current_stats.get('tempSensCold', 50)
+        resistance = self.current_stats.get('tempResis', 1.0)
+        production = self.current_stats.get('tempProduction', 0)
+        shedding = self.current_stats.get('tempShed', 1.0)
+        temp_change = (temp_diff / resistance) + production - shedding
+        
+        self.current_temp = env_temp + temp_change
+        
+        min_temp = self.current_stats.get('tempSensCold', -50)
+        max_temp = self.current_stats.get('tempSensHot', 150)
+        
+        if self.current_temp < min_temp or self.current_temp > max_temp:
+            severity = max(
+                abs(self.current_temp - min_temp) if self.current_temp < min_temp else 0,
+                abs(self.current_temp - max_temp) if self.current_temp > max_temp else 0
+            )
+            self.injure(severity * 0.01)
+        
+        return self.current_temp
+    
+    def updateSleep(self, time_of_day: float) -> bool:
+        if self.species.sleepHabits == Species.habits.NONE:
+            return False
+        
+        was_asleep = self.asleep
+        
+        if self.species.sleepHabits == Species.habits.DIURNAL:
+            self.asleep = time_of_day < 0.25 or time_of_day > 0.75
+        elif self.species.sleepHabits == Species.habits.NOCTURNAL:
+            self.asleep = 0.25 <= time_of_day <= 0.75
+        elif self.species.sleepHabits == Species.habits.CREPUSCULAR:
+            self.asleep = 0.4 <= time_of_day <= 0.6 or time_of_day <= 0.1 or time_of_day >= 0.9
+        else:
+            sleep_chance = self.species.sleepRatio
+            if random.random() < sleep_chance / 100:
+                self.asleep = not self.asleep
+        
+        return was_asleep != self.asleep
+    
+    def reproduce(self, partner: Optional['Organism'] = None) -> Optional['Organism']:
+        if self.age < self.species.maturity or self.age > self.species.pMS:
+            return None
+        if hasattr(self, 'reproductiveCooldown') and self.reproductiveCooldown > 0:
+            return None
+        if self.species.Rooted and (partner is None or partner is self):
+            if random.random() < self.species.mutationRate:
+                offspring_species = self.species.mutate()
+                return Organism(species=offspring_species,x=self.x,y=self.y,z=self.z,parents=[self])
+            if random.random() < self.species.reproFrequency:
+                return Organism(species=self.species, parents=[self], x=self.x, y=self.y, z=self.z)
+            return None
+        
+        if partner is None:
+            return None
+
+        if partner.age < partner.species.maturity or partner.age > partner.species.pMS:
+            return None
+        
+        if hasattr(partner, 'reproductiveCooldown') and partner.reproductiveCooldown > 0:
+            return None
+        
+        if self.species.reproMethod not in [Species.ReproMethod.PARTHENOGENESIS, Species.ReproMethod.BROADCAST,Species.ReproMethod.SPORES] and partner.species.reproMethod not in [Species.ReproMethod.PARTHENOGENESIS, Species.ReproMethod.BROADCAST,Species.ReproMethod.SPORES]:
+            if self.sex == partner.sex:
+                return None
+            
+        if partner.species != self.species:
+            if self.sex == 0:
+                offspring_species = self.species.get_hybrid_offspring(partner.species)
+            elif partner.sex == 0:
+                offspring_species = partner.species.get_hybrid_offspring(self.species)
+            if offspring_species is not None:
+                if random.random() < self.species.reproFrequency:    
+                    return Organism(species=offspring_species, parents=[self, partner], x=self.x, y=self.y, z=self.z)
+        
+        if random.random() < self.species.mutationRate:
+            offspring_species = self.species.mutate()
+        else:
+            offspring_species = self.species
+        self.reproductiveCooldown = self.species.reproFrequency
+        if partner is not self:
+            partner.reproductiveCooldown = partner.species.reproFrequency
+        
+        return Organism(species=offspring_species,x=(self.x + partner.x) / 2,y=(self.y + partner.y) / 2,z=(self.z + partner.z) / 2,parents=[self, partner])
+    
+    def injure(self, damage: float, part_name: Optional[str] = None) -> bool:
+        if part_name:
+            part = next((p for p in self.parts if p.name == part_name), None)
+            if not part:
+                return False
+            
+            self.injuries[part_name] = self.injuries.get(part_name, 0.0) + damage
+            if self.injuries[part_name] >= part.health:
+                if part.vital:
+                    return True
+                self.parts.remove(part)
+                del self.injuries[part_name]
+            return False
+        else:
+            total_health = sum(p.health for p in self.parts)
+            if total_health <= 0:
+                return True  # Organism is dead
+            
+            remaining_damage = damage
+            while remaining_damage > 0 and self.parts:
+                weights = [p.health for p in self.parts]
+                part = random.choices(self.parts, weights=weights)[0]
+                
+                part_damage = min(remaining_damage, part.health * 0.5)  # Max 50% damage per part
+                self.injuries[part.name] = self.injuries.get(part.name, 0.0) + part_damage
+                
+                if self.injuries[part.name] >= part.health:
+                    if part.vital:
+                        return True  # Organism dies
+                    self.parts.remove(part)
+                    del self.injuries[part.name]
+                
+                remaining_damage -= part_damage
+            
+            return False
+    
+    def heal(self, amount: float, part_name: Optional[str] = None) -> None:
+        if part_name:
+            #this is to allow for manual healing.
+            if part_name in self.injuries:
+                self.injuries[part_name] = max(0, self.injuries[part_name] - amount)
+                if self.injuries[part_name] == 0:
+                    del self.injuries[part_name]
+        else:
+            if not self.injuries:
+                return
+                
+            heal_per_part = amount / len(self.injuries)
+            for part_name in list(self.injuries.keys()):
+                self.injuries[part_name] = max(0, self.injuries[part_name] - heal_per_part)
+                if self.injuries[part_name] == 0:
+                    del self.injuries[part_name]
+    
+    def attemptMove(self, dx: float, dy: float, dz: float):
+        if self.species.Rooted or not self.species.canMove:
+            return (self.x, self.y, self.z)
+        
+        move_cost = self.current_stats.get('moveCost', 0.1) * math.sqrt(dx**2 + dy**2 + dz**2)
+        if self.energy < move_cost:
+            return (self.x, self.y, self.z)
+        self.x += dx
+        self.y += dy
+        if dz != self.z:
+            if self.current_stats['canFly']:
+                self.z += dz
+            elif self.current_stats['climbing']:
+                #I need to add a check here for something to climb on. currently it will just climb air.
+                self.z += dz
+        self.energy -= move_cost
+        if dx != 0 or dy != 0:
+            self.facing = math.atan2(dy, dx)
+        
+        return (self.x, self.y, self.z)
 
 
 
