@@ -2629,3 +2629,128 @@ class WorldGrid:
         if species not in self.species:
             self.species.append(species)
     
+    def find_food(self, organism: Organism, radius: float = 10.0) -> Optional[list[Organism]]:
+        """Find potential food sources for the organism within a given radius."""
+        if not organism.species.preferredFood:
+            return None
+            
+        nearby_orgs = self.getOrgsInRange((organism.x, organism.y, organism.z), radius)
+        if not nearby_orgs:
+            return None
+            
+        potential_food = []
+        for org in nearby_orgs:
+            # Check if this organism is edible
+            if org.species.name in organism.species.preferredFood:
+                # Higher preference food comes first
+                preference = organism.species.preferredFood[org.species.name]
+                potential_food.append((preference, org))
+            # Also check if this is a plant that can be eaten (plants don't have preferredFood lists)
+            elif organism.species.preferredFood.get("plants", 0) > 0 and org.species.Rooted:
+                potential_food.append((0.5, org))  # Default preference for generic plants
+        
+        if not potential_food:
+            return None
+            
+        # Sort by preference (highest first)
+        potential_food.sort(reverse=True, key=lambda x: x[0])
+        return [org for (pref, org) in potential_food]
+
+    def find_danger(self, organism: Organism, radius: float = 10.0) -> Optional[list[Organism]]:
+        """Find potential threats to the organism within a given radius."""
+        nearby_orgs = self.getOrgsInRange((organism.x, organism.y, organism.z), radius)
+        if not nearby_orgs:
+            return None
+            
+        threats = []
+        for org in nearby_orgs:
+            # Check if this organism considers us as food
+            if organism.species.name in org.species.preferredFood:
+                threats.append(org)
+            # Check if this organism is aggressive towards us
+            elif org.species.aggression > 0.7 and org != organism:
+                threats.append(org)
+        
+        return threats or None
+
+    def move_towards_food(self, organism: Organism, food: Organism) -> bool:
+        """Move organism towards food source."""
+        if not organism.species.canMove:
+            return False
+            
+        dx = food.x - organism.x
+        dy = food.y - organism.y
+        dz = food.z - organism.z
+        
+        distance = math.sqrt(dx**2 + dy**2 + dz**2)
+        if distance <= 0.5:  # Close enough to eat
+            return True
+            
+        # Normalize direction vector
+        dx /= distance
+        dy /= distance
+        dz /= distance
+        
+        # Scale by movement speed
+        move_dist = min(distance, organism.species.moveSpeed)
+        dx *= move_dist
+        dy *= move_dist
+        dz *= move_dist
+        
+        return organism.tryMove(dx, dy, dz)
+
+    def move_away_from_danger(self, organism: Organism, danger: Organism) -> bool:
+        """Move organism away from danger."""
+        if not organism.species.canMove:
+            return False
+            
+        dx = organism.x - danger.x
+        dy = organism.y - danger.y
+        dz = organism.z - danger.z
+        
+        distance = math.sqrt(dx**2 + dy**2 + dz**2)
+        if distance >= 20.0:  # Far enough to be safe
+            return False
+            
+        # Normalize direction vector
+        if distance > 0:
+            dx /= distance
+            dy /= distance
+            dz /= distance
+        else:
+            # If exactly on top of each other, move randomly
+            dx, dy, dz = random.uniform(-1, 1), random.uniform(-1, 1), 0
+        
+        # Scale by movement speed (flee faster than normal movement)
+        move_dist = min(organism.species.moveSpeed * 1.5, 20.0 - distance)
+        dx *= move_dist
+        dy *= move_dist
+        dz *= move_dist
+        
+        return organism.tryMove(dx, dy, dz)
+
+    def basic_ai_step(self, organism: Organism) -> None:
+        """Basic AI decision making for an organism."""
+        # Check for danger first
+        dangers = self.find_danger(organism)
+        if dangers:
+            # Flee from the closest danger
+            closest_danger = min(dangers, key=lambda d: 
+                math.sqrt((d.x-organism.x)**2 + (d.y-organism.y)**2 + (d.z-organism.z)**2))
+            self.move_away_from_danger(organism, closest_danger)
+            return
+            
+        # If no danger, look for food
+        food_sources = self.find_food(organism)
+        if food_sources:
+            # Go for the highest preference food
+            preferred_food = food_sources[0]
+            self.move_towards_food(organism, preferred_food)
+            return
+            
+        # If no food or danger, random wandering
+        if organism.species.canMove and random.random() < 0.3:  # 30% chance to move
+            dx = random.uniform(-1, 1) * organism.species.moveSpeed
+            dy = random.uniform(-1, 1) * organism.species.moveSpeed
+            dz = 0  # Keep it simple with 2D movement unless flying
+            organism.tryMove(dx, dy, dz)
