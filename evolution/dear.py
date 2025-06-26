@@ -10,6 +10,7 @@ import dearpygui.dearpygui as dpg
 import string
 import numpy as np
 import torch
+import evomodel
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 ALPHABET = string.ascii_letters
@@ -43,7 +44,7 @@ def compare_dicts(dict1: dict[str, Any], dict2: dict[str, Any]) -> float:
                 max_val = max(abs(val1), abs(val2))
                 diff = abs(val1 - val2)
                 score = 1.0 - min(diff / max_val, 1.0)
-        elif isinstance(val1, dict):
+        elif isinstance(val1, dict) and isinstance(val2, dict):
             score = compare_dicts(val1, val2)
         elif isinstance(val1, (list, tuple, set)):
             try:
@@ -1512,6 +1513,8 @@ class Species:
     curious: float = 0.0
     social: float = 0.0
     adapative: float = 0.0 # how much behavior changes while alive. nothing related to physical attributes.
+    #adaptive will be used to determine how much the model is trained during the organisms "life"
+    intelligence: float = 0.0
 
     parts: list[part] = field(default_factory=list)
     statcache: Optional[dict] = field(default_factory=dict)
@@ -2116,11 +2119,19 @@ class Organism:
     @property
     def energy(self) -> float:
         return self._energy
-
+    
     @energy.setter
     def energy(self, value: float) -> None:
         self._energy = max(0, min(value, self.species.maxE))
 
+    @property
+    def moveSpeed(self) -> float:
+        return self._moveSpeed
+    
+    @moveSpeed.setter
+    def moveSpeed(self, value: float) -> None:
+        self._moveSpeed = value
+    
     @property
     def rootE(self) -> float:
         return self._rootE
@@ -2276,6 +2287,7 @@ class Organism:
             if hasattr(self.current_stats, 'gestation_period') and self.current_stats['gestation_period'] != 0 and self.sex == 0:
                 self.gestationProg = random.uniform(0, self.current_stats['gestation_period'])
         self.flowering = self.species.flowering
+        self.moveSpeed = self.species.moveSpeed
         return self
     
     def ageUp(self, steps: int = 1) -> None:
@@ -2439,17 +2451,36 @@ class Organism:
         if self.species.Rooted or not self.species.canMove:
             return (self.x, self.y, self.z)
         
-        move_cost = self.current_stats.get('moveCost', 0.1) * math.sqrt(dx**2 + dy**2 + dz**2)
+        requested_distance = math.sqrt(dx**2 + dy**2 + dz**2)
+        move_speed = self.current_stats.get('moveSpeed', 1.0)
+        
+        if requested_distance > move_speed:
+            scale_factor = move_speed / requested_distance
+            dx *= scale_factor
+            dy *= scale_factor
+            dz *= scale_factor
+            requested_distance = move_speed
+        
+        # Calculate movement cost
+        move_cost = self.current_stats.get('moveCost', 0.1) * requested_distance
+        
+        # Check energy
         if self.energy < move_cost:
             return (self.x, self.y, self.z)
+        
+        # Apply horizontal movement
         self.x += dx
         self.y += dy
-        if dz != self.z:
+        
+        # Apply vertical movement with checks
+        if dz != 0:
             if self.current_stats['canFly']:
                 self.z += dz
             elif self.current_stats['climbing']:
-                #I need to add a check here for something to climb on. currently it will just climb air.
+                # TODO: Add check for climbable surface here
                 self.z += dz
+        
+        # Deduct energy and update facing direction
         self.energy -= move_cost
         if dx != 0 or dy != 0:
             self.facing = math.atan2(dy, dx)
@@ -2460,15 +2491,33 @@ class Organism:
         if not self.species.canMove:
             return False
             
-        distance = math.sqrt(dx**2 + dy**2 + dz**2)
-        cost = distance * self.species.moveCost
-        
+        # Check if trying to move vertically without flight capability
         if dz != 0 and not self.can_fly:
             return False
             
-        if self.energy < cost:
+        distance = math.sqrt(dx**2 + dy**2 + dz**2)
+        
+        # Calculate maximum possible distance based on move speed and energy
+        max_possible_by_speed = self.species.moveSpeed
+        max_possible_by_energy = self.energy / self.species.moveCost if self.species.moveCost > 0 else float('inf')
+        max_possible_distance = min(distance, max_possible_by_speed, max_possible_by_energy)
+        
+        # If we can't move at all
+        if max_possible_distance <= 0:
             return False
             
+        # Scale down the movement vector if needed
+        if max_possible_distance < distance:
+            scale_factor = max_possible_distance / distance
+            dx *= scale_factor
+            dy *= scale_factor
+            dz *= scale_factor
+            distance = max_possible_distance
+        
+        # Calculate energy cost
+        cost = distance * self.species.moveCost
+        
+        # Update position and energy
         self.energy -= cost
         self.x += dx
         self.y += dy
@@ -2500,12 +2549,83 @@ class Organism:
         return total_health / vital_count
 
 @dataclass
+class simSettings:
+    size: tuple[int, int, int] = (50, 50, 10) # x, y, z defaults
+    axialTilt: float = 23.44
+    latitude: float = 40.0
+    initialSpecies: list[Species] = [BUSH, TREE]
+
+@dataclass
 class WorldGrid:
     maxX: int = 50
     maxY: int = 50
     maxZ: int = 10
     organisms: list[Organism] = field(default_factory=list)
+    species: list[Species] = field(default_factory=list)
 
+    cell_size: float = 5.0  # Size of each grid cell
+    spatial_grid: dict[tuple[int, int, int], list[Organism]] = field(default_factory=dict)
+    
     def addOrganism(self, organism: Organism):
         self.organisms.append(organism)
+        self._add_to_spatial_grid(organism)
+    
+    def _add_to_spatial_grid(self, organism: Organism):
+        cell_x = int(organism.x / self.cell_size)
+        cell_y = int(organism.y / self.cell_size)
+        cell_z = int(organism.z / self.cell_size)
+        cell_key = (cell_x, cell_y, cell_z)
         
+        if cell_key not in self.spatial_grid:
+            self.spatial_grid[cell_key] = []
+        self.spatial_grid[cell_key].append(organism)
+    
+    def getOrgsInRange(self, center: tuple[float, float, float], radius: float,
+                      shape: str = 'circle', facing: Optional[tuple[float, float, float]] = None,
+                      angle: Optional[float] = None) -> Optional[list[Organism]]:
+        x, y, z = center
+        
+        # Determine which grid cells to check
+        min_cell_x = int((x - radius) / self.cell_size)
+        max_cell_x = int((x + radius) / self.cell_size)
+        min_cell_y = int((y - radius) / self.cell_size)
+        max_cell_y = int((y + radius) / self.cell_size)
+        min_cell_z = int((z - radius) / self.cell_size)
+        max_cell_z = int((z + radius) / self.cell_size)
+        
+        orgs_in_range = []
+        
+        # Check all relevant grid cells
+        for cell_x in range(min_cell_x, max_cell_x + 1):
+            for cell_y in range(min_cell_y, max_cell_y + 1):
+                for cell_z in range(min_cell_z, max_cell_z + 1):
+                    if (cell_x, cell_y, cell_z) in self.spatial_grid:
+                        for org in self.spatial_grid[(cell_x, cell_y, cell_z)]:
+                            dx = org.x - x
+                            dy = org.y - y
+                            dz = org.z - z
+                            
+                            if shape == 'circle':
+                                distance_sq = dx*dx + dy*dy + dz*dz
+                                if distance_sq <= radius*radius:
+                                    orgs_in_range.append(org)
+                            elif shape == 'square':
+                                if abs(dx) <= radius and abs(dy) <= radius and abs(dz) <= radius:
+                                    orgs_in_range.append(org)
+                            elif shape == 'cone' and facing is not None and angle is not None:
+                                distance_sq = dx*dx + dy*dy + dz*dz
+                                if distance_sq <= radius*radius:
+                                    # Calculate angle between facing direction and organism direction
+                                    dot_product = dx*facing[0] + dy*facing[1] + dz*facing[2]
+                                    org_distance = math.sqrt(distance_sq)
+                                    facing_distance = math.sqrt(facing[0]**2 + facing[1]**2 + facing[2]**2)
+                                    org_angle = math.acos(dot_product / (org_distance * facing_distance))
+                                    if org_angle <= angle:
+                                        orgs_in_range.append(org)
+        
+        return orgs_in_range or None
+        
+    def addSpecies(self, species: Species):
+        if species not in self.species:
+            self.species.append(species)
+    
