@@ -1,30 +1,540 @@
-from abc import ABC, abstractmethod
-import copy
-from dataclasses import dataclass, field
-from enum import Enum
 import hashlib
-import math
-import random
-from typing import Optional, Any
 import dearpygui.dearpygui as dpg
-import string
-import numpy as np
+import random
+import time
+import math
+from enum import Enum
+from dataclasses import dataclass, field
+from typing import List, Optional, Dict, Tuple
 import torch
+import numpy as np
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-ALPHABET = string.ascii_letters
-RANDOMCHAR = string.printable
 
+@dataclass
+class Species:
+    class MovementType(Enum):
+        TERRESTRIAL = 0
+        AVIAN = 1
+        AQUATIC = 2
+    # Core attributes
+    name: str = ""
+    name_parts: List[str] = field(default_factory=list)
+    color: tuple = (0, 0, 0)
+    max_energy: float = 10.0
+    energy_gain: float = 1.0
+    energy_consumption: float = 0.1
+    mature_age: int = 50
+    reproduction_cost: float = 5.0
+    offspring_energy: float = 3.0
+    reproduction_frequency: int = 10
+    temperature_sensitivity: float = 0.5
+    light_sensitivity: float = 0.5
+    cold_resistance: float = 0.5
+    
+    # Dormancy and Seed attributes
+    dormancy_threshold: float = 0.3
+    seed_lifespan: int = 200
+    seed_maturity_age: int = 10
+    seed_spread_radius: int = 3
+    seed_germination_chance: float = 0.1
+    seed_production_frequency: int = 30
+    seed_production_chance: float = 0.5
+
+    # Movement and type-related
+    can_move: bool = False
+    move_speed: int = 0
+    move_energy_cost: float = 0.0
+    has_roots: bool = False
+    root_energy: float = 0.0
+    
+    # Lifecycle
+    max_age: int = 0
+    sleep_ratio: float = 0.0
+    diurnal: bool = True
+    
+    # Physical characteristics
+    height: float = 1.0
+    body_type: str = "generic"
+    surface_covering: str = "skin"
+    covering_density: float = 0.5
+    covering_color: tuple = (0, 0, 0)
+    appendages: List[str] = field(default_factory=list)
+    
+    # Diet preferences
+    preferred_food_parts: List[str] = field(default_factory=list)
+    toxic_food_parts: List[str] = field(default_factory=list)
+    diet_type: float = 0.0
+    edible_parts: List[str] = field(default_factory=list)
+    
+    # Cached type
+    _type: Optional[int] = None
+    
+    # Predefined databases as class variables
+    _name_parts_db = {
+        'prefix': ["zo", "ra", "fi", "lo", "pa", "ki", "tu", "ve", "no", "xi"],
+        'suffix': ["oid", "ian", "us", "ix", "ae", "or", "ite", "oid", "ax", "is"],
+        'plant_suffix': ["folia", "phyll", "herba", "flora", "verd", "chloro"]
+    }
+    
+    _body_parts_db = {
+        'body_type': ["slim", "bulky", "streamlined", "segmented", "radial"],
+        'surface_covering': ["fur", "scales", "feathers", "skin", "bark", "chitin"],
+        'appendages': ["wings", "fins", "tentacles", "antennae", "claws", "hooves"]
+    }
+    
+    _food_parts_db = {
+        'plant': ["leaf", "fruit", "nut", "root", "stem", "flower"],
+        'animal': ["meat", "organ", "bone", "marrow", "fat"]
+    }
+    size: Tuple[float, float, float] = (1.0, 1.0, 1.0)  # width, depth, height in yards
+    occupies_multiple_cells: bool = False
+    
+    def __post_init__(self):
+        if not hasattr(self, 'movement_type'):
+            self._determine_movement_type()
+        if not self.name and not self.name_parts:
+            self._generate_random_name()
+        if not self.name:
+            self.name = "".join(part.capitalize() for part in self.name_parts)
+        
+        if not self.appendages:
+            self._generate_physical_characteristics()
+        
+        if not self.preferred_food_parts and self.type != 0:
+            self._generate_diet_preferences()
+        
+        if not self.edible_parts:
+            self._generate_edible_parts()
+
+        if not hasattr(self, 'size'):
+            self._generate_size()
+
+    def _determine_movement_type(self):
+        """Determine movement type based on physical characteristics"""
+        if not self.can_move:
+            self.movement_type = self.MovementType.TERRESTRIAL
+        elif "wings" in self.appendages and not self.has_roots:
+            self.movement_type = self.MovementType.AVIAN
+        elif "fins" in self.appendages and not self.has_roots:
+            self.movement_type = self.MovementType.AQUATIC
+        else:
+            self.movement_type = self.MovementType.TERRESTRIAL
+
+    def _generate_size(self):
+        """Generate size based on organism type"""
+        if self.type == 0:  # Plants
+            self.size = (
+                random.uniform(0.1, 3.0),  # width
+                random.uniform(0.1, 3.0),  # depth
+                random.uniform(0.1, 10.0)  # height
+            )
+        else:  # Animals
+            base_size = 0.5 if "wings" in self.appendages else 1.0
+            scale = 1.0
+            if self.body_type == "slim":
+                scale *= 0.8
+            elif self.body_type == "bulky":
+                scale *= 1.5
+            
+            self.size = (
+                random.uniform(0.8, 1.5) * scale,  # width
+                random.uniform(0.8, 1.5) * scale,  # depth
+                random.uniform(0.5, 2.0) * scale   # height
+            )
+        self.occupies_multiple_cells = any(dim > 0.8 for dim in self.size)
+
+
+    @property
+    def type(self) -> int:
+        if self._type is None:
+            if not self.can_move and self.has_roots:
+                self._type = 0  # Plant
+            elif self.diet_type < 0.3:
+                self._type = 1  # Herbivore
+            elif self.diet_type > 0.7:
+                self._type = 2  # Carnivore
+            else:
+                self._type = 3  # Omnivore
+        return self._type
+    
+    def _hash_select(self, key: str, options: List[str]) -> str:
+        """Deterministically select an option based on key hash"""
+        hash_val = int(hashlib.sha256(key.encode()).hexdigest(), 16)
+        return options[hash_val % len(options)]
+    
+    def _generate_random_name(self):
+        if self.type == 0:  # Plant
+            prefix = self._hash_select("plant_prefix", self._name_parts_db['prefix'])
+            suffix = self._hash_select("plant_suffix", self._name_parts_db['plant_suffix'])
+            self.name_parts = [prefix, suffix]
+        else:
+            prefix = self._hash_select("animal_prefix", self._name_parts_db['prefix'])
+            suffix = self._hash_select("animal_suffix", self._name_parts_db['suffix'])
+            self.name_parts = [prefix, suffix]
+    
+    def _generate_physical_characteristics(self):
+        if self.can_move:
+            self.body_type = self._hash_select("body_type", self._body_parts_db['body_type'])
+            self.surface_covering = self._hash_select("covering", self._body_parts_db['surface_covering'])
+            self.covering_density = random.uniform(0.1, 0.9)
+            
+            num_appendages = random.randint(0, 3)
+            if num_appendages > 0:
+                self.appendages = random.sample(self._body_parts_db['appendages'], num_appendages)
+            
+            self.height = random.uniform(0.8, 2.0) if self.type in [2, 3] else random.uniform(0.5, 1.5)
+        else:
+            self.body_type = "radial" if random.random() < 0.5 else "segmented"
+            self.surface_covering = "bark" if random.random() < 0.5 else "skin"
+            self.covering_density = random.uniform(0.7, 1.0)
+            self.height = random.uniform(0.1, 3.0)
+    
+    def _generate_edible_parts(self):
+        if self.type == 0:
+            num_parts = random.randint(1, 4)
+            self.edible_parts = random.sample(self._food_parts_db['plant'], num_parts)
+        else: 
+            num_parts = random.randint(1, 3)
+            self.edible_parts = random.sample(self._food_parts_db['animal'], num_parts)
+
+    def _generate_diet_preferences(self):
+        if self.type == 0:  # Plants don't eat
+            return
+        
+        if self.type == 1:  # Herbivore
+            num_preferred = random.randint(1, 3)
+            self.preferred_food_parts = random.sample(self._food_parts_db['plant'], num_preferred)
+        elif self.type == 2:  # Carnivore
+            num_preferred = random.randint(1, 2)
+            self.preferred_food_parts = random.sample(self._food_parts_db['animal'], num_preferred)
+        else:  # Omnivore
+            plant_parts = random.sample(self._food_parts_db['plant'], random.randint(1, 2))
+            animal_parts = random.sample(self._food_parts_db['animal'], random.randint(1, 2))
+            self.preferred_food_parts = plant_parts + animal_parts
+    
+    def mutate(self) -> 'Species':
+        """Create a mutated version of this species"""
+        # Helper function for bounded mutation
+        def mutate_value(value, min_val, max_val, factor=0.1):
+            new_val = value * random.uniform(1 - factor, 1 + factor)
+            return max(min_val, min(max_val, new_val))
+        
+        # Create new species with mutated attributes
+        new_species = Species(
+            name_parts=self.name_parts.copy(),
+            color=(
+                mutate_value(self.color[0], 0, 255),
+                mutate_value(self.color[1], 0, 255),
+                mutate_value(self.color[2], 0, 255)
+            ),
+            max_energy=mutate_value(self.max_energy, 1, 100),
+            energy_gain=mutate_value(self.energy_gain, 0.05, 5),
+            energy_consumption=mutate_value(self.energy_consumption, 0.01, 1),
+            mature_age=int(mutate_value(self.mature_age, 5, 200)),
+            reproduction_cost=mutate_value(self.reproduction_cost, 0.5, 20),
+            offspring_energy=mutate_value(self.offspring_energy, 0.5, 10),
+            reproduction_frequency=int(mutate_value(self.reproduction_frequency, 1, 30)),
+            temperature_sensitivity=mutate_value(self.temperature_sensitivity, 0.1, 1),
+            light_sensitivity=mutate_value(self.light_sensitivity, 0.1, 1),
+            cold_resistance=mutate_value(self.cold_resistance, 0.1, 1),
+            
+            # Seed-related attributes
+            dormancy_threshold=mutate_value(self.dormancy_threshold, 0.1, 0.6) if self.has_roots else 0,
+            seed_lifespan=int(mutate_value(self.seed_lifespan, 10, 500)) if self.has_roots else 0,
+            seed_maturity_age=int(mutate_value(self.seed_maturity_age, 1, 30)) if self.has_roots else 0,
+            seed_spread_radius=int(mutate_value(self.seed_spread_radius, 1, 10)) if self.has_roots else 0,
+            seed_germination_chance=mutate_value(self.seed_germination_chance, 0.01, 0.5) if self.has_roots else 0,
+
+            can_move=self.can_move,
+            move_speed=int(mutate_value(self.move_speed, 0, 5)) if self.can_move else 0,
+            move_energy_cost=mutate_value(self.move_energy_cost, 0, 1) if self.can_move else 0,
+            has_roots=self.has_roots,
+            root_energy=mutate_value(self.root_energy, 0, 30) if self.has_roots else 0,
+            max_age=int(mutate_value(self.max_age, 0, 2000)) if self.max_age > 0 else 0,
+            sleep_ratio=mutate_value(self.sleep_ratio, 0, 0.5) if self.can_move else 0,
+            diurnal=self.diurnal if random.random() < 0.9 else not self.diurnal,
+            height=mutate_value(self.height, 0.1, 5),
+            body_type=self.body_type,
+            surface_covering=self.surface_covering,
+            covering_density=mutate_value(self.covering_density, 0, 1),
+            covering_color=(
+                mutate_value(self.covering_color[0], 0, 255),
+                mutate_value(self.covering_color[1], 0, 255),
+                mutate_value(self.covering_color[2], 0, 255)
+            ),
+            appendages=self.appendages.copy(),
+            preferred_food_parts=self.preferred_food_parts.copy(),
+            toxic_food_parts=self.toxic_food_parts.copy(),
+            diet_type=mutate_value(self.diet_type, 0, 1),
+            edible_parts=self.edible_parts.copy()
+        )
+        
+        # Random mutations
+        if random.random() < 0.05 and new_species.can_move:
+            if random.random() < 0.5 and new_species.appendages:
+                new_species.appendages.pop(random.randint(0, len(new_species.appendages)-1))
+            elif len(new_species.appendages) < 3:
+                available = [a for a in self._body_parts_db['appendages'] if a not in new_species.appendages]
+                if available:
+                    new_species.appendages.append(random.choice(available))
+        
+        if random.random() < 0.1 and new_species.type != 0:
+            if random.random() < 0.5 and new_species.preferred_food_parts:
+                new_species.preferred_food_parts.pop(random.randint(0, len(new_species.preferred_food_parts)-1))
+            else:
+                all_parts = self._food_parts_db['plant'] + self._food_parts_db['animal']
+                available = [p for p in all_parts if p not in new_species.preferred_food_parts]
+                if available:
+                    new_species.preferred_food_parts.append(random.choice(available))
+        
+        # Rare type change
+        if random.random() < 0.005:
+            if new_species.type == 0:  # Plant -> Animal
+                new_species.can_move = True
+                new_species.has_roots = False
+                new_species.move_speed = random.randint(1, 3)
+                new_species.move_energy_cost = random.uniform(0.1, 0.5)
+                new_species.max_age = random.randint(100, 500)
+                new_species.sleep_ratio = random.uniform(0.1, 0.3)
+                new_species._generate_diet_preferences()
+                new_species._generate_physical_characteristics()
+            else:  # Animal -> Plant
+                if random.random() < 0.1:
+                    new_species.can_move = False
+                    new_species.has_roots = True
+                    new_species.move_speed = 0
+                    new_species.move_energy_cost = 0
+                    new_species.max_age = 0
+                    new_species.sleep_ratio = 0
+                    new_species.root_energy = random.uniform(5, 20)
+                    new_species.preferred_food_parts = []
+                    new_species.toxic_food_parts = []
+                    new_species._generate_physical_characteristics()
+
+        if random.random() < 0.01:
+            if new_species.movement_type == self.MovementType.TERRESTRIAL:
+                if "wings" in new_species.appendages:
+                    new_species.movement_type = self.MovementType.AVIAN
+                elif "fins" in new_species.appendages:
+                    new_species.movement_type = self.MovementType.AQUATIC
+            elif new_species.movement_type == self.MovementType.AVIAN:
+                if random.random() < 0.5:
+                    new_species.movement_type = self.MovementType.TERRESTRIAL
+                    new_species.appendages.remove("wings")
+            elif new_species.movement_type == self.MovementType.AQUATIC:
+                if random.random() < 0.5:
+                    new_species.movement_type = self.MovementType.TERRESTRIAL
+                    new_species.appendages.remove("fins")
+
+        new_species._generate_random_name()
+        return new_species
+
+    @classmethod
+    def generate_random_species(cls, food_sources: Optional[List['Species']] = None) -> 'Species':
+        """Generate a random species with sensible defaults"""
+        species = cls()
+        
+        # Set core attributes
+        species.max_energy = random.uniform(5, 50)
+        species.energy_gain = random.uniform(0.1, 2.0)
+        species.energy_consumption = random.uniform(0.01, 0.2)
+        species.mature_age = random.randint(10, 100)
+        species.reproduction_cost = random.uniform(1, 10)
+        species.offspring_energy = random.uniform(1, 5)
+        species.reproduction_frequency = random.randint(1, 20)
+        species.temperature_sensitivity = random.uniform(0.1, 1.0)
+        species.light_sensitivity = random.uniform(0.1, 1.0)
+        species.cold_resistance = random.uniform(0.1, 1.0)
+        
+        # Determine if plant or animal
+        is_plant = random.random() < (0.3 if food_sources else 0.5)
+        species.can_move = not is_plant
+        species.has_roots = is_plant
+
+        # Set seed attributes for plants
+        if is_plant:
+            species.dormancy_threshold = random.uniform(0.2, 0.4)
+            species.root_energy = random.uniform(5, 20)
+            species.color = (random.randint(50, 150), random.randint(100, 200), random.randint(50, 150))
+            species.seed_lifespan = random.randint(100, 400)
+            species.seed_maturity_age = random.randint(5, 25)
+            species.seed_spread_radius = random.randint(2, 6)
+            species.seed_germination_chance = random.uniform(0.05, 0.2)
+            species.seed_production_frequency = random.randint(20, 40)
+            species.seed_production_chance = random.uniform(0.3, 0.7)
+        else:
+            # Animal attributes
+            species.move_speed = random.randint(1, 3)
+            species.move_energy_cost = random.uniform(0.1, 0.5)
+            species.max_age = random.randint(100, 1000)
+            species.sleep_ratio = random.uniform(0.1, 0.3)
+            species.diurnal = random.random() < 0.7
+            
+            # Set diet based on available food sources
+            if food_sources:
+                plant_parts = list(set(p for s in food_sources if s.type == 0 for p in s.edible_parts))
+                animal_parts = list(set(p for s in food_sources if s.type != 0 for p in s.edible_parts))
+                
+                can_eat_plants = bool(plant_parts)
+                can_eat_animals = bool(animal_parts)
+                
+                if can_eat_plants and can_eat_animals:
+                    choice = random.choices(['herbivore', 'carnivore', 'omnivore'], weights=[25, 25, 50], k=1)[0]
+                elif can_eat_plants:
+                    choice = 'herbivore'
+                elif can_eat_animals:
+                    choice = 'carnivore'
+                else:
+                    choice = 'fallback'
+                
+                if choice == 'herbivore':
+                    species.diet_type = random.uniform(0.0, 0.3)
+                    num = random.randint(1, min(len(plant_parts), 3))
+                    species.preferred_food_parts = random.sample(plant_parts, num)
+                elif choice == 'carnivore':
+                    species.diet_type = random.uniform(0.7, 1.0)
+                    num = random.randint(1, min(len(animal_parts), 2))
+                    species.preferred_food_parts = random.sample(animal_parts, num)
+                elif choice == 'omnivore':
+                    species.diet_type = random.uniform(0.3, 0.7)
+                    p_num = random.randint(1, min(len(plant_parts), 2))
+                    a_num = random.randint(1, min(len(animal_parts), 2))
+                    species.preferred_food_parts = (random.sample(plant_parts, p_num) + 
+                                                  random.sample(animal_parts, a_num))
+            
+            if not species.preferred_food_parts:
+                species.diet_type = random.random()
+                species._generate_diet_preferences()
+
+            # Set color based on diet
+            if species.diet_type < 0.3:  # Herbivore
+                species.color = (random.randint(150, 255), random.randint(150, 255), random.randint(100, 200))
+            elif species.diet_type > 0.7:  # Carnivore
+                species.color = (random.randint(200, 255), random.randint(100, 150), random.randint(100, 150))
+            else:  # Omnivore
+                species.color = (random.randint(150, 255), random.randint(150, 200), random.randint(100, 150))
+
+        # Finalize species
+        species._generate_random_name()
+        species._generate_physical_characteristics()
+        species._generate_edible_parts()
+        all_food = cls._food_parts_db['plant'] + cls._food_parts_db['animal']
+        species.toxic_food_parts = [p for p in all_food if random.random() < 0.1 and p not in species.preferred_food_parts]
+        
+        return species
+
+# Default species examples
+GRASS = Species(
+    name_parts=["gra", "ss"],
+    color=(100, 200, 100), max_energy=15, energy_gain=0.3, energy_consumption=0.05,
+    mature_age=20, reproduction_cost=2, offspring_energy=1.5, reproduction_frequency=5,
+    temperature_sensitivity=0.8, light_sensitivity=0.9, cold_resistance=0.7,
+    dormancy_threshold=0.3, seed_lifespan=365 * 2, seed_maturity_age=20,
+    seed_spread_radius=4, seed_germination_chance=0.15,
+    can_move=False, has_roots=True, root_energy=8,
+    height=0.3, body_type="radial", surface_covering="skin", covering_density=0.8
+)
+GRASS.__post_init__()
+
+OMNIVORE = Species(
+    name_parts=["om", "niv", "ore"],
+    color=(200, 150, 100), max_energy=25, energy_gain=2.0, energy_consumption=0.2,
+    mature_age=100, reproduction_cost=5, offspring_energy=3, reproduction_frequency=10,
+    temperature_sensitivity=0.6, light_sensitivity=0.3, cold_resistance=0.5,
+    dormancy_threshold=0.25,
+    can_move=True, move_speed=2, move_energy_cost=0.2,
+    max_age=500, sleep_ratio=0.2, diurnal=True,
+    height=1.2, body_type="slim", surface_covering="fur", covering_density=0.6,
+    appendages=["claws"], diet_type=0.5,
+    preferred_food_parts=["fruit", "meat"], toxic_food_parts=["root"]
+)
+OMNIVORE.__post_init__()
+
+@dataclass
+class Organism:
+    species: Species
+    position: Tuple[int, int, int]  # (x, y, z)
+    energy: float = 0
+    root_energy: float = 0  # Only used for plants
+    age: float = 0
+    is_dormant: bool = False
+    is_dead: bool = False
+    injury_level: float = 0.0
+    id: int = field(default=-1) 
+    occupied_cells: List[Tuple[int, int, int]] = field(default_factory=list)
+    
+    def __post_init__(self):
+        if self.species.type == 0 or (hasattr(self.species, 'movement_type') and 
+                                      self.species.movement_type == Species.MovementType.TERRESTRIAL):
+            self.position = (self.position[0], self.position[1], 0)
+        self._calculate_occupied_cells()
+    
+    def _calculate_occupied_cells(self):
+        """Calculate all cells this organism occupies based on its size"""
+        self.occupied_cells = [self.position]  # Always include the primary position
+        
+        if self.species.occupies_multiple_cells:
+            width, depth, height = self.species.size
+            x, y, z = self.position
+            
+            # Calculate how many cells in each dimension
+            cells_x = max(1, math.ceil(width))
+            cells_y = max(1, math.ceil(depth))
+            cells_z = max(1, math.ceil(height))
+            
+            # Generate all occupied cells
+            for dx in range(cells_x):
+                for dy in range(cells_y):
+                    for dz in range(cells_z):
+                        if dx == 0 and dy == 0 and dz == 0:
+                            continue  # Skip the primary position already added
+                        new_pos = (x + dx, y + dy, z + dz)
+                        if new_pos not in self.occupied_cells:
+                            self.occupied_cells.append(new_pos)
+
+@dataclass
+class Seed:
+    species: Species
+    position: Tuple[int, int, int]
+    age: int = 0
+    id: int = field(default=-1)
+
+@dataclass
+class SimulationSettings:
+    grid_size: int = 50
+    axial_tilt: float = 23.44  # in degrees
+    latitude: float = 45.0     # in degrees
+    initial_organisms: List[Organism] = field(default_factory=list)
+    initial_seeds: List[Seed] = field(default_factory=list)
+
+class IDGenerator:
+    def __init__(self):
+        self.current_id = 0
+        self.max_id = 2**63 - 1  # Max 64-bit signed integer
+        self.recycled_ids = set()
+    
+    def get_id(self) -> int:
+        if self.recycled_ids:
+            return self.recycled_ids.pop()
+        self.current_id += 1
+        if self.current_id > self.max_id:
+            self.current_id = 1  # Wrap around
+        return self.current_id
+    
+    def recycle_id(self, id: int):
+        if id > 0:
+            self.recycled_ids.add(id)
 
 class WorldGrid:
     def __init__(self, size: int):
         self.size = size
-        self.organisms: dict[tuple[int, int, int], Organism] = {}
-        self.organism_ids: dict[int, tuple[int, int, int]] = {}
+        self.organisms: Dict[Tuple[int, int, int], Organism] = {}
+        self.organism_ids: Dict[int, Tuple[int, int, int]] = {}
 
-        # seeds are stored in lists per tile
-        self.seeds: dict[tuple[int, int, int], list[seed]] = {}
-        self.seed_ids: dict[int, tuple[int, int, int]] = {}
+        # Seeds are stored in lists per tile
+        self.seeds: Dict[Tuple[int, int, int], List[Seed]] = {}
+        self.seed_ids: Dict[int, Tuple[int, int, int]] = {}
         self.organism_id_gen = IDGenerator()
         self.seed_id_gen = IDGenerator()
         
@@ -36,22 +546,58 @@ class WorldGrid:
                         for dz in range(-1, 2)
                         if not (dx == 0 and dy == 0 and dz == 0)]
         self.neighbor_offsets = torch.tensor(neighbor_list, dtype=torch.int32, device=DEVICE)
-        self.cell_occupants: dict[tuple[int, int, int], list[int]] = {}
+        self.cell_occupants: Dict[Tuple[int, int, int], List[int]] = {}
         
-    def can_occupy_position(self, organism: Organism, position: tuple[int, int, int]) -> bool:
+    def can_occupy_position(self, organism: Organism, position: Tuple[int, int, int]) -> bool:
         """Check if this organism can occupy the given position based on its movement type"""
         x, y, z = position
         if not self.is_valid_position(position):
             return False
             
         # Terrestrial organisms must stay at z=0
-        if not organism.can_fly:
+        if organism.species.movement_type == Species.MovementType.TERRESTRIAL:
             return z == 0
+            
+        # Aquatic organisms must stay below z=0 (if we implement water levels)
+        elif organism.species.movement_type == Species.MovementType.AQUATIC:
+            return z <= 0  # Assuming negative z is underwater
+            
+        # Avian can be anywhere but have restrictions when injured
+        elif organism.species.movement_type == Species.MovementType.AVIAN:
+            if organism.injury_level > 0.5:  # Severely injured birds try to land
+                return z == 0
+            return True
             
         return True
     
     def add_organism(self, organism: Organism):
-        self.organisms[organism] = organism
+        """Add organism, checking all its cells are available"""
+        # Enforce terrestrial constraints
+        if organism.species.type == 0:  # Plants must be terrestrial
+            organism.position = (organism.position[0], organism.position[1], 0)
+        
+        # Check all cells are valid for this organism's movement type
+        for cell in organism.occupied_cells:
+            if not self.can_occupy_position(organism, cell):
+                raise ValueError(f"Invalid position {cell} for {organism.species.movement_type}")
+        # First calculate occupied cells if not done
+        if organism.id == -1:
+            organism.id = self.organism_id_gen.get_id()
+        if not organism.occupied_cells:
+            organism._calculate_occupied_cells()
+        
+        # Check all cells are valid
+        for cell in organism.occupied_cells:
+            if not self.is_valid_position(cell):
+                raise ValueError(f"Invalid position {cell}")
+        
+        # Check if primary position is available
+        if not self.is_position_available(organism.position):
+            raise ValueError(f"Primary position {organism.position} occupied")
+        
+        # Add to tracking structures
+        self.organisms[organism.id] = organism
+        self.organism_ids[organism.id] = organism.occupied_cells
         
         # Mark all occupied cells
         for cell in organism.occupied_cells:
@@ -59,7 +605,7 @@ class WorldGrid:
                 self.cell_occupants[cell] = []
             self.cell_occupants[cell].append(organism.id)
 
-    def add_seed(self, seed: seed):
+    def add_seed(self, seed: Seed):
         if seed.id == -1:
             seed.id = self.seed_id_gen.get_id()
         pos = seed.position
@@ -103,13 +649,13 @@ class WorldGrid:
         del self.seed_positions[seed_id]
         self.seed_id_gen.recycle_id(seed_id)
 
-    def get_organisms_at_position(self, position: tuple[int, int, int]) -> list[Organism]:
+    def get_organisms_at_position(self, position: Tuple[int, int, int]) -> List[Organism]:
         """Get all organisms at a position (could be multiple for small organisms)"""
         if position not in self.cell_occupants:
             return []
         return [self.organisms[oid] for oid in self.cell_occupants[position]]
     
-    def is_position_available(self, position: tuple[int, int, int], ignore_organism: Optional[int] = None) -> bool:
+    def is_position_available(self, position: Tuple[int, int, int], ignore_organism: Optional[int] = None) -> bool:
         """Check if position is available, optionally ignoring a specific organism"""
         if not self.is_valid_position(position):
             return False
@@ -133,7 +679,7 @@ class WorldGrid:
                 del self.seeds[pos]
         del self.seed_ids[seed_id]
         
-    def move_organism(self, organism_id: int, new_position: tuple[int, int, int]) -> bool:
+    def move_organism(self, organism_id: int, new_position: Tuple[int, int, int]) -> bool:
         """Move organism to new position if all cells are available"""
         if organism_id not in self.organisms:
             return False
@@ -185,7 +731,7 @@ class WorldGrid:
         
         return True
         
-    def _calculate_new_cells(self, organism: Organism, new_position: tuple[int, int, int]) -> list[tuple[int, int, int]]:
+    def _calculate_new_cells(self, organism: Organism, new_position: Tuple[int, int, int]) -> List[Tuple[int, int, int]]:
         """Calculate new occupied cells based on size and new position"""
         if not organism.species.occupies_multiple_cells:
             return [new_position]
@@ -204,16 +750,16 @@ class WorldGrid:
                     new_cells.append((x + dx, y + dy, z + dz))
         return new_cells
     
-    def get_organism(self, position: tuple[int, int, int]) -> Optional[Organism]:
+    def get_organism(self, position: Tuple[int, int, int]) -> Optional[Organism]:
         return self.organisms.get(position)
         
-    def is_valid_position(self, position: tuple[int, int, int]) -> bool:
+    def is_valid_position(self, position: Tuple[int, int, int]) -> bool:
         x, y, z = position
         return (0 <= x < self.size and 
                 0 <= y < self.size and 
                 0 <= z < self.size)
     
-    def get_empty_spots_in_radius(self, position: tuple[int, int, int], occupancy_tensor: torch.Tensor, radius: int = 1) -> list[tuple[int, int, int]]:
+    def get_empty_spots_in_radius(self, position: Tuple[int, int, int], occupancy_tensor: torch.Tensor, radius: int = 1) -> List[Tuple[int, int, int]]:
         x, y, z = position
         
         # Create ranges for each dimension
@@ -239,7 +785,7 @@ class WorldGrid:
 
         return [tuple(pos) for pos in empty_positions_tensor.cpu().numpy()]
 
-    def get_food_in_radius(self, position: tuple[int, int, int], occupancy_tensor: torch.Tensor, radius: int) -> list[tuple[tuple[int, int, int], Organism]]:
+    def get_food_in_radius(self, position: Tuple[int, int, int], occupancy_tensor: torch.Tensor, radius: int) -> List[Tuple[Tuple[int, int, int], Organism]]:
         x, y, z = position
         
         # Create ranges for each dimension
@@ -395,7 +941,7 @@ class GameOfLife:
         if viewport_width > 300:
             dpg.set_item_width("game_window", viewport_width - 320)
     
-    def get_species_color(self, organism: Organism) -> tuple[int, int, int]:
+    def get_species_color(self, organism: Organism) -> Tuple[int, int, int]:
         """Calculate display color for an organism based on environment and state"""
         if organism.is_dead:
             return (50, 50, 50)  # Gray for dead organisms
@@ -809,7 +1355,7 @@ class GameOfLife:
                 organism.age >= species.mature_age and 
                 self.current_day % species.reproduction_frequency == 0):
                 
-                if species.type == 0:  # Plant -> seeds
+                if species.type == 0:  # Plant -> Seeds
                     if (random.random() < species.seed_production_chance and
                         self.temperature > species.dormancy_threshold and
                         self.is_day and self.light_level > 0.5):
@@ -819,7 +1365,7 @@ class GameOfLife:
                             num_seeds = random.randint(1, 3)  # Reduced from 2-5 to 1-3
                             for new_pos in random.sample(empty_spots, min(len(empty_spots), num_seeds)):
                                 new_species = species.mutate() if random.random() < 0.01 else species
-                                seeds_to_add.append(seed(species=new_species, position=new_pos))
+                                seeds_to_add.append(Seed(species=new_species, position=new_pos))
                             organism.energy -= species.reproduction_cost
                 else:  # Animal -> Live offspring
                     empty_neighbors = self.grid.get_empty_spots_in_radius(pos, occupancy_tensor, radius=1)
@@ -963,13 +1509,11 @@ class GameOfLife:
         """Modified to properly place organisms based on movement type"""
         self.clear_grid()
         num_species = random.randint(5, 10)
-        created_species: list[Species] = []
-        created_species.append(BUSH)
-        created_species.append(TREE)
+        created_species = [GRASS]
         
         # Generate random species
         for _ in range(num_species - 1):
-            new_species = Species.generate_random_species(existing_species=created_species, organism_type="plant" if random.random() < 0.7 else "animal")
+            new_species = Species.generate_random_species(food_sources=created_species)
             created_species.append(new_species)
             
         plant_species = [s for s in created_species if s.type == 0]
