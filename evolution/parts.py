@@ -188,10 +188,7 @@ class part(ABC):
     
     @classmethod
     def randomize(cls, name: str = "", organism_type: str = "animal") -> 'part':
-        part_type = random.choice([
-            skin, limb, sensory, internal, appendage,
-            root, stem, leaf,  reproductive,
-            egg_sac
+        part_type = random.choice([neural, limb
         ])
         return part_type.randomize(name, organism_type)
     
@@ -259,22 +256,6 @@ class part(ABC):
                     stats['can_fly'] = 0.0
                 else:
                     stats['flight_efficiency'] = wing_ratio * self.movement_speed
-                    
-        elif isinstance(self, sensory) and self.type == sensory.SensoryType.EYE:
-            healthy_eyes, total_eyes = self.count_healthy_subparts(sensory)
-            if total_eyes > 0:
-                eye_ratio = healthy_eyes / total_eyes
-                stats['vision_quality'] = eye_ratio * self.precision
-                if eye_ratio < 0.3:
-                    stats['blindness'] = 1.0 - eye_ratio
-                    
-        elif isinstance(self, internal) and self.type == internal.InternalType.HEART:
-            healthy_hearts, total_hearts = self.count_healthy_subparts(internal)
-            if total_hearts > 0:
-                heart_ratio = healthy_hearts / total_hearts
-                stats['circulation'] *= heart_ratio
-                if heart_ratio < 0.5:
-                    stats['circulatory_shock'] = 1.0 - heart_ratio
 
         self.statCache = stats
         return stats
@@ -373,7 +354,7 @@ class part(ABC):
         """Convert the part to JSON string"""
         return json.dumps(self.to_dict(), indent=2)
 
-    def create_dpg_editor(self, parent: str) -> str:
+    def create_dpg_editor(self, parent: str):
         """Create a Dear PyGui editor for this part"""
         if parent is None:
             parent = dpg.add_window(label=f"Part Editor: {self.name}", width=600, height=800)
@@ -401,13 +382,33 @@ class part(ABC):
                     with dpg.tree_node(label=f"Subpart {i}: {subpart.name}"):
                         subpart.create_dpg_editor(parent)
                 
-                def add_new_subpart():
-                    new_part = self.randomize("New Subpart")
-                    self.subparts.append(new_part)
-                    dpg.delete_item(parent, children_only=True)
-                    self.create_dpg_editor(parent)
+                # Add part type selection combo
+                part_types = [
+                    "Random", "Neural", "Skin", "Limb", "Sensory", 
+                    "Internal", "Appendage", "Root", "Stem", "Leaf",
+                    "Reproductive", "Egg Sac"
+                ]
                 
-                dpg.add_button(label="Add Subpart", callback=add_new_subpart)
+                with dpg.group(horizontal=True):
+                    part_combo = dpg.add_combo(
+                        label="Part Type",
+                        items=part_types,
+                        default_value="Random",
+                        width=150
+                    )
+                    org_type_combo = dpg.add_combo(
+                        label="Organism Type",
+                        items=["Animal", "Plant"],
+                        default_value="Animal",
+                        width=100
+                    )
+                    dpg.add_button(
+                        label="Add Subpart",
+                        callback=lambda: self._add_subpart_callback(
+                            dpg.get_value(part_combo),
+                            dpg.get_value(org_type_combo).lower(),
+                            parent
+                        ))
             
             # Stats display
             with dpg.collapsing_header(label="Stats"):
@@ -421,6 +422,32 @@ class part(ABC):
                 dpg.add_button(label="Load from JSON", callback=lambda: self._load_from_json(parent))
         
         return parent
+
+    def _add_subpart_callback(self, part_type: str, organism_type: str, parent: str):
+        """Callback for adding a new subpart of specific type"""
+        part_map = {
+            "neural": neural,
+            "limb": limb,
+            "sensory": sensory,
+            "internal": internal,
+            "reproductive": reproductive,
+            "skin": skin
+        }
+        
+        if part_type.lower() == "random":
+            new_part = part.randomize("New Part", organism_type)
+        elif part_type.lower() in part_map:
+            new_part = part_map[part_type.lower()].randomize(
+                f"New {part_type}", 
+                organism_type
+            )
+        else:
+            new_part = part.randomize("New Part", organism_type)
+        
+        self.subparts.append(new_part)
+        # Refresh the UI
+        dpg.delete_item(parent, children_only=True)
+        self.create_dpg_editor(parent)
 
     def _add_dpg_slider(self, label: str, attribute: str, min_val: float, max_val: float):
         """Helper to add a slider for a numeric attribute"""
@@ -594,209 +621,6 @@ class neural(part):
             _energyCost=random.gauss(5.0, 1.0),
             _size=random.gauss(3.0, 0.5) if organism_type == "animal" else random.gauss(0.5, 0.1)
         )
-    
-@dataclass
-class torso(part):
-    name: str = ""
-    vital: bool = True
-    class TorsoType(Enum):
-        STANDARD = 0        # Typical animal torso
-        SEGMENTED = 1       # Like insects or worms
-        RADIAL = 2         # Starfish-like symmetry
-        HYDROSTATIC = 3    # Fluid-filled like worms
-        EXOSKELETAL = 4    # Hard outer shell
-        TRUNK = 5          # Plant trunk/stem
-        BULB = 6           # Bulbous plant base
-        TUBER = 7          # Potato-like storage organ
-    
-    type: TorsoType = TorsoType.STANDARD
-    flexibility: float = 0.5  # 0=rigid, 1=very flexible
-    segments: int = 1         # Number of body segments
-    _storage_capacity: float = 0.0  # For storing nutrients/water
-    _structural_integrity: float = 1.0  # Resistance to damage
-    
-    def setup_default_subparts(self):
-        has_neural = any(isinstance(p, neural) for p in self.subparts)
-        if not has_neural:
-            self.subparts.append(neural.randomize("Nervous System"))
-            
-        # Add basic internal organs
-        self.subparts.extend([
-            internal.randomize("Heart", "animal"),
-            internal.randomize("Lungs", "animal"),
-            internal.randomize("Stomach", "animal")
-        ])
-
-    @property
-    def storage_capacity(self) -> float:
-        return self._storage_capacity
-    
-    @storage_capacity.setter
-    def storage_capacity(self, value: float):
-        self._storage_capacity = max(0, value)
-        self._statCache = self.calculateStats(True)
-        
-    @property
-    def structural_integrity(self) -> float:
-        return self._structural_integrity
-    
-    @structural_integrity.setter
-    def structural_integrity(self, value: float):
-        self._structural_integrity = max(0.1, min(1.0, value))
-        self._statCache = self.calculateStats(True)
-    
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        
-        # Torso-specific stats
-        stats['storage'] = self.storage_capacity * self.size
-        stats['structural_integrity'] = self.structural_integrity
-        
-        # Modify movement stats based on torso type
-        if self.type == self.TorsoType.SEGMENTED:
-            stats['flexibility'] = self.flexibility * 1.5
-            stats['burrow_speed'] = 0.5 * self.segments
-        elif self.type == self.TorsoType.RADIAL:
-            stats['balance'] = 1.5
-            stats['flexibility'] = self.flexibility * 0.8
-        elif self.type == self.TorsoType.HYDROSTATIC:
-            stats['flexibility'] = self.flexibility * 2.0
-            stats['burrow_speed'] = 1.0 * self.segments
-            stats['impact_resistance'] = 0.7
-        elif self.type == self.TorsoType.EXOSKELETAL:
-            stats['armor'] = 2.0 * self.structural_integrity
-            stats['flexibility'] = self.flexibility * 0.5
-        elif self.type in [self.TorsoType.TRUNK, self.TorsoType.BULB, self.TorsoType.TUBER]:
-            stats['photosynthesis_area'] = 0.5 * self.size
-            stats['water_storage'] = 2.0 * self.storage_capacity * self.size
-            
-        return stats
-
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'torso':
-        if organism_type == "plant":
-            torso_type = random.choice([
-                cls.TorsoType.TRUNK,
-                cls.TorsoType.BULB,
-                cls.TorsoType.TUBER
-            ])
-            storage_capacity = random.uniform(1.0, 5.0)
-        else:
-            torso_type = random.choice([
-                cls.TorsoType.STANDARD,
-                cls.TorsoType.SEGMENTED,
-                cls.TorsoType.RADIAL,
-                cls.TorsoType.HYDROSTATIC,
-                cls.TorsoType.EXOSKELETAL
-            ])
-            storage_capacity = random.uniform(0.1, 2.0)
-            
-        return cls(
-            name=name or "Torso",
-            type=torso_type,
-            flexibility=random.uniform(0.2, 0.8),
-            segments=random.randint(1, 20) if torso_type in [cls.TorsoType.SEGMENTED, cls.TorsoType.HYDROSTATIC] else 1,
-            _storage_capacity=storage_capacity,
-            _structural_integrity=random.uniform(0.5, 1.0),
-            _size=random.uniform(6.0, 24.0) if organism_type == "animal" else random.uniform(12.0, 96.0),
-            _health=random.uniform(20.0, 50.0),
-            _energyCost=random.uniform(1.0, 3.0),
-            _mutationRate=random.uniform(0.00005, 0.0002)
-        )
-    
-@dataclass
-class skin(part):
-    name: str = ""
-    class Skin(Enum):
-        FUR = 0
-        SCALES = 1
-        BARK = 2
-        FEATHERS = 3
-        CHITIN = 4
-        MEMBRANE = 6
-        EXOSKELETON = 7
-        CUTICLE = 8
-        CORK = 9
-        LENTICEL = 10
-        THORN = 11
-    type: Skin = Skin.FUR
-    thickness: float = 0.5  # current thickness (0-max_thickness)
-    max_thickness: float = 2.0  # maximum thickness in inches
-    pattern: str = "solid"  # pattern type (stripes, spots, etc.)
-    camouflage_effectiveness: float = 0.0  # 0-1 scale
-    color_change_speed: float = 0.0  # how quickly it can change colors
-    insulation_factor: float = 0.5  # how well it retains heat
-    cooling_factor: float = 0.5  # how well it dissipates heat
-    can_photosynthesize: bool = False
-    luminescent: bool = False
-    luminense: float = 0.0
-    water_retention: float = 0.0  # Important for plants
-    gas_exchange: float = 1.0 # For stomata-like structures
-
-    def mutate(self):
-        super().mutate()
-        if random.random() < self.mutationRate:
-            self.pattern = random.choice(["solid", "stripes", "spots", "marbled", "mottled"])
-
-    def setup_default_subparts(self):
-        pass
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        substats['armor'] = self.thickness * 0.5  # Thicker skin provides more armor
-        substats['camouflage'] = self.camouflage_effectiveness
-        substats['insulation'] = self.insulation_factor
-        substats['cooling'] = self.cooling_factor
-        substats['water_retention'] = self.water_retention
-        substats['gas_exchange'] = self.gas_exchange
-        
-        if self.can_photosynthesize:
-            substats['photosynthesis'] = 0.5 * self.thickness  # Photosynthetic capability
-        if self.luminescent:
-            substats['luminescence'] = self.luminense  # Basic luminescence value
-            substats['camouflage'] -= self.luminense
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value * self.thickness)
-            else:
-                stats[stat] = (value * self.thickness)
-        return stats
-
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'skin':
-        skin_type = random.choice(list(skin.Skin))
-        
-        if organism_type == "plant":
-            thickness = random.uniform(0.05, 0.3)
-            can_photosynthesize = True
-            water_retention = random.uniform(0.5, 2.0)
-            camouflage = random.uniform(0.0, 0.3)
-        else:
-            thickness = random.uniform(0.1, 1.0)
-            can_photosynthesize = random.random() < 0.1
-            water_retention = random.uniform(0.0, 0.5)
-            camouflage = random.uniform(0.0, 0.8)
-            
-        return cls(
-            name=name or "skin",
-            type=skin_type,
-            thickness=thickness,
-            max_thickness=thickness * random.uniform(1.2, 3.0),
-            pattern=random.choice(["solid", "stripes", "spots", "marbled", "mottled"]),
-            camouflage_effectiveness=camouflage,
-            color_change_speed=random.uniform(0.0, 1.0),
-            insulation_factor=random.uniform(0.2, 1.5),
-            cooling_factor=random.uniform(0.2, 1.0),
-            can_photosynthesize=can_photosynthesize,
-            luminescent=random.random() < 0.05,
-            luminense=random.uniform(0.0, 1.0) if random.random() < 0.05 else 0.0,
-            water_retention=water_retention,
-            gas_exchange=random.uniform(0.5, 1.5),
-            _energyCost=random.uniform(0.05, 0.2),
-            _mutationRate=random.uniform(0.0001, 0.001)
-        )
 
 @dataclass
 class limb(part):
@@ -804,974 +628,253 @@ class limb(part):
         ARM = 0
         LEG = 1
         WING = 2
-        TENTACLE = 3
-        FIN = 4
-        TAIL = 5
-        PSEUDOPOD = 6
+        TAIL = 3
+        TENTACLE = 4
+        BRANCH = 5  # For plants
+        ROOT = 6    # For plants
+        FIN = 7
+        ANTENNA = 8
+        CLAW = 9
+        HOOF = 10
+        WEBBED = 11
+    
     type: LimbType = LimbType.ARM
-    strength: float = 1.0  # physical strength
-    dexterity: float = 1.0  # fine motor control
-    reach: float = 1.0  # how far it can extend
-    prehensile: bool = False  # can grasp objects
-    # Movement properties
-    movement_speed: float = 1.0  # contributes to overall speed
-    movement_cost: float = 0.1  # energy cost per movement
-    # Special abilities - assume these mean that this is for the task, if not, then it can still be used to do the task, just at a lower rate.
-    can_climb: bool = False if type == LimbType.PSEUDOPOD else True
-    can_swim: bool = True if type == LimbType.FIN else False
-    can_dig: bool = False if (type == LimbType.PSEUDOPOD or type == LimbType.TENTACLE or type == LimbType.WING) else True
-    can_fly: bool = True if type == LimbType.WING else False
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats  = {}
-        substats['strength'] = self.strength * self.size
-        substats['dexterity'] = self.dexterity
-        substats['reach'] = self.reach * self.size
-        substats['movement_speed'] = self.movement_speed * self.size
-        substats['movement_cost'] = self.movement_cost * self.size
-        
-        if self.prehensile:
-            substats['manipulation'] = 0.7 * self.dexterity
-        else:
-            substats['manipulation'] = 0.1 * self.dexterity
-            
-        # Movement capabilities
-        if self.can_climb:
-            substats['climbing'] = (0.5 * self.strength) + (self.dexterity * 0.1)
-        else:
-            substats['climbing'] = (0.1 * self.strength) + (self.dexterity * 0.1)
-        if self.can_swim:
-            substats['swimming'] = 0.6 * self.strength + (self.dexterity * 0.1)
-        else:
-            substats['swimming'] = 0.1 * self.strength + (self.dexterity * 0.1)
-        if self.can_dig:
-            substats['digging'] = 0.7 * self.strength + (self.dexterity * 0.1)
-        else:
-            substats['digging'] = 0.05 * self.strength + (self.dexterity * 0.1)
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value * self.size)
-            else:
-                stats[stat] = (value * self.size)
-        return stats
+    _strength: float = field(default=1.0, metadata={"sigma": 0.2})  # Physical strength
+    _flexibility: float = field(default=1.0, metadata={"sigma": 0.2})  # Flexibility
+    _movement_speed: float = field(default=1.0, metadata={"sigma": 0.2})  # Movement speed
+    _grip_strength: float = field(default=0.5, metadata={"sigma": 0.1})  # Grip strength
+    _energyCost: float = field(default=0.5, metadata={"sigma": 0.1})
+    _regrowth_rate: float = field(default=0.01, metadata={"sigma": 0.005})
+    _mutationRate: float = field(default=0.001, metadata={"sigma": 0.0005})
+    joints: int = field(default=1, metadata={"sigma": 0.5})  # Number of joints
+    digits: int = field(default=0, metadata={"sigma": 0.5})  # Number of digits/fingers
+    prehensile: bool = False  # Can grasp objects
+    opposable: bool = False  # Has opposable digits
+    _subparts: list['part'] = field(default_factory=list)
     
     def setup_default_subparts(self):
-        skin_type = skin.Skin.FUR if self.type != self.LimbType.FIN else skin.Skin.SCALES
-        self.subparts.append(skin(
-            name=f"{self.name}_covering",
-            type=skin_type,
-            _size=0.8,
-            thickness=0.3,
-            _energyCost=0.05
-        ))
+        # Add basic components based on limb type
+        if self.type in [self.LimbType.ARM, self.LimbType.LEG, self.LimbType.TAIL, 
+                        self.LimbType.TENTACLE, self.LimbType.FIN, self.LimbType.WING]:
+            # Animal limbs typically have muscles, bones, and skin
+            self._subparts.append(
+                internal.randomize("Muscle", "animal")
+            )
+            self._subparts.append(
+                internal.randomize("Bone", "animal")
+            )
+            self._subparts.append(
+                skin.randomize("Skin", "animal")
+            )
+            
+            # Add digits if specified
+            if self.digits > 0:
+                for i in range(self.digits):
+                    digit_type = "Finger" if self.type == self.LimbType.ARM else "Toe"
+                    self._subparts.append(
+                        limb.randomize(f"{digit_type} {i+1}", "animal")
+                    )
         
-        self.subparts.append(internal(
-            name="muscles",
-            type=internal.InternalType.OTHER,
-            efficiency=self.strength,
-            capacity=self.dexterity,
-            _size=0.7,
-            _energyCost=0.1
-        ))
-        if self.type in [self.LimbType.ARM, self.LimbType.LEG, self.LimbType.TAIL]:
-            self.subparts.append(appendage(
-                name="claws",
-                type=appendage.AppendageType.CLAW,
-                _size=0.05,
-                damage=0.5,
-                _energyCost=0.01,
-                slash_damage=0.5
-            ))
-
+        elif self.type in [self.LimbType.BRANCH, self.LimbType.ROOT]:
+            # Plant limbs have bark and possibly leaves/roots
+            self._subparts.append(
+                skin.randomize("Bark", "plant")
+            )
+            if self.type == self.LimbType.BRANCH:
+                # Add some leaves
+                leaf_count = random.randint(1, 5)
+                for i in range(leaf_count):
+                    self._subparts.append(
+                        leaf.randomize(f"Leaf {i+1}")
+                    )
+            else:  # ROOT
+                # Add root hairs
+                hair_count = random.randint(3, 10)
+                for i in range(hair_count):
+                    self._subparts.append(
+                        root.randomize(f"Root Hair {i+1}")
+                    )
+    
+    @property
+    def strength(self) -> float:
+        return self._strength
+    
+    @strength.setter
+    def strength(self, value: float):
+        self._strength = max(0, value)
+        self._statCache = self.calculateStats(True)
+        
+    @property
+    def flexibility(self) -> float:
+        return self._flexibility
+    
+    @flexibility.setter
+    def flexibility(self, value: float):
+        self._flexibility = max(0, min(1, value))
+        self._statCache = self.calculateStats(True)
+        
+    @property
+    def movement_speed(self) -> float:
+        return self._movement_speed
+    
+    @movement_speed.setter
+    def movement_speed(self, value: float):
+        self._movement_speed = max(0, value)
+        self._statCache = self.calculateStats(True)
+        
+    @property
+    def grip_strength(self) -> float:
+        return self._grip_strength
+    
+    @grip_strength.setter
+    def grip_strength(self, value: float):
+        self._grip_strength = max(0, value)
+        self._statCache = self.calculateStats(True)
+    
+    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
+        stats = super().calculateStats(recalc)
+        
+        # Base limb stats
+        stats['strength'] = self.strength
+        stats['flexibility'] = self.flexibility
+        stats['movement_speed'] = self.movement_speed
+        stats['grip_strength'] = self.grip_strength
+        
+        # Type-specific modifiers
+        if self.type == self.LimbType.ARM:
+            stats['manipulation'] = (self.strength + self.flexibility + self.grip_strength) / 3
+            if self.opposable:
+                stats['manipulation'] *= 1.5
+            if self.prehensile:
+                stats['manipulation'] *= 1.2
+                
+        elif self.type == self.LimbType.LEG:
+            stats['locomotion'] = (self.strength + self.movement_speed) / 2
+            stats['jump_power'] = self.strength * 0.5
+            
+        elif self.type == self.LimbType.WING:
+            stats['flight_power'] = (self.strength + self.movement_speed) / 2
+            stats['flight_efficiency'] = self.flexibility * 0.8
+            
+        elif self.type == self.LimbType.TAIL:
+            stats['balance'] = self.strength * 0.7
+            stats['swimming'] = self.flexibility * 0.5
+            
+        elif self.type == self.LimbType.TENTACLE:
+            stats['manipulation'] = (self.flexibility + self.grip_strength) / 2
+            stats['reach'] = self.size * 1.2
+            
+        elif self.type == self.LimbType.BRANCH:
+            stats['photosynthesis'] = self.size * 0.2
+            stats['structural_support'] = self.strength
+            
+        elif self.type == self.LimbType.ROOT:
+            stats['water_absorption'] = self.size * 0.3
+            stats['nutrient_absorption'] = self.size * 0.2
+            stats['anchoring'] = self.strength
+            
+        elif self.type == self.LimbType.FIN:
+            stats['swimming'] = (self.movement_speed + self.flexibility) / 2
+            
+        elif self.type == self.LimbType.ANTENNA:
+            stats['sensory_range'] = self.size * 2.0
+            
+        # Digit-specific stats
+        if self.digits > 0:
+            stats['digits'] = self.digits
+            if self.opposable:
+                stats['opposable_digits'] = 1.0
+            if self.prehensile:
+                stats['prehensile_digits'] = 1.0
+                
+        # Joint-specific stats
+        if self.joints > 1:
+            stats['articulation'] = min(1.0, self.joints / 10.0)
+            
+        return stats
+    
     @classmethod
     def randomize(cls, name: str = "", organism_type: str = "animal") -> 'limb':
-        limb_type = random.choice(list(limb.LimbType))
-        
-        if not name:
-            name = f"{limb_type.name.lower()}_{random.randint(0, 1000)}"
+        if organism_type == "animal":
+            limb_types = [
+                cls.LimbType.ARM, cls.LimbType.LEG, cls.LimbType.WING,
+                cls.LimbType.TAIL, cls.LimbType.TENTACLE, cls.LimbType.FIN,
+                cls.LimbType.ANTENNA, cls.LimbType.CLAW, cls.LimbType.HOOF,
+                cls.LimbType.WEBBED
+            ]
+        else:  # plant
+            limb_types = [cls.LimbType.BRANCH, cls.LimbType.ROOT]
             
-        new_limb = cls(
-            name=name,
+        limb_type = random.choice(limb_types)
+        
+        # Set reasonable defaults based on type
+        if limb_type == cls.LimbType.ARM:
+            size = random.gauss(24.0, 3.0)  # ~2 feet for arms
+            digits = random.randint(3, 5)
+            prehensile = random.random() > 0.3
+            opposable = random.random() > 0.7 if prehensile else False
+        elif limb_type == cls.LimbType.LEG:
+            size = random.gauss(30.0, 4.0)  # ~2.5 feet for legs
+            digits = random.randint(1, 5)
+            prehensile = random.random() > 0.8
+            opposable = False
+        elif limb_type == cls.LimbType.WING:
+            size = random.gauss(60.0, 10.0)  # ~5 feet wingspan
+            digits = random.randint(2, 4)
+            prehensile = False
+            opposable = False
+        elif limb_type == cls.LimbType.TAIL:
+            size = random.gauss(36.0, 6.0)  # ~3 feet
+            digits = 0
+            prehensile = random.random() > 0.5
+            opposable = False
+        elif limb_type == cls.LimbType.TENTACLE:
+            size = random.gauss(48.0, 8.0)  # ~4 feet
+            digits = 0
+            prehensile = True
+            opposable = False
+        elif limb_type == cls.LimbType.BRANCH:
+            size = random.gauss(72.0, 12.0)  # ~6 feet
+            digits = 0
+            prehensile = False
+            opposable = False
+        elif limb_type == cls.LimbType.ROOT:
+            size = random.gauss(36.0, 6.0)  # ~3 feet
+            digits = 0
+            prehensile = False
+            opposable = False
+        elif limb_type == cls.LimbType.FIN:
+            size = random.gauss(18.0, 3.0)  # ~1.5 feet
+            digits = 0
+            prehensile = False
+            opposable = False
+        elif limb_type == cls.LimbType.ANTENNA:
+            size = random.gauss(6.0, 1.0)  # ~6 inches
+            digits = 0
+            prehensile = False
+            opposable = False
+        else:  # CLAW, HOOF, WEBBED
+            size = random.gauss(12.0, 2.0)  # ~1 foot
+            digits = random.randint(1, 4)
+            prehensile = limb_type == cls.LimbType.CLAW
+            opposable = False
+            
+        return cls(
+            name=name or f"{limb_type.name.capitalize()}",
             type=limb_type,
-            _size=random.uniform(0.2, 1.5),
-            strength=random.uniform(0.5, 3.0),
-            dexterity=random.uniform(0.1, 2.0),
-            reach=random.uniform(0.3, 3.0),
-            prehensile=random.random() < 0.3,
-            movement_speed=random.uniform(0.5, 3.0),
-            movement_cost=random.uniform(0.05, 0.3),
-            can_climb=random.random() < 0.4,
-            can_swim=random.random() < 0.4,
-            can_dig=random.random() < 0.3,
-            _energyCost=random.uniform(0.1, 0.3),
-            _mutationRate=random.uniform(0.0001, 0.001)
+            _strength=random.gauss(1.0, 0.2),
+            _flexibility=random.gauss(0.5 if limb_type in [cls.LimbType.TENTACLE, cls.LimbType.WING] else 0.3, 0.1),
+            _movement_speed=random.gauss(1.0, 0.2),
+            _grip_strength=random.gauss(0.5 if prehensile else 0.1, 0.1),
+            _size=size,
+            _energyCost=random.gauss(0.5, 0.1),
+            _regrowth_rate=random.gauss(0.01, 0.005),
+            joints=random.randint(1, 3) if limb_type in [cls.LimbType.ARM, cls.LimbType.LEG] else 1,
+            digits=digits,
+            prehensile=prehensile,
+            opposable=opposable,
+            separable=limb_type not in [cls.LimbType.ROOT, cls.LimbType.BRANCH]
         )
-        
-        new_limb.setup_default_subparts()
-        return new_limb
-
-@dataclass
-class sensory(part):
-    class SensoryType(Enum):
-        EYE = 0
-        EAR = 1
-        NOSE = 2
-        ANTENNA = 4
-    
-    type: SensoryType = SensoryType.EYE
-    range: float = 1.0  # detection range
-    sensitivity: float = 1.0  # how sensitive it is
-    precision: float = 1.0  # how precise the information is
-    night_vision: bool = False
-    thermal_vision: bool = False
-    can_see_colors: bool = True
-    underwater_effective: bool = False
-    air_effective: bool = True
-    active_cost: float = 0.005  # cost when actively used
-    passive_cost: float = 0.001  # cost when just present
-    angle: float = 90 # angle of perception.
-
-    def setup_default_subparts(self):
-        pass
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        substats['sensory_range'] = self.range * self.size
-        substats['sensory_sensitivity'] = self.sensitivity
-        substats['sensory_precision'] = self.precision
-        substats['sensory_angle'] = self.angle
-        if self.night_vision:
-            substats['night_vision'] = 0.5 * self.sensitivity
-        if self.thermal_vision:
-            substats['thermal_vision'] = 0.3 * self.sensitivity
-        if not self.can_see_colors:
-            substats['color_vision'] = 0
-        else:
-            substats['color_vision'] = 1.0
-        if self.underwater_effective:
-            substats['underwater_sensing'] = 1.0
-        if not self.air_effective:
-            substats['air_sensing'] = 0.8
-        substats['sensory_active_cost'] = self.active_cost
-        substats['sensory_passive_cost'] = self.passive_cost
-        substats['visionangle'] = self.angle
-        
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value * self.sensitivity)
-            else:
-                stats[stat] = (value * self.sensitivity)
-        return stats
-    
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'sensory':
-        sensory_type = random.choice(list(sensory.SensoryType))
-        if not name:
-            name = f"{sensory_type.name.lower()}_{random.randint(0, 1000)}"
-            
-        if sensory_type == sensory.SensoryType.EYE:
-            can_see_colors = random.random() < 0.8
-            night_vision = random.random() < 0.4
-            thermal_vision = random.random() < 0.2
-        else:
-            can_see_colors = False
-            night_vision = False
-            thermal_vision = False
-            
-        return cls(
-            name=name,
-            type=sensory_type,
-            range=random.uniform(0.5, 10.0),
-            sensitivity=random.uniform(0.5, 2.0),
-            precision=random.uniform(0.5, 1.5),
-            night_vision=night_vision,
-            thermal_vision=thermal_vision,
-            can_see_colors=can_see_colors,
-            underwater_effective=random.random() < 0.5,
-            air_effective=True,
-            angle=random.uniform(30, 180),
-            active_cost=random.uniform(0.001, 0.01),
-            passive_cost=random.uniform(0.0001, 0.001),
-            _energyCost=random.uniform(0.01, 0.05),
-            _mutationRate=random.uniform(0.0001, 0.001)
-        )
-
-@dataclass
-class internal(part):
-    class InternalType(Enum):
-        HEART = 0
-        LUNG = 1
-        STOMACH = 2
-        GILL = 4
-        LIVER = 5
-        KIDNEY = 6
-        GLAND = 7
-        OTHER = 8
-    
-    type: InternalType = InternalType.HEART
-    efficiency: float = 1.0  # how well it performs its function
-    capacity: float = 1.0  # how much it can handle
-    can_regenerate: bool = False
-
-    def setup_default_subparts(self):
-        pass
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        # Internal organ stats
-        substats[f'{self.type}.efficiency'] = self.efficiency
-        substats[f'{self.type}.capacity'] = self.capacity
-        
-        # Type-specific bonuses
-        if self.type == self.InternalType.HEART:
-            substats['circulation'] = self.efficiency * 2.0
-        elif self.type == self.InternalType.LUNG:
-            substats['oxygenation'] = self.efficiency * 1.5
-        elif self.type == self.InternalType.GILL:
-            substats['water_oxygenation'] = self.efficiency * 2.0
-        elif self.type == self.InternalType.STOMACH:
-            substats['digestion'] = self.efficiency * 1.5
-        elif self.type == self.InternalType.LIVER:
-            substats['toxin_processing'] = self.efficiency * 1.0
-        elif self.type == self.InternalType.KIDNEY:
-            substats['filtration'] = self.efficiency * 1.2
-        elif self.type == self.InternalType.GLAND:
-            substats['chemical_production'] = self.efficiency * 1.0
-            
-        if self.can_regenerate:
-            substats['regeneration'] = 0.2  # Small regeneration bonus
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value)
-            else:
-                stats[stat] = (value)
-        return stats
-
-    
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'internal':
-        internal_type = random.choice(list(internal.InternalType))
-        
-        if not name:
-            name = f"{internal_type.name.lower()}_{random.randint(0, 1000)}"
-        if internal_type in [internal.InternalType.HEART, internal.InternalType.LUNG, internal.InternalType.GILL]:
-            efficiency = random.uniform(0.8, 1.5)
-            capacity = random.uniform(0.8, 2.0)
-        else:
-            efficiency = random.uniform(0.5, 1.5)
-            capacity = random.uniform(0.5, 2.0)
-            
-        return cls(
-            name=name,
-            type=internal_type,
-            efficiency=efficiency,
-            capacity=capacity,
-            can_regenerate=random.random() < 0.2,
-            _energyCost=random.uniform(0.05, 0.2),
-            _mutationRate=random.uniform(0.0001, 0.001)
-        )
-
-@dataclass
-class appendage(part):
-    class AppendageType(Enum):
-        CLAW = 0
-        FANG = 1
-        HORN = 2
-        TUSK = 3
-        STINGER = 4
-        SPINE = 5
-        BEAK = 6
-        TAIL_SPIKE = 7
-        SHELL = 8
-        THORN = 9
-        PLATE = 10
-        FROND = 11
-        TUBE = 12
-        POD = 13
-        SAC = 14
-        TENDRIL = 15
-        
-    
-    type: AppendageType = AppendageType.CLAW
-    damage: float = 1.0  # base damage
-    attack_speed: float = 1.0  # how fast it can attack
-    reach: float = 0.5  # attack range
-    slash_damage: float = 0.0
-    pierce_damage: float = 0.0
-    blunt_damage: float = 0.0
-    venomous: bool = False
-    retractable: bool = False
-    attack_cost: float = 0.1  # energy per attack
-    coverage: float = 0.5  # how much of the body it covers (0-1)
-    hardness: float = 1.0  # resistance to damage
-    poison_production: bool = False
-    venom_production: bool = False # typically with an 8.
-    storesE: bool = False
-    stores_water: bool = False
-    stores_air: bool = False
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        # Base weapon stats
-        substats['damage'] = self.damage * self.size
-        substats['attack_speed'] = self.attack_speed
-        substats['attack_reach'] = self.reach
-        substats['attack_cost'] = self.attack_cost
-        
-        # Damage types
-        substats['slash_damage'] = self.slash_damage * self.size
-        substats['pierce_damage'] = self.pierce_damage * self.size
-        substats['blunt_damage'] = self.blunt_damage * self.size
-        
-        # Special properties
-        if self.venomous:
-            substats['venom_potency'] = 0.5  # Base venom potency
-        if self.retractable:
-            substats['concealment'] = 0.3  # Bonus to hiding the weapon
-            
-        # Type-specific bonuses
-        if self.type == self.AppendageType.CLAW:
-            substats['slash_damage'] += 0.5 * self.damage
-        elif self.type == self.AppendageType.FANG:
-            substats['pierce_damage'] += 0.7 * self.damage
-        elif self.type == self.AppendageType.HORN:
-            substats['pierce_damage'] += 0.5 * self.damage
-            substats['blunt_damage'] += 0.3 * self.damage
-        elif self.type == self.AppendageType.STINGER:
-            substats['pierce_damage'] += 0.3 * self.damage
-            substats['venom_potency'] = substats.get('venom_potency', 0) + 0.5
-        substats['coverage'] = self.coverage
-        substats['hardness'] = self.hardness
-        
-        # Storage capabilities
-        if self.storesE:
-            substats['energy_storage'] = 0.5 * self.size
-        if self.stores_water:
-            substats['water_storage'] = 0.3 * self.size
-        if self.stores_air:
-            substats['air_storage'] = 0.2 * self.size
-            
-        # Special properties
-        if self.poison_production:
-            substats['poison_production'] = 0.3
-        if self.venom_production:
-            substats['venom_production'] = 0.4
-            
-        # Type-specific bonuses
-        if self.type == self.AppendageType.SHELL:
-            substats['armor'] = 1.0 * self.hardness * self.coverage
-        elif self.type == self.AppendageType.SPINE:
-            substats['defense'] = 0.5 * self.hardness
-        elif self.type == self.AppendageType.PLATE:
-            substats['armor'] = 0.7 * self.hardness * self.coverage
-        elif self.type == self.AppendageType.TENDRIL:
-            substats['manipulation'] = 0.3 * self.coverage
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value)
-            else:
-                stats[stat] = (value)
-        return stats
-    
-    def setup_default_subparts(self):
-        if self.venomous:
-            self.subparts.append(internal(
-                name="venom_gland",
-                type=internal.InternalType.GLAND,
-                efficiency=1.0,
-                _size=0.3,
-                _energyCost=0.05
-            ))
-            
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'appendage':
-        weapon_type = random.choice(list(appendage.AppendageType))
-        if not name:
-            name = f"{weapon_type.name.lower()}_{random.randint(0, 1000)}"
-        
-        new_weapon = cls(
-            name=name,
-            type=weapon_type,
-            damage=random.uniform(0.5, 3.0),
-            attack_speed=random.uniform(0.5, 2.0),
-            reach=random.uniform(0.1, 1.5),
-            slash_damage=random.uniform(0.0, 2.0),
-            pierce_damage=random.uniform(0.0, 2.0),
-            blunt_damage=random.uniform(0.0, 1.0),
-            venomous=random.random() < 0.3,
-            retractable=random.random() < 0.2,
-            attack_cost=random.uniform(0.05, 0.3),
-            _energyCost=random.uniform(0.05, 0.2),
-            _mutationRate=random.uniform(0.0001, 0.001),
-            coverage=random.uniform(0.1, 0.8),
-            hardness=random.uniform(0.5, 3.0),
-            poison_production=random.random() < 0.2,
-            venom_production=random.random() < 0.05,
-            storesE=random.random() < 0.3,
-            stores_water=random.random() < 0.4,
-            stores_air=random.random() < 0.1,
-        )
-        new_weapon.setup_default_subparts()
-        return new_weapon
-
-@dataclass
-class root(part):
-    class RootType(Enum):
-        FIBROUS = 0
-        TAP = 1
-        AERIAL = 2
-        PROP = 3
-        STORAGE = 4
-    
-    type: RootType = RootType.FIBROUS
-    depth: float = 1.0 # How deep the roots go
-    spread: float = 1.0 # How wide the roots spread
-    absorption_rate: float = 1.0 # Nutrient/water absorption efficiency
-    nitrogen_fixing: bool = False # Can fix nitrogen from air
-    storage_capacity: float = 0.0 # For storing water/nutrients
-    can_propagate: bool = False  # Can grow new plants from roots
-
-    def setup_default_subparts(self):
-        pass
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        # Root system stats
-        substats['root_depth'] = self.depth
-        substats['root_spread'] = self.spread
-        substats['absorption_rate'] = self.absorption_rate
-        
-        # Special capabilities
-        if self.nitrogen_fixing:
-            substats['nitrogen_fixing'] = 0.5
-        if self.storage_capacity > 0:
-            substats['root_storage'] = self.storage_capacity
-        if self.can_propagate:
-            substats['vegetative_propagation'] = 0.3
-            
-        # Type-specific bonuses
-        if self.type == self.RootType.TAP:
-            substats['root_depth'] *= 1.5
-            substats['absorption_rate'] *= 1.2
-        elif self.type == self.RootType.AERIAL:
-            substats['air_absorption'] = 0.5
-        elif self.type == self.RootType.STORAGE:
-            substats['root_storage'] = substats.get('root_storage', 0) + 1.0
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value)
-            else:
-                stats[stat] = (value)
-        return stats
-    
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "plant") -> 'root':
-        root_type = random.choice(list(root.RootType))
-        
-        return cls(
-            name=name or "root_system",
-            type=root_type,
-            depth=random.uniform(0.5, 5.0),
-            spread=random.uniform(0.5, 10.0),
-            absorption_rate=random.uniform(0.5, 2.0),
-            nitrogen_fixing=random.random() < 0.3,
-            storage_capacity=random.uniform(0.0, 3.0),
-            can_propagate=random.random() < 0.2,
-            _energyCost=random.uniform(0.1, 0.5),
-            _mutationRate=random.uniform(0.0001, 0.001)
-        )
-
-@dataclass
-class stem(part):
-    class StemType(Enum):
-        WOODY = 0 # Tree trunks
-        HERBACEOUS = 1 # Soft, green stems
-        VINE = 2 # Climbing stems
-        RHIZOME = 3 # Underground horizontal stems
-        TUBER = 4 # Swollen underground stems (potatoes)
-        CORM = 5 # Short, vertical underground stems
-        BULB = 6 # Underground storage (onions)
-    
-    type: StemType = StemType.HERBACEOUS
-    height: float = 1.0 # Stem height
-    flexibility: float = 0.5 # How much it can bend
-    structural_strength: float = 1.0 # Support capability
-    storage_capacity: float = 0.0 # For storing nutrients
-    photosynthetic: bool = True  # Can perform photosynthesis
-    annual_growth_rings: bool = False # Shows yearly growth
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        # Stem structure stats
-        substats['height'] = self.height
-        substats['flexibility'] = self.flexibility
-        substats['structural_strength'] = self.structural_strength
-        
-        # Special capabilities
-        if self.photosynthetic:
-            substats['photosynthesis'] = 0.3 * self.height
-        if self.storage_capacity > 0:
-            substats['stem_storage'] = self.storage_capacity
-        if self.annual_growth_rings:
-            substats['age_recording'] = 1.0  # Can determine age
-            
-        # Type-specific bonuses
-        if self.type == self.StemType.WOODY:
-            substats['structural_strength'] *= 2.0
-            substats['durability'] = 1.0
-        elif self.type == self.StemType.VINE:
-            substats['climbing'] = 0.7 * self.flexibility
-        elif self.type == self.StemType.TUBER:
-            substats['stem_storage'] = substats.get('stem_storage', 0) + 1.5
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value)
-            else:
-                stats[stat] = (value)
-        return stats
-    
-    def setup_default_subparts(self):
-        if self.type == self.StemType.WOODY:
-            self.subparts.append(skin(
-                name="bark",
-                type=skin.Skin.BARK,
-                _size=0.9,
-                thickness=0.5,
-                _energyCost=0.02
-            ))
-        else:
-            self.subparts.append(skin(
-                name="epidermis",
-                type=skin.Skin.CUTICLE,
-                _size=0.9,
-                thickness=0.1,
-                _energyCost=0.01
-            ))
-    
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "plant") -> 'stem':
-        stem_type = random.choice(list(stem.StemType))
-        
-        new_stem = cls(
-            name=name or "stem",
-            type=stem_type,
-            height=random.uniform(0.1, 20.0),
-            flexibility=random.uniform(0.1, 1.0),
-            structural_strength=random.uniform(0.5, 3.0),
-            storage_capacity=random.uniform(0.0, 2.0),
-            photosynthetic=random.random() < 0.8,
-            annual_growth_rings=random.random() < 0.5,
-            _energyCost=random.uniform(0.1, 0.5),
-            _mutationRate=random.uniform(0.0001, 0.001)
-        )
-        
-        # Let the stem setup its own subparts
-        new_stem.setup_default_subparts()
-        return new_stem
-
-@dataclass
-class leaf(part):
-    class LeafType(Enum):
-        NEEDLE = 0 # Conifer needles
-        BROAD = 1 # Standard broad leaves
-        SUCCULENT = 2 # Water-storing leaves
-        SCALE = 3 # Small, scale-like leaves
-        TENDRILL = 4 # Modified for climbing
-        SPINE = 5 # Modified for defense
-        TRAP = 6 # Carnivorous plant traps
-    
-    type: LeafType = LeafType.BROAD
-    surface_area: float = 1.0 # Photosynthetic surface
-    thickness: float = 0.1 # Leaf thickness
-    photosynthetic_rate: float = 1.0 # Photosynthesis efficiency
-    water_loss_rate: float = 0.5 # Transpiration rate
-    seasonal: bool = False # Sheds seasonally
-    defense_rating: float = 0.0  # Protection against herbivores
-
-    def setup_default_subparts(self):
-        pass
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        # Leaf properties
-        substats['surface_area'] = self.surface_area
-        substats['photosynthetic_rate'] = self.photosynthetic_rate
-        substats['water_loss_rate'] = self.water_loss_rate
-        
-        # Special properties
-        if self.seasonal:
-            substats['seasonal_adaptation'] = 0.5
-        if self.defense_rating > 0:
-            substats['defense'] = self.defense_rating
-            
-        # Type-specific bonuses
-        if self.type == self.LeafType.NEEDLE:
-            substats['water_loss_rate'] *= 0.3  # Reduced water loss
-            substats['cold_resistance'] = 0.5
-        elif self.type == self.LeafType.SUCCULENT:
-            substats['water_storage'] = 0.8 * self.thickness
-        elif self.type == self.LeafType.TRAP:
-            substats['carnivorous'] = 0.7  # Carnivorous capability
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value)
-            else:
-                stats[stat] = (value)
-        return stats
-    
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "plant") -> 'leaf':
-        leaf_type = random.choice(list(leaf.LeafType))
-        
-        return cls(
-            name=name or "leaf",
-            type=leaf_type,
-            surface_area=random.uniform(0.5, 5.0),
-            thickness=random.uniform(0.01, 0.5),
-            photosynthetic_rate=random.uniform(0.5, 2.0),
-            water_loss_rate=random.uniform(0.1, 1.0),
-            seasonal=random.random() < 0.5,
-            defense_rating=random.uniform(0.0, 1.0),
-            _energyCost=random.uniform(0.05, 0.2),
-            _mutationRate=random.uniform(0.0001, 0.001)
-        )
-
-@dataclass
-class reproductive(part):
-    class ReproductiveType(Enum):
-        GONAD = 0         # General reproductive organ
-        OVARY = 1         # Egg production
-        TESTIS = 2        # Sperm production
-        UTERUS = 3        # Gestation chamber
-        SPORE_SAC = 4     # Fungal/plant spore production
-        FLOWER_BUD = 5    # Plant flower precursor
-        CONE = 6          # Gymnosperm reproductive structure
-        POLLEN_SAC = 7    # Pollen production
-        
-    type: ReproductiveType = ReproductiveType.GONAD
-    fertility: float = 1.0         # Reproductive success rate
-    gestation_period: float = 0.0  # Time for development (if applicable)
-    offspring_count: int = 1       # Typical number of offspring
-    mating_frequency: float = 1.0  # How often reproduction can occur
-    resource_cost: float = 0.5     # Energy/nutrient cost per reproduction
-    seasonal: bool = False         # Only functions in certain seasons
-    produces_seeds: bool = False   # For plants
-    produces_eggs: bool = False    # For animals
-    produces_pollen: bool = False  # For plants
-
-    def __post_init__(self):
-        super().__post_init__()
-        # Set separable based on type
-        self.separable = self.type in [
-            self.ReproductiveType.SPORE_SAC,
-            self.ReproductiveType.FLOWER_BUD,
-            self.ReproductiveType.CONE,
-            self.ReproductiveType.POLLEN_SAC
-        ]
-        self._regrowable = self.separable  # These parts can regrow if separable
-
-    def setup_default_subparts(self):
-        if self.produces_eggs:
-            self.subparts.append(egg_sac(
-                name=f"{self.name}_eggs",
-                egg_count=self.offspring_count,
-                _size=0.5,
-                _energyCost=0.1
-            ))
-        elif self.produces_seeds:
-            self.subparts.append(seed(
-                name=f"{self.name}_seeds",
-                seed_count=self.offspring_count,
-                _size=0.3,
-                _energyCost=0.05
-            ))
-        elif self.produces_pollen:
-            self.subparts.append(pollen(
-                name=f"{self.name}_pollen",
-                quantity=self.offspring_count * 10,
-                _size=0.1,
-                _energyCost=0.02
-            ))
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        # Base reproductive stats
-        substats['fertility'] = self.fertility
-        substats['offspring_count'] = self.offspring_count
-        substats['reproduction_cost'] = self.resource_cost
-        
-        # Special capabilities
-        if self.gestation_period > 0:
-            substats['gestation_period'] = self.gestation_period
-        if self.seasonal:
-            substats['seasonal_breeding'] = 1.0
-            
-        # Type-specific bonuses
-        if self.type == self.ReproductiveType.OVARY:
-            substats['egg_quality'] = 0.5 * self.fertility
-        elif self.type == self.ReproductiveType.TESTIS:
-            substats['sperm_count'] = 2.0 * self.fertility
-        elif self.type == self.ReproductiveType.UTERUS:
-            substats['gestation_efficiency'] = 1.5
-        elif self.type == self.ReproductiveType.SPORE_SAC:
-            substats['spore_production'] = 10.0 * self.fertility
-        elif self.type == self.ReproductiveType.CONE:
-            substats['wind_pollination'] = 1.0
-        elif self.type == self.ReproductiveType.POLLEN_SAC:
-            substats['pollen_production'] = 5.0 * self.fertility
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value * self.size)
-            else:
-                stats[stat] = (value * self.size)
-        return stats
-
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'reproductive':
-        """Create randomized reproductive organ."""
-        if organism_type == "plant":
-            repro_type = random.choice([
-                cls.ReproductiveType.SPORE_SAC,
-                cls.ReproductiveType.CONE,
-                cls.ReproductiveType.FLOWER_BUD,
-                cls.ReproductiveType.POLLEN_SAC
-            ])
-            offspring_count = random.randint(10, 1000)
-            produces_seeds = random.random() < 0.7
-            produces_pollen = not produces_seeds and random.random() < 0.5
-        else:
-            repro_type = random.choice([
-                cls.ReproductiveType.GONAD,
-                cls.ReproductiveType.OVARY,
-                cls.ReproductiveType.TESTIS,
-                cls.ReproductiveType.UTERUS
-            ])
-            offspring_count = random.randint(1, 20)
-            produces_eggs = random.random() < 0.5
-            
-        return cls(
-            name=name or "reproductive",
-            type=repro_type,
-            fertility=random.uniform(0.5, 2.0),
-            gestation_period=random.uniform(0.0, 30.0),
-            offspring_count=offspring_count,
-            mating_frequency=random.uniform(0.5, 3.0),
-            resource_cost=random.uniform(0.1, 1.0),
-            seasonal=random.random() < 0.4,
-            produces_seeds=produces_seeds,
-            produces_eggs=produces_eggs,
-            produces_pollen=produces_pollen,
-            _energyCost=random.uniform(0.1, 0.5),
-            _mutationRate=random.uniform(0.0001, 0.001)
-        )
-
-@dataclass
-class seed(part):
-    class SeedType(Enum):
-        NAKED = 0       # Gymnosperm
-        ENCLOSED = 1    # Angiosperm
-        SPORE = 2       # Fungal/fern
-        TUBER = 3       # Underground storage
-        BULBIL = 4      # Aerial propagation
-        
-    type: SeedType = SeedType.ENCLOSED
-    seed_count: int = 1
-    viability: float = 1.0          # Chance to germinate
-    dormancy: float = 0.0           # Can remain dormant
-    dispersal: float = 1.0          # Spread effectiveness
-    nutrient_store: float = 1.0     # Endosperm/resources
-    defense: float = 0.0            # Anti-predation
-    requires_pollination: bool = False
-
-    def __post_init__(self):
-        super().__post_init__()
-        self.separable = True  # Seeds are always separable
-        self._regrowable = False  # Seeds don't regrow on the parent
-
-    def setup_default_subparts(self):
-        # Seeds can have small nutrient stores or protective coatings
-        if random.random() < 0.5:
-            self.subparts.append(internal(
-                name="nutrient_store",
-                type=internal.InternalType.OTHER,
-                efficiency=self.nutrient_store,
-                capacity=self.nutrient_store * 2,
-                _size=0.5,
-                _energyCost=0.01
-            ))
-            
-        if self.defense > 0:
-            self.subparts.append(skin(
-                name="seed_coat",
-                type=skin.Skin.BARK if random.random() < 0.5 else skin.Skin.CHITIN,
-                _size=0.9,
-                thickness=self.defense * 0.2,
-                _energyCost=0.01
-            ))
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        # Seed properties
-        substats['seed_count'] = self.seed_count
-        substats['seed_viability'] = self.viability
-        substats['dispersal_efficiency'] = self.dispersal
-        substats['seed_nutrients'] = self.nutrient_store
-        
-        # Special properties
-        if self.dormancy > 0:
-            substats['dormancy_period'] = self.dormancy
-        if self.defense > 0:
-            substats['seed_defense'] = self.defense
-        if self.requires_pollination:
-            substats['pollination_required'] = 1.0
-            
-        # Type-specific bonuses
-        if self.type == self.SeedType.NAKED:
-            substats['germination_speed'] = 1.2
-        elif self.type == self.SeedType.SPORE:
-            substats['quantity'] = 10.0  # Spores are numerous
-        elif self.type == self.SeedType.TUBER:
-            substats['vegetative_growth'] = 1.5
-        elif self.type == self.SeedType.BULBIL:
-            substats['aerial_propagation'] = 1.0
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value * self.size)
-            else:
-                stats[stat] = (value * self.size)
-        return stats
-    
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "plant") -> 'seed':
-        """Create randomized seed."""
-        seed_type = random.choice(list(cls.SeedType))
-        
-        return cls(
-            name=name or "seed",
-            type=seed_type,
-            seed_count=random.randint(1, 1000) if seed_type == cls.SeedType.SPORE else random.randint(1, 20),
-            viability=random.uniform(0.5, 1.0),
-            dormancy=random.uniform(0.0, 2.0),
-            dispersal=random.uniform(0.5, 3.0),
-            nutrient_store=random.uniform(0.5, 3.0),
-            defense=random.uniform(0.0, 1.0),
-            requires_pollination=random.random() < 0.7,
-            _energyCost=random.uniform(0.05, 0.2),
-            _mutationRate=random.uniform(0.0001, 0.001)
-        )
-
-@dataclass
-class egg_sac(part):
-    class EggType(Enum):
-        SOFT = 0          # Amphibian-style eggs
-        HARD_SHELL = 1    # Bird/reptile eggs
-        GELATINOUS = 2    # Fish/insect eggs
-        RESISTANT = 3     # Extremophile eggs (tardigrades)
-        
-    type: EggType = EggType.SOFT
-    egg_count: int = 1
-    protection: float = 0.5    # Physical protection
-    nutrient_store: float = 1.0 # Yolk/resources
-    incubation_time: float = 1.0
-    desiccation_resistance: float = 0.0
-    camouflage: float = 0.0
-    parental_care_required: bool = False
-
-    def __post_init__(self):
-        super().__post_init__()
-        self.separable = True  # Egg sacs are separable
-        self._regrowable = False  # They don't regrow on the parent
-
-    def setup_default_subparts(self):
-        # Egg sacs can have protective coatings
-        if random.random() < 0.5:
-            self.subparts.append(skin(
-                name="sac_covering",
-                type=skin.Skin.MEMBRANE if self.type == self.EggType.SOFT else skin.Skin.CHITIN,
-                _size=0.9,
-                thickness=self.protection * 0.3,
-                _energyCost=0.02
-            ))
-            
-        # Nutrient stores for the eggs
-        self.subparts.append(internal(
-            name="nutrient_store",
-            type=internal.InternalType.OTHER,
-            efficiency=self.nutrient_store,
-            capacity=self.nutrient_store * 2,
-            _size=0.7,
-            _energyCost=0.05
-        ))
-
-    def calculateStats(self, recalc: bool = False) -> dict[str, float]:
-        stats = super().calculateStats(recalc)
-        substats = {}
-        # Egg properties
-        substats['egg_count'] = self.egg_count
-        substats['egg_protection'] = self.protection
-        substats['egg_nutrients'] = self.nutrient_store
-        substats['incubation_time'] = self.incubation_time
-        
-        # Special properties
-        if self.desiccation_resistance > 0:
-            substats['desiccation_resistance'] = self.desiccation_resistance
-        if self.camouflage > 0:
-            substats['egg_camouflage'] = self.camouflage
-        if self.parental_care_required:
-            substats['parental_care'] = 1.0
-            
-        # Type-specific bonuses
-        if self.type == self.EggType.HARD_SHELL:
-            substats['egg_protection'] *= 2.0
-            substats['gas_exchange'] = 0.8
-        elif self.type == self.EggType.GELATINOUS:
-            substats['water_retention'] = 1.0
-        elif self.type == self.EggType.RESISTANT:
-            substats['environmental_resistance'] = 2.0
-            
-        for stat, value in substats.items():
-            if stat in stats:
-                stats[stat] += (value * self.size)
-            else:
-                stats[stat] = (value * self.size)
-        return stats
-    
-    @classmethod
-    def randomize(cls, name: str = "", organism_type: str = "animal") -> 'egg_sac':
-        egg_type = random.choice(list(cls.EggType))
-        
-        return cls(
-            name=name or "egg_sac",
-            type=egg_type,
-            egg_count=random.randint(1, 100),
-            protection=random.uniform(0.5, 2.0),
-            nutrient_store=random.uniform(0.5, 3.0),
-            incubation_time=random.uniform(1.0, 30.0),
-            desiccation_resistance=random.uniform(0.0, 1.0),
-            camouflage=random.uniform(0.0, 0.8),
-            parental_care_required=random.random() < 0.3,
-            _energyCost=random.uniform(0.1, 0.5),
-            _mutationRate=random.uniform(0.0001, 0.001)
-        )
-
-
 
 def main():
     # Initialize Dear PyGui
