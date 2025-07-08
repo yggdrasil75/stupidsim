@@ -18,6 +18,12 @@ class Part:
     regrowth_rate: float  # 0 disables regrowth
     size: float  # Size in grid units
     multipart: int  # Number of instances (1 for single, 2 for pairs, etc.)
+    # active energy use, idle energy use, and dormant energy use.
+    # active is only taken into account while in use
+    # idle is taken into account any time the creature is awake
+    # dormant is taken into account if the creature is asleep
+    energyUse: tuple[float, float, float]
+
     
     def grow(self, amount: float):
         """Grow the part by the given amount, up to expandable limit"""
