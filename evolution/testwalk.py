@@ -16,11 +16,11 @@ TIME_STEP = 0.1
 MUSCLE_CYCLE_LENGTH = 100
 
 class Node:
-    def __init__(self, position, radius=10, mass=1.0):
+    def __init__(self, position, radius: float=10, mass=1.0):
         self.position = torch.tensor(position, dtype=torch.float32, requires_grad=False)
         self.velocity = torch.zeros(2, dtype=torch.float32)
         self.force = torch.zeros(2, dtype=torch.float32)
-        self.radius = radius
+        self.radius: float = radius
         self.mass = mass
         self.fixed = False
         
@@ -98,50 +98,65 @@ class Muscle:
                 self.bone.node2.apply_force(-force)
 
 class Organism:
-    def __init__(self, position):
+    def __init__(self, position, node_count=5, bone_count=8, muscle_density=0.5):
         self.nodes = []
         self.bones = []
         self.muscles = []
         self.position = torch.tensor(position, dtype=torch.float32)
         self.velocity = torch.zeros(2, dtype=torch.float32)
-        self.build_body()
+        self.build_body(node_count, bone_count, muscle_density)
         
-    def build_body(self):
-        # Simple quadruped body
-        # Torso
-        torso1 = Node([0, 0], mass=2.0)
-        torso2 = Node([50, 0], mass=2.0)
-        torso3 = Node([100, 0], mass=2.0)
+    def build_body(self, node_count, bone_count, muscle_density):
+        # Create nodes in a roughly circular pattern
+        center = torch.tensor([150, 600], dtype=torch.float32)
+        radius: float = 50 + random.random() * 50
         
-        # Legs (front)
-        leg1 = Node([20, -40], mass=1.0)
-        leg2 = Node([30, -40], mass=1.0)
+        for i in range(node_count):
+            # Distribute nodes around a circle with some randomness
+            angle = 2 * math.pi * i / node_count + random.uniform(-0.2, 0.2)
+            offset = torch.tensor([
+                math.cos(angle) * radius * random.uniform(0.8, 1.2),
+                math.sin(angle) * radius * random.uniform(0.8, 1.2)
+            ])
+            
+            node = Node((center + offset).tolist(), 
+                       radius=8 + random.random() * 4,
+                       mass=0.5 + random.random() * 1.5)
+            
+            # Small chance to make a node fixed (like a foot)
+            if random.random() < 0.2 and i > 1:  # Don't fix first few nodes
+                node.fixed = True
+                
+            self.nodes.append(node)
         
-        # Legs (back)
-        leg3 = Node([70, -40], mass=1.0)
-        leg4 = Node([80, -40], mass=1.0)
+        # Create bones - try to connect nodes in a reasonable way
+        attempts = 0
+        while len(self.bones) < bone_count and attempts < bone_count * 2:
+            attempts += 1
+            node1, node2 = random.sample(self.nodes, 2)
+            
+            # Don't create duplicate bones
+            if any(b for b in self.bones if 
+                  (b.node1 == node1 and b.node2 == node2) or 
+                  (b.node1 == node2 and b.node2 == node1)):
+                continue
+                
+            # Don't create very long bones
+            dist = torch.dist(node1.position, node2.position)
+            if dist > 120:
+                continue
+                
+            stiffness = 0.3 + random.random() * 0.4
+            self.bones.append(Bone(node1, node2, stiffness=stiffness))
         
-        # Add nodes
-        self.nodes.extend([torso1, torso2, torso3, leg1, leg2, leg3, leg4])
-        
-        # Add bones (torso)
-        self.bones.append(Bone(torso1, torso2, length=50))
-        self.bones.append(Bone(torso2, torso3, length=50))
-        
-        # Add bones (legs)
-        self.bones.append(Bone(torso1, leg1, length=45))
-        self.bones.append(Bone(torso1, leg2, length=45))
-        self.bones.append(Bone(torso3, leg3, length=45))
-        self.bones.append(Bone(torso3, leg4, length=45))
-        
-        # Add muscles
-        # Front legs
-        self.muscles.append(Muscle(self.bones[2], min_length=30, max_length=60, strength=0.2, phase=0.0))
-        self.muscles.append(Muscle(self.bones[3], min_length=30, max_length=60, strength=0.2, phase=math.pi))
-        
-        # Back legs
-        self.muscles.append(Muscle(self.bones[4], min_length=30, max_length=60, strength=0.2, phase=math.pi))
-        self.muscles.append(Muscle(self.bones[5], min_length=30, max_length=60, strength=0.2, phase=0.0))
+        # Create muscles for some bones
+        for bone in self.bones:
+            if random.random() < muscle_density:
+                min_len = bone.rest_length * (0.7 + random.random() * 0.2)
+                max_len = bone.rest_length * (1.1 + random.random() * 0.3)
+                strength = 0.1 + random.random() * 0.2
+                phase = random.random() * 2 * math.pi
+                self.muscles.append(Muscle(bone, min_len, max_len, strength, phase))
         
         # Position the organism
         for node in self.nodes:
@@ -201,6 +216,13 @@ class Simulation:
         self.time = 0
         self.camera_offset_x = 0
         self.follow_organism = None
+        self.creation_params = {
+            'min_nodes': 4,
+            'max_nodes': 8,
+            'min_bones': 6,
+            'max_bones': 15,
+            'muscle_density': 0.6
+        }
         
         # Initialize Dear PyGui
         dpg.create_context()
@@ -212,29 +234,59 @@ class Simulation:
             # Create a splitter for side panel and simulation view
             with dpg.group(horizontal=True):
                 # Side panel for controls
-                with dpg.child_window(width=200):
+                with dpg.child_window(width=300):
                     dpg.add_text("Controls")
-                    dpg.add_button(label="Create Organism", callback=self.create_organism)
-                    dpg.add_button(label="Reset", callback=self.reset_simulation)
+                    dpg.add_button(label="Create Random Creature", callback=self.create_organism)
+                    dpg.add_button(label="Reset Simulation", callback=self.reset_simulation)
+                    
+                    with dpg.collapsing_header(label="Creature Parameters"):
+                        dpg.add_slider_int(label="Min Nodes", min_value=3, max_value=10, default_value=self.creation_params['min_nodes'], 
+                                          callback=lambda s, a: self.param_update('min_nodes', a))
+                        dpg.add_slider_int(label="Max Nodes", min_value=4, max_value=15, default_value=self.creation_params['max_nodes'], 
+                                          callback=lambda s, a: self.param_update('max_nodes', a))
+                        dpg.add_slider_int(label="Min Bones", min_value=3, max_value=20, default_value=self.creation_params['min_bones'], 
+                                          callback=lambda s, a: self.param_update('min_bones', a))
+                        dpg.add_slider_int(label="Max Bones", min_value=4, max_value=30, default_value=self.creation_params['max_bones'], 
+                                          callback=lambda s, a: self.param_update('max_bones', a))
+                        dpg.add_slider_float(label="Muscle Density", min_value=0.1, max_value=1.0, default_value=self.creation_params['muscle_density'], 
+                                           callback=lambda s, a: self.param_update('muscle_density', a))
+                    
                     dpg.add_text("Camera Controls")
                     dpg.add_slider_float(label="Camera Speed", default_value=5.0, min_value=1.0, max_value=20.0, callback=self.set_camera_speed)
                     self.camera_speed = 5.0
                     
                 # Simulation view
                 with dpg.child_window(tag="simulation_view"):
-                    with dpg.drawlist(width=SIM_WIDTH-200, height=SIM_HEIGHT) as self.draw_node:
+                    with dpg.drawlist(width=SIM_WIDTH-300, height=SIM_HEIGHT) as self.draw_node:
                         pass
-                    #self.draw_node = dpg.add_draw_node(tag="draw_node")
         
         dpg.show_viewport()
         dpg.set_primary_window("Primary Window", True)
+        
+    def param_update(self, param, value):
+        self.creation_params[param] = value
         
     def set_camera_speed(self, sender, app_data):
         self.camera_speed = app_data
         
     def create_organism(self):
+        # Get random values within specified ranges
+        node_count = random.randint(
+            self.creation_params['min_nodes'],
+            self.creation_params['max_nodes']
+        )
+        bone_count = random.randint(
+            self.creation_params['min_bones'],
+            self.creation_params['max_bones']
+        )
+        
         # Create new organism at starting position
-        new_org = Organism([0, 600])
+        new_org = Organism(
+            [0, 600],
+            node_count=node_count,
+            bone_count=bone_count,
+            muscle_density=self.creation_params['muscle_density']
+        )
         self.organisms.append(new_org)
         self.follow_organism = new_org
         self.camera_offset_x = 0
