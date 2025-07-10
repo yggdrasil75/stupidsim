@@ -1,3 +1,5 @@
+import json
+import os
 from enum import Enum
 import torch
 import torch.nn as nn
@@ -18,11 +20,47 @@ GRAVITY = torch.tensor([0.0, 0.5])
 FRICTION = 0.99
 TIME_STEP = 0.1
 MUSCLE_CYCLE_LENGTH = 100
+CREATURE_DB_FILE = "creatures_db.json"
+TRAINING_TIMESTEPS = 10000  # 10 seconds at normal speed
+TRAINING_SPEEDUP = 10  # Run training 10x faster than real-time
+MAX_TRIALS = 3  # Number of trials per generation
+
 class CONNECTION_TYPES(Enum):
     node_center = 0
     node_edge = 1
     bone_center = 2
 
+# Helper functions for JSON serialization
+def tensor_to_list(tensor):
+    if isinstance(tensor, torch.Tensor):
+        return tensor.tolist()
+    elif isinstance(tensor, (list, tuple)):
+        return [tensor_to_list(x) for x in tensor]
+    elif isinstance(tensor, dict):
+        return {k: tensor_to_list(v) for k, v in tensor.items()}
+    return tensor
+
+def list_to_tensor(lst):
+    if isinstance(lst, (list, tuple)):
+        if all(isinstance(x, (int, float)) for x in lst):  # It's a simple list of numbers
+            return torch.tensor(lst, dtype=torch.float32)
+        else:  # It's a nested structure
+            return [list_to_tensor(x) for x in lst]
+    elif isinstance(lst, dict):
+        return {k: list_to_tensor(v) for k, v in lst.items()}
+    return lst
+
+class NeuralController(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(NeuralController, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, output_size)
+        self.optimizer = optim.Adam(self.parameters(), lr=0.01)
+        
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.sigmoid(self.fc2(x))  # Output between 0 and 1 for muscle tension
+        return x
 
 class Node:
     def __init__(self, position, radius: float=10, mass=1.0):
@@ -78,6 +116,37 @@ class Node:
                 self.position[1] = SIM_HEIGHT - self.radius - 20
                 self.velocity[1] *= -0.5
 
+    def to_dict(self):
+        return {
+            'position': tensor_to_list(self.position),
+            'velocity': tensor_to_list(self.velocity),
+            'force': tensor_to_list(self.force),
+            'radius': self.radius,
+            'mass': self.mass,
+            'fixed': self.fixed,
+            'angle_restrictions': self.angle_restrictions
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        node = cls(
+            position=data['position'],
+            radius=data['radius'],
+            mass=data['mass']
+        )
+        node.velocity = list_to_tensor(data['velocity'])
+        node.force = list_to_tensor(data['force'])
+        node.fixed = data['fixed']
+        node.angle_restrictions = [tuple(ar) for ar in data['angle_restrictions']]
+        return node
+    
+    def get_angle_ranges(self) -> List[Tuple[float, float]]:
+        """Return a list of (start_angle, end_angle) tuples for visualization"""
+        ranges = []
+        for bone_id, min_angle, max_angle, natural_min, natural_max in self.angle_restrictions:
+            ranges.append((min_angle, max_angle))
+        return ranges
+
 class Bone:
     def __init__(self, node1_id: int, node2_id: int, length=1, stiffness=1.0):
         self.node1_id = node1_id
@@ -86,6 +155,7 @@ class Bone:
         self.id: int = -1  # Will be set when added to organism
         self.rest_length = length  # This might be None initially
         self.mass = 0.5  # Bones have some mass too
+        self.angle_restriction_strength = 0.5  # Strength of angle restriction enforcement
         
     def update_angle_restrictions(self, nodes: Dict[int, Node]):
         """Update angle restrictions based on current bone positions."""
@@ -95,6 +165,10 @@ class Bone:
         # Calculate direction vector
         direction = node2.position - node1.position
         current_angle = math.atan2(direction[1], direction[0])
+        
+        # Clear existing restrictions
+        node1.angle_restrictions = [ar for ar in node1.angle_restrictions if ar[0] != self.id]
+        node2.angle_restrictions = [ar for ar in node2.angle_restrictions if ar[0] != self.id]
         
         # For node1, the angle is current_angle
         # For node2, the angle is current_angle + math.pi (opposite direction)
@@ -142,38 +216,61 @@ class Bone:
                     continue  # Skip self
                     
                 # Get the other bone
+                # other_bone = next((b for b in nodes.values() if hasattr(b, 'id') and b.id == bone_id), None)
                 other_bone = next((b for b in nodes.values() if hasattr(b, 'id') and b.id == bone_id), None)
                 if other_bone is None:
                     continue
                     
-                # Calculate current angle between this bone and the other bone
+                # Get the connected node for the other bone
+                if other_bone.node1_id == self.node1_id or other_bone.node1_id == self.node2_id:
+                    other_node_id = other_bone.node2_id
+                else:
+                    other_node_id = other_bone.node1_id
+                
+                # Calculate vectors for both bones
                 vec1 = node2.position - node1.position
-                vec2 = nodes[other_bone.node2_id].position - nodes[other_bone.node1_id].position
+                vec2 = nodes[other_node_id].position - node.position
                 
-                angle = math.atan2(vec2[1], vec2[0]) - math.atan2(vec1[1], vec1[0])
-                angle = (angle + math.pi) % (2 * math.pi) - math.pi  # Normalize to [-π, π]
+                # Calculate angle between vectors
+                angle1 = math.atan2(vec1[1], vec1[0])
+                angle2 = math.atan2(vec2[1], vec2[0])
+                angle_diff = (angle2 - angle1 + math.pi) % (2 * math.pi) - math.pi  # Normalized to [-π, π]
                 
-                # Check if angle is outside natural range
-                if angle < nat_min or angle > nat_max:
-                    # Calculate correction force
-                    correction_factor = 0.0
-                    if angle < min_angle:
-                        correction_factor = (min_angle - angle) * 0.1
-                    elif angle > max_angle:
-                        correction_factor = (max_angle - angle) * 0.1
-                    elif angle < nat_min:
-                        correction_factor = (nat_min - angle) * 0.05
-                    elif angle > nat_max:
-                        correction_factor = (nat_max - angle) * 0.05
-                        
-                    if correction_factor != 0.0:
-                        # Apply corrective torque to both nodes
-                        torque_dir = 1 if correction_factor > 0 else -1
-                        perp1 = torch.tensor([-vec1[1], vec1[0]])
-                        perp2 = torch.tensor([vec1[1], -vec1[0]])
-                        
-                        node1.apply_force(perp1 * torque_dir * abs(correction_factor) * 0.1)
-                        node2.apply_force(perp2 * torque_dir * abs(correction_factor) * 0.1)
+                # Calculate correction needed
+                correction = 0.0
+                if angle_diff < nat_min:
+                    # Below natural minimum - push toward natural range
+                    correction = (nat_min - angle_diff) * self.angle_restriction_strength
+                elif angle_diff > nat_max:
+                    # Above natural maximum - push toward natural range
+                    correction = (nat_max - angle_diff) * self.angle_restriction_strength
+                elif angle_diff < min_angle:
+                    # Below absolute minimum - strong push
+                    correction = (min_angle - angle_diff) * self.angle_restriction_strength * 2
+                elif angle_diff > max_angle:
+                    # Above absolute maximum - strong push
+                    correction = (max_angle - angle_diff) * self.angle_restriction_strength * 2
+                
+                if correction != 0.0:
+                    # Apply corrective forces
+                    # Calculate perpendicular vectors for torque
+                    perp_vec1 = torch.tensor([-vec1[1], vec1[0]])
+                    perp_vec2 = torch.tensor([vec2[1], -vec2[0]])
+                    
+                    # Normalize perpendicular vectors
+                    if torch.norm(perp_vec1) > 0:
+                        perp_vec1 = perp_vec1 / torch.norm(perp_vec1)
+                    if torch.norm(perp_vec2) > 0:
+                        perp_vec2 = perp_vec2 / torch.norm(perp_vec2)
+                    
+                    # Apply forces to create torque
+                    force_magnitude = abs(correction) * 0.1
+                    node1.apply_force(perp_vec1 * force_magnitude * (1 if correction > 0 else -1))
+                    node2.apply_force(-perp_vec1 * force_magnitude * (1 if correction > 0 else -1))
+                    
+                    # Also apply force to the other bone's nodes
+                    node.apply_force(perp_vec2 * force_magnitude * (-1 if correction > 0 else 1))
+                    nodes[other_node_id].apply_force(-perp_vec2 * force_magnitude * (-1 if correction > 0 else 1))
                         
     def apply_gravity(self, nodes: Dict[int, Node]):
         """Apply gravity to the bone based on its center of mass"""
@@ -186,9 +283,33 @@ class Bone:
         node1.apply_force(gravity_force / 2)
         node2.apply_force(gravity_force / 2)
 
+    def to_dict(self):
+        return {
+            'node1_id': self.node1_id,
+            'node2_id': self.node2_id,
+            'stiffness': self.stiffness,
+            'id': self.id,
+            'rest_length': tensor_to_list(self.rest_length),
+            'mass': self.mass
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        bone = cls(
+            node1_id=data['node1_id'],
+            node2_id=data['node2_id'],
+            length=data['rest_length'],
+            stiffness=data['stiffness']
+        )
+        bone.id = data['id']
+        bone.mass = data['mass']
+        bone.rest_length = list_to_tensor(data["rest_length"])
+        return bone
+
 class Muscle:
-    def __init__(self, attachment1: Tuple[int, CONNECTION_TYPES], attachment2: Tuple[int, CONNECTION_TYPES], min_length: float, max_length: float,
-                 min_tension: float = 0.0, max_tension: float = 1.0, strength: float = 0.1, phase: float = 0.0):
+    def __init__(self, attachment1: Tuple[int, CONNECTION_TYPES], attachment2: Tuple[int, CONNECTION_TYPES], 
+                 min_length: float, max_length: float, min_tension: float = 0.0, max_tension: float = 1.0,
+                 strength: float = 0.1, phase: float = 0.0, frequency: float = 1.0):
         self.attachment1: tuple[int, CONNECTION_TYPES] = attachment1
         self.attachment2: tuple[int, CONNECTION_TYPES] = attachment2
         self.min_length: float = min_length
@@ -199,6 +320,11 @@ class Muscle:
         self.phase: float = phase
         self.current_tension: float = 0.0
         self.id = None  # Will be set when added to organism
+        self.frequency: float = frequency
+        self.current_tension: float = 0.0
+        self.id = None
+        self.control_signal: float = 0.0  # Added for neural control
+        self.manual_control: bool = False  # Added to toggle between manual and automatic control
         
     def get_connection_point(self, target_id: int, connection_type: CONNECTION_TYPES, nodes: Dict[int, Node], bones: Dict[int, Bone]) -> torch.Tensor:
         if target_id in nodes:
@@ -226,19 +352,21 @@ class Muscle:
         return torch.zeros(2)  # Default fallback
         
     def update(self, time_step, nodes: Dict[int, Node], bones: Dict[int, Bone]):
-        # Oscillate tension based on time within min/max range
-        self.phase = (self.phase + 0.01) % (2 * math.pi)
-        self.current_tension = self.min_tension + (self.max_tension - self.min_tension) * ((math.sin(self.phase) + 1) / 2)
+        if self.manual_control:
+            # Use neural control signal directly
+            self.current_tension = self.control_signal
+        else:
+            # Original oscillating behavior
+            self.phase = (self.phase + 0.01 * self.frequency) % (2 * math.pi)
+            self.current_tension = self.min_tension + (self.max_tension - self.min_tension) * ((math.sin(self.phase) + 1) / 2)
         
-        # Update connection points (in case nodes have moved)
+        # Rest of the update method remains the same...
         self.point1 = self.get_connection_point(self.attachment1[0], self.attachment1[1], nodes, bones)
         self.point2 = self.get_connection_point(self.attachment2[0], self.attachment2[1], nodes, bones)
         
-        # Calculate target length based on current tension
         target_length = self.min_length + (self.max_length - self.min_length) * (1 - self.current_tension)
         current_length = torch.dist(self.point1, self.point2)
         
-        # Apply force to reach target length
         direction = self.point2 - self.point1
         if torch.norm(direction) > 0:
             direction = direction / torch.norm(direction)
@@ -246,7 +374,6 @@ class Muscle:
             displacement = current_length - target_length
             force = direction * displacement * self.strength
             
-            # Apply forces to the appropriate attachment points
             self.apply_force_to_attachment(self.attachment1, force, nodes, bones)
             self.apply_force_to_attachment(self.attachment2, -force, nodes, bones)
             
@@ -271,6 +398,36 @@ class Muscle:
                 node1.apply_force(force / 2)
                 node2.apply_force(force / 2)
 
+    def to_dict(self):
+        return {
+            'attachment1': (self.attachment1[0], self.attachment1[1].value),
+            'attachment2': (self.attachment2[0], self.attachment2[1].value),
+            'min_length': self.min_length,
+            'max_length': self.max_length,
+            'min_tension': self.min_tension,
+            'max_tension': self.max_tension,
+            'strength': self.strength,
+            'phase': self.phase,
+            'current_tension': self.current_tension,
+            'id': self.id
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        muscle = cls(
+            attachment1=(data['attachment1'][0], CONNECTION_TYPES(data['attachment1'][1])),
+            attachment2=(data['attachment2'][0], CONNECTION_TYPES(data['attachment2'][1])),
+            min_length=data['min_length'],
+            max_length=data['max_length'],
+            min_tension=data['min_tension'],
+            max_tension=data['max_tension'],
+            strength=data['strength'],
+            phase=data['phase']
+        )
+        muscle.current_tension = data['current_tension']
+        muscle.id = data['id']
+        return muscle
+
 class Organism:
     def __init__(self, position, node_count=5, bone_count=8, muscle_density=0.5, name=None, is_mobile=True):
         self.nodes: Dict[int, Node] = {}
@@ -282,10 +439,78 @@ class Organism:
         self.next_id = 0
         self.mass = 1.0  # Organism has mass too
         self.muscle_density = muscle_density
-        self.build_body(node_count, bone_count, muscle_density)
-
         self.is_mobile = is_mobile  # Track whether this is a mobile instance
         
+        self.controller = None
+        self.distance_traveled = 0.0
+        self.last_position = None
+        self.training_mode = False
+        self.fitness = 0.0
+        self.time = 0.0 
+        
+        # Only build body if we're not loading from JSON
+        if node_count is not None and bone_count is not None:
+            self.build_body(node_count, bone_count, muscle_density)
+        
+
+    def setup_neural_controller(self):
+        if not self.muscles:
+            return
+            
+        # Inputs: current phase (time), muscle lengths, node positions
+        input_size = 1 + len(self.muscles) * 2 + len(self.nodes) * 2
+        output_size = len(self.muscles)
+        hidden_size = 16  # Small network for simple creatures
+        
+        self.controller = NeuralController(input_size, hidden_size, output_size)
+        
+        # Enable manual control for all muscles
+        for muscle in self.muscles.values():
+            muscle.manual_control = True
+            
+    def neural_control_step(self, time_step):
+        if not self.controller or not self.muscles:
+            return
+            
+        # Prepare input features
+        inputs = []
+        
+        # 1. Time signal
+        inputs.append(math.sin(self.time * 0.1))  # Oscillating time signal
+        
+        # 2. Muscle lengths
+        for muscle in self.muscles.values():
+            point1 = muscle.get_connection_point(muscle.attachment1[0], muscle.attachment1[1], self.nodes, self.bones)
+            point2 = muscle.get_connection_point(muscle.attachment2[0], muscle.attachment2[1], self.nodes, self.bones)
+            length = torch.dist(point1, point2)
+            inputs.append(length.item())
+            inputs.append(muscle.current_tension)
+        
+        # 3. Node positions (relative to center)
+        com = self.position
+        for node in self.nodes.values():
+            rel_pos = node.position - com
+            inputs.extend(rel_pos.tolist())
+        
+        # Convert to tensor and get control signals
+        input_tensor = torch.tensor(inputs, dtype=torch.float32).unsqueeze(0)
+        control_signals = self.controller(input_tensor).squeeze(0)
+        
+        # Apply control signals to muscles
+        for i, (muscle_id, muscle) in enumerate(self.muscles.items()):
+            muscle.control_signal = control_signals[i].item()
+            
+    def update_fitness(self):
+        if self.last_position is None:
+            self.last_position = self.position.clone()
+            return
+            
+        # Calculate distance moved in x direction (ignore vertical movement)
+        distance = (self.position[0] - self.last_position[0]).abs().item()
+        self.distance_traveled += distance
+        self.fitness += distance
+        self.last_position = self.position.clone()
+
     def generate_random_name(self):
         prefix = random.choice(["Species", "Creature", "Organism", "Being", "Lifeform"])
         number = random.randint(100, 99999)
@@ -313,26 +538,57 @@ class Organism:
             node_pos = [(center + offset)[0].item(), node_y]
             
             node = Node(node_pos, 
-                       radius=8 + random.random() * 4,
-                       mass=0.5 + random.random() * 1.5)
+                    radius=8 + random.random() * 4,
+                    mass=0.5 + random.random() * 1.5)
             
-            # if random.random() < 0.2 and len(self.nodes) > 1:
-            #     node.fixed = True
-                
             node_id = self.get_next_id()
             self.nodes[node_id] = node
         
-        # Create bones with rigid constraints
-        attempts = 0
+        # First create a minimum spanning tree to ensure connectivity
         node_ids = list(self.nodes.keys())
+        random.shuffle(node_ids)
         
+        # Start with one node
+        connected_nodes = {node_ids[0]}
+        remaining_nodes = set(node_ids[1:])
+        
+        while remaining_nodes:
+            # Find closest pair between connected and remaining nodes
+            closest_pair = None
+            min_dist = float('inf')
+            
+            for c_node in connected_nodes:
+                for r_node in remaining_nodes:
+                    dist = torch.dist(self.nodes[c_node].position, self.nodes[r_node].position)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_pair = (c_node, r_node)
+            
+            if closest_pair:
+                # Create bone between them
+                new_bone = Bone(closest_pair[0], closest_pair[1], stiffness=1.0)
+                node1 = self.nodes[closest_pair[0]]
+                node2 = self.nodes[closest_pair[1]]
+                new_bone.rest_length = torch.dist(node1.position, node2.position)
+                bone_id = self.get_next_id()
+                new_bone.id = bone_id
+                self.bones[bone_id] = new_bone
+                new_bone.update_angle_restrictions(self.nodes)
+                
+                # Update connected sets
+                connected_nodes.add(closest_pair[1])
+                remaining_nodes.remove(closest_pair[1])
+        
+        # Now add remaining bones randomly, ensuring they don't create multipart creatures
+        attempts = 0
         while len(self.bones) < bone_count and attempts < bone_count * 2:
             attempts += 1
             node1_id, node2_id = random.sample(node_ids, 2)
             
+            # Skip if already connected
             if any(b for b in self.bones.values() if 
-                  (b.node1_id == node1_id and b.node2_id == node2_id) or 
-                  (b.node1_id == node2_id and b.node2_id == node1_id)):
+                (b.node1_id == node1_id and b.node2_id == node2_id) or 
+                (b.node1_id == node2_id and b.node2_id == node1_id)):
                 continue
                 
             node1 = self.nodes[node1_id]
@@ -341,13 +597,17 @@ class Organism:
             if dist > 120:
                 continue
                 
-            # Create rigid bone (stiffness = 1.0)
+            # Create new bone
             new_bone = Bone(node1_id, node2_id, stiffness=1.0)
-            new_bone.rest_length = dist  # Set the rest length to current distance
+            new_bone.rest_length = dist
             bone_id = self.get_next_id()
             new_bone.id = bone_id
             self.bones[bone_id] = new_bone
             new_bone.update_angle_restrictions(self.nodes)
+        
+        # Final check - if we somehow ended up with a multipart creature, fix it
+        if not self.is_connected():
+            self.fix_multipart_creature()
         
         self.remove_unconnected_nodes()
         
@@ -413,7 +673,69 @@ class Organism:
         # Position the organism
         for node in self.nodes.values():
             node.position += self.position
+
+    def fix_multipart_creature(self):
+        if not self.nodes or not self.bones:
+            return
             
+        # Find connected components
+        adjacency = defaultdict(set)
+        for bone in self.bones.values():
+            adjacency[bone.node1_id].add(bone.node2_id)
+            adjacency[bone.node2_id].add(bone.node1_id)
+        
+        components = []
+        visited = set()
+        
+        for node_id in self.nodes:
+            if node_id not in visited:
+                # New component found
+                component = set()
+                queue = deque([node_id])
+                visited.add(node_id)
+                
+                while queue:
+                    current = queue.popleft()
+                    component.add(current)
+                    
+                    for neighbor in adjacency[current]:
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            queue.append(neighbor)
+                
+                components.append(component)
+        
+        # If only one component, nothing to fix
+        if len(components) <= 1:
+            return
+            
+        # Connect components by finding closest pairs between them
+        for i in range(len(components)-1):
+            comp1 = components[i]
+            comp2 = components[i+1]
+            
+            # Find closest pair between components
+            closest_pair = None
+            min_dist = float('inf')
+            
+            for node1 in comp1:
+                for node2 in comp2:
+                    dist = torch.dist(self.nodes[node1].position, self.nodes[node2].position)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_pair = (node1, node2)
+            
+            if closest_pair:
+                # Create bone between them
+                new_bone = Bone(closest_pair[0], closest_pair[1], stiffness=1.0)
+                node1 = self.nodes[closest_pair[0]]
+                node2 = self.nodes[closest_pair[1]]
+                new_bone.rest_length = torch.dist(node1.position, node2.position)
+                bone_id = self.get_next_id()
+                new_bone.id = bone_id
+                self.bones[bone_id] = new_bone
+                new_bone.update_angle_restrictions(self.nodes)
+
     def get_connection_point(self, target_id: int, connection_type: CONNECTION_TYPES) -> torch.Tensor:
         if target_id in self.nodes:
             node = self.nodes[target_id]
@@ -469,6 +791,35 @@ class Organism:
             new_bone.rest_length = torch.dist(self.nodes[node1_id].position, self.nodes[node2_id].position)
             new_bone.id = bone_id
             self.bones[bone_id] = new_bone
+
+    def is_connected(self) -> bool:
+        if not self.nodes or not self.bones:
+            return False
+        
+        # Build adjacency list
+        adjacency = defaultdict(set)
+        for bone in self.bones.values():
+            adjacency[bone.node1_id].add(bone.node2_id)
+            adjacency[bone.node2_id].add(bone.node1_id)
+        
+        # Perform BFS to check connectivity
+        visited = set()
+        queue = deque()
+        
+        # Start with first node
+        start_node = next(iter(self.nodes.keys()))
+        queue.append(start_node)
+        visited.add(start_node)
+        
+        while queue:
+            current = queue.popleft()
+            for neighbor in adjacency[current]:
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+        
+        # If we visited all nodes, it's connected
+        return len(visited) == len(self.nodes)
         
     def draw(self, offset_x, gravity_enabled=True, scale=1.0, box_center=None):
         if box_center is not None:
@@ -509,10 +860,34 @@ class Organism:
             dpg.draw_line(pos1, pos2, color=(255, 255, 255, 255), thickness=2)
             
         # Draw nodes
-        for node in self.nodes.values():
+        for node_id, node in self.nodes.items():
             pos = node.position.detach().numpy() - np.array([offset_x, 0])
+            
+            # Draw angle ranges for each connected bone
+            angle_ranges = node.get_angle_ranges()
+            for start_angle, end_angle in angle_ranges:
+                # Draw a partial circle (arc) for the range
+                arc_radius = node.radius * 1.5
+                segments = 20
+                
+                # Calculate points along the arc
+                points = []
+                for i in range(segments + 1):
+                    angle = start_angle + (end_angle - start_angle) * (i / segments)
+                    x = pos[0] + math.cos(angle) * arc_radius
+                    y = pos[1] + math.sin(angle) * arc_radius
+                    points.append([x, y])
+                
+                # Draw the arc
+                if len(points) > 1:
+                    dpg.draw_polyline(points, color=(255, 255, 255, 100), thickness=1)
+            
+            # Draw the node itself (smaller now since we have arcs)
             color = (0, 255, 0, 255)
-            dpg.draw_circle(pos, node.radius, color=color)
+            dpg.draw_circle(pos, node.radius * 0.7, color=color, fill=color)
+            
+            # Draw a small dot in the center to indicate the exact node position
+            dpg.draw_circle(pos, 2, color=(255, 255, 255, 255), fill=(255, 255, 255, 255))
             
         # Draw muscles as curves
         for muscle in self.muscles.values():
@@ -558,12 +933,18 @@ class Organism:
         """Create an immobile copy of this organism for display purposes"""
         copy = Organism(
             [0, 0],  # Position doesn't matter for immobile copies
-            node_count=len(self.nodes),
-            bone_count=len(self.bones),
+            node_count=None,
+            bone_count=None,
             muscle_density=self.muscle_density,
             name=self.name,
             is_mobile=False
         )
+        
+        # Copy all components
+        copy.nodes = {nid: Node.from_dict(node.to_dict()) for nid, node in self.nodes.items()}
+        copy.bones = {bid: Bone.from_dict(bone.to_dict()) for bid, bone in self.bones.items()}
+        copy.muscles = {mid: Muscle.from_dict(muscle.to_dict()) for mid, muscle in self.muscles.items()}
+        copy.next_id = self.next_id
         
         # Make all nodes fixed in the copy
         for node in copy.nodes.values():
@@ -573,10 +954,10 @@ class Organism:
         
     def update(self, time_step, gravity_enabled=True, gravity_type="creature"):
         if not self.is_mobile:
-            return  # Skip update for immobile instances
-            
-        # Rest of the update logic remains the same...
-        # Calculate total mass for the organism
+            return
+        
+        self.time += time_step
+
         total_mass = sum(node.mass for node in self.nodes.values()) + \
                     sum(bone.mass for bone in self.bones.values())
         self.mass = total_mass
@@ -620,6 +1001,63 @@ class Organism:
         self.velocity = total_velocity / total_mass
         self.position = com
 
+    def to_dict(self):
+        return {
+            'name': self.name,
+            'position': tensor_to_list(self.position),
+            'velocity': tensor_to_list(self.velocity),
+            'mass': self.mass,
+            'muscle_density': self.muscle_density,
+            'is_mobile': self.is_mobile,
+            'next_id': self.next_id,
+            'nodes': {str(nid): node.to_dict() for nid, node in self.nodes.items()},  # Convert keys to strings
+            'bones': {str(bid): bone.to_dict() for bid, bone in self.bones.items()},
+            'muscles': {str(mid): muscle.to_dict() for mid, muscle in self.muscles.items()},
+            'has_controller': self.controller is not None,
+            'controller_state': self.controller.state_dict() if self.controller else None,
+            'fitness': self.fitness
+        }
+
+    @classmethod
+    def from_dict(cls, data):
+        """Create an organism from a dictionary (JSON deserialization)"""
+        org = cls(
+            position=data['position'],
+            node_count=None,
+            bone_count=None,
+            muscle_density=data['muscle_density'],
+            name=data['name'],
+            is_mobile=data['is_mobile']
+        )
+        
+        # Restore all components
+        org.position = list_to_tensor(data['position'])
+        org.velocity = list_to_tensor(data['velocity'])
+        org.mass = data['mass']
+        org.next_id = data['next_id']
+        
+        # Restore nodes (convert string keys back to integers)
+        org.nodes = {int(nid): Node.from_dict(node_data) for nid, node_data in data['nodes'].items()}
+        
+        # Restore bones
+        org.bones = {int(bid): Bone.from_dict(bone_data) for bid, bone_data in data['bones'].items()}
+        
+        # Restore muscles
+        org.muscles = {int(mid): Muscle.from_dict(muscle_data) for mid, muscle_data in data['muscles'].items()}
+        
+        if data['has_controller'] and data['controller_state']:
+            org.setup_neural_controller()
+            org.controller.load_state_dict(data['controller_state'])
+            org.controller.optimizer = optim.Adam(org.controller.parameters(), lr=0.01)
+            
+            # Enable manual control for muscles
+            for muscle in org.muscles.values():
+                muscle.manual_control = True
+                
+        org.fitness = data.get('fitness', 0.0)
+
+        return org
+
 class Simulation:
     def __init__(self):
         self.organisms: list[Organism] = []  # Mobile instances in simulation
@@ -636,6 +1074,11 @@ class Simulation:
         }
         self.gravity_type = "creature"  # Default to creature-level gravity
         
+        self.training = False
+        self.generation = 0
+        self.best_fitness = 0.0
+        self.best_organism = None
+
         # Initialize Dear PyGui
         dpg.create_context()
         dpg.create_viewport(title='Organism Walking Simulation', width=SIM_WIDTH, height=SIM_HEIGHT)
@@ -653,7 +1096,8 @@ class Simulation:
                             dpg.add_text("Controls")
                             dpg.add_button(label="Create Random Creature", callback=self.create_organism)
                             dpg.add_button(label="Reset Simulation", callback=self.reset_simulation)
-                            
+                            dpg.add_button(label="Save Creatures", callback=self.save_creatures)
+                            dpg.add_button(label="Load Creatures", callback=self.load_creatures)
                             
                             with dpg.collapsing_header(label="Gravity Settings"):
                                 dpg.add_radio_button(
@@ -675,6 +1119,12 @@ class Simulation:
                                 dpg.add_slider_float(label="Muscle Density", min_value=0.1, max_value=1.0, default_value=self.creation_params['muscle_density'], 
                                                    callback=lambda s, a: self.param_update('muscle_density', a))
                             
+                            with dpg.collapsing_header(label="Learning Controls"):
+                                dpg.add_button(label="Setup Neural Control", callback=self.setup_neural_control)
+                                dpg.add_button(label="Start Training", callback=self.start_training)
+                                dpg.add_button(label="Stop Training", callback=self.stop_training)
+                                dpg.add_text("Fitness: 0.0", tag="fitness_display")
+
                             dpg.add_text("Camera Controls")
                             dpg.add_slider_float(label="Camera Speed", default_value=5.0, min_value=1.0, max_value=20.0, callback=self.set_camera_speed)
                             self.camera_speed = 5.0
@@ -697,6 +1147,7 @@ class Simulation:
                                     callback=self.select_creature_from_list
                                 )
                             dpg.add_button(label="Add to Simulation", callback=self.add_selected_to_simulation)
+                            dpg.add_button(label="Delete Creature", callback=self.delete_selected_creature)
                         
                         with dpg.child_window(tag="creature_view"):
                             with dpg.drawlist(width=SIM_WIDTH-300, height=SIM_HEIGHT) as self.creature_draw_node:
@@ -705,6 +1156,160 @@ class Simulation:
         dpg.show_viewport()
         dpg.set_primary_window("Primary Window", True)
         
+        # Load creatures from file if it exists
+        self.load_creatures()
+
+    def setup_neural_control(self):
+        if not self.organisms:
+            return
+            
+        for org in self.organisms:
+            org.setup_neural_controller()
+            
+    def start_training(self):
+        if not self.organisms:
+            return
+            
+        self.training = True
+        self.generation = 0
+        self.best_fitness = 0.0
+        self.current_trial = 0
+        self.trial_start_time = 0
+        self.training_timesteps = 0
+        
+        # Reset all organisms
+        for org in self.organisms:
+            org.training_mode = True
+            org.distance_traveled = 0.0
+            org.fitness = 0.0
+            org.last_position = None
+            org.fitness_history = []  # Track fitness across trials
+            
+    def update(self):
+        # Update all organisms in simulation
+        for organism in self.organisms:
+            if organism.training_mode and organism.controller:
+                organism.neural_control_step(TIME_STEP)
+                organism.update_fitness()
+                
+            organism.update(TIME_STEP, gravity_enabled=True, gravity_type=self.gravity_type)
+            
+        if self.training and self.organisms:
+            self.training_timesteps += 1
+            
+            # Update fitness display with current best
+            current_best = max(org.fitness for org in self.organisms)
+            dpg.set_value("fitness_display", 
+                         f"Gen {self.generation} Trial {self.current_trial+1}/{MAX_TRIALS}\n"
+                         f"Best: {self.best_fitness:.2f} Current: {current_best:.2f}")
+            
+            # Check if trial should end (after TRAINING_TIMESTEPS)
+            if self.training_timesteps >= TRAINING_TIMESTEPS:
+                self.end_trial()
+                
+                # If we've completed all trials, go to next generation
+                if self.current_trial >= MAX_TRIALS:
+                    self.next_generation()
+            
+        # Update all creatures in gallery (without gravity)
+        for creature in self.all_creatures:
+            creature.update(TIME_STEP, gravity_enabled=True)
+            
+        # Camera follow logic (only in non-training or first trial)
+        if self.follow_organism and (not self.training or self.current_trial == 0):
+            target_x = self.follow_organism.position[0].item() - SIM_WIDTH/3
+            self.camera_offset_x += (target_x - self.camera_offset_x) * 0.1 * self.camera_speed * TIME_STEP
+            
+        # Draw everything
+        self.draw_simulation()
+        self.draw_creature_gallery()
+        
+        # Accelerate training by running multiple updates per frame
+        if self.training and self.training_timesteps < TRAINING_TIMESTEPS:
+            # Run additional updates to speed up training
+            for _ in range(TRAINING_SPEEDUP - 1):
+                for organism in self.organisms:
+                    if organism.training_mode and organism.controller:
+                        organism.neural_control_step(TIME_STEP)
+                        organism.update_fitness()
+                    organism.update(TIME_STEP, gravity_enabled=True, gravity_type=self.gravity_type)
+                self.training_timesteps += 1
+                
+    def end_trial(self):
+        """Record fitness for current trial and prepare for next trial"""
+        self.current_trial += 1
+        
+        # Record fitness for each organism
+        for org in self.organisms:
+            org.fitness_history.append(org.fitness)
+            
+        # Reset for next trial
+        self.training_timesteps = 0
+        for org in self.organisms:
+            org.fitness = 0.0
+            org.distance_traveled = 0.0
+            org.last_position = None
+            # Reset position but keep slight randomness
+            org.position = torch.tensor([
+                random.uniform(-50, 50), 
+                SIM_HEIGHT - 150
+            ], dtype=torch.float32)
+            # Reset velocities
+            for node in org.nodes.values():
+                node.velocity = torch.zeros(2, dtype=torch.float32)
+                
+    def next_generation(self):
+        """Create next generation after all trials are complete"""
+        if not self.organisms:
+            return
+            
+        self.generation += 1
+        self.current_trial = 0
+        
+        # Calculate average fitness for each organism
+        for org in self.organisms:
+            if org.fitness_history:
+                org.avg_fitness = sum(org.fitness_history) / len(org.fitness_history)
+            else:
+                org.avg_fitness = 0.0
+                
+        # Sort by average fitness
+        self.organisms.sort(key=lambda x: x.avg_fitness, reverse=True)
+        best_org = self.organisms[0]
+        
+        if best_org.avg_fitness > self.best_fitness:
+            self.best_fitness = best_org.avg_fitness
+            self.best_organism = best_org
+            
+        # Create new generation through mutation
+        new_organisms = []
+        for i in range(len(self.organisms)):
+            # Create a copy of the best organism
+            new_org = self.copy_organism(best_org)
+            
+            # Only mutate if the organism has a controller
+            if new_org.controller:
+                self.mutate_controller(new_org.controller)
+            
+            # Reset for new generation
+            new_org.fitness = 0.0
+            new_org.distance_traveled = 0.0
+            new_org.last_position = None
+            new_org.fitness_history = []
+            new_org.position = torch.tensor([0, SIM_HEIGHT - 150], dtype=torch.float32)
+            # Reset velocities
+            for node in new_org.nodes.values():
+                node.velocity = torch.zeros(2, dtype=torch.float32)
+                
+            new_organisms.append(new_org)
+            
+        self.organisms = new_organisms
+            
+    def stop_training(self):
+        self.training = False
+        for org in self.organisms:
+            org.training_mode = False
+            
     def param_update(self, param, value):
         self.creation_params[param] = value
         
@@ -785,44 +1390,77 @@ class Simulation:
             # Create a mobile instance from the selected template
             selected = self.selected_creature
             new_org = Organism(
-                [0, 0],
-                node_count=len(selected.nodes),
-                bone_count=len(selected.bones),
-                muscle_density=self.creation_params['muscle_density'],
+                [0, SIM_HEIGHT - 150],  # Start above ground
+                node_count=None,
+                bone_count=None,
+                muscle_density=selected.muscle_density,
                 name=selected.name,
                 is_mobile=True
             )
+            
+            # Copy all components from the selected creature
+            new_org.nodes = {nid: Node.from_dict(node.to_dict()) for nid, node in selected.nodes.items()}
+            new_org.bones = {bid: Bone.from_dict(bone.to_dict()) for bid, bone in selected.bones.items()}
+            new_org.muscles = {mid: Muscle.from_dict(muscle.to_dict()) for mid, muscle in selected.muscles.items()}
+            new_org.next_id = selected.next_id
             
             # Add to simulation
             self.organisms.append(new_org)
             self.follow_organism = new_org
             self.camera_offset_x = 0
             
+    def delete_selected_creature(self):
+        if hasattr(self, 'selected_creature'):
+            # Remove from both lists
+            self.all_creatures = [c for c in self.all_creatures if c.name != self.selected_creature.name]
+            self.organisms = [o for o in self.organisms if o.name != self.selected_creature.name]
+            
+            # Update the list
+            self.update_creature_list()
+            
+            # Clear selection
+            if hasattr(self, 'selected_creature'):
+                del self.selected_creature
+
     def set_gravity_type(self, sender, app_data):
         self.gravity_type = app_data.lower()
 
-    def update(self):
-        self.time += TIME_STEP
-        
-        # Update all organisms in simulation
-        for organism in self.organisms:
-            organism.fixed = False
-            organism.update(TIME_STEP, gravity_enabled=True, gravity_type=self.gravity_type)
+    def save_creatures(self):
+        """Save all creatures to JSON file"""
+        try:
+            # Convert all creatures to dictionaries
+            creatures_data = [creature.to_dict() for creature in self.all_creatures]
             
-        # Update all creatures in gallery (without gravity)
-        for creature in self.all_creatures:
-            #creature.fixed = True
-            creature.update(TIME_STEP, gravity_enabled=True)
-            
-        # Camera follow logic
-        if self.follow_organism:
-            target_x = self.follow_organism.position[0].item() - SIM_WIDTH/3
-            self.camera_offset_x += (target_x - self.camera_offset_x) * 0.1 * self.camera_speed * TIME_STEP
-            
-        # Draw everything
-        self.draw_simulation()
-        self.draw_creature_gallery()
+            # Save to file
+            with open(CREATURE_DB_FILE, 'w') as f:
+                json.dump(creatures_data, f, indent=2)
                 
+            print(f"Saved {len(creatures_data)} creatures to {CREATURE_DB_FILE}")
+        except Exception as e:
+            print(f"Error saving creatures: {e}")
+
+    def load_creatures(self):
+        """Load creatures from JSON file if it exists"""
+        try:
+            if os.path.exists(CREATURE_DB_FILE):
+                with open(CREATURE_DB_FILE, 'r') as f:
+                    creatures_data = json.load(f)
+                
+                # Clear current lists
+                self.all_creatures = []
+                self.organisms = []
+                
+                # Create organisms from data
+                for creature_data in creatures_data:
+                    org = Organism.from_dict(creature_data)
+                    self.all_creatures.append(org)
+                
+                # Update the creature list
+                self.update_creature_list()
+                print(f"Loaded {len(self.all_creatures)} creatures from {CREATURE_DB_FILE}")
+        except Exception as e:
+            print(f"Error loading creatures: {e}")
+
     def draw_simulation(self):
         dpg.delete_item(self.draw_node, children_only=True)
         
@@ -870,7 +1508,6 @@ class Simulation:
                 
                 # Draw organisms in simulation
                 for organism in self.organisms:
-                    #organism.fixed = False
                     organism.draw(self.camera_offset_x, gravity_enabled=True)
     
     def draw_creature_gallery(self):
@@ -937,7 +1574,47 @@ class Simulation:
             self.update()
             dpg.render_dearpygui_frame()
             
+        # Save creatures when closing
+        self.save_creatures()
         dpg.destroy_context()
+
+    def copy_organism(self, org):
+        # Create a new organism with the same structure
+        new_org = Organism(
+            [0, SIM_HEIGHT - 150],
+            node_count=None,
+            bone_count=None,
+            muscle_density=org.muscle_density,
+            name=f"{org.name}-gen{self.generation}",
+            is_mobile=True
+        )
+        
+        # Copy all components
+        new_org.nodes = {nid: Node.from_dict(node.to_dict()) for nid, node in org.nodes.items()}
+        new_org.bones = {bid: Bone.from_dict(bone.to_dict()) for bid, bone in org.bones.items()}
+        new_org.muscles = {mid: Muscle.from_dict(muscle.to_dict()) for mid, muscle in org.muscles.items()}
+        new_org.next_id = org.next_id
+        
+        # Copy the neural controller if it exists
+        if org.controller:
+            new_org.setup_neural_controller()  # This initializes the controller with the right architecture
+            new_org.controller.load_state_dict(org.controller.state_dict())
+            new_org.controller.optimizer = optim.Adam(new_org.controller.parameters(), lr=0.01)
+            
+            # Enable manual control
+            for muscle in new_org.muscles.values():
+                muscle.manual_control = True
+                
+        return new_org
+        
+    def mutate_controller(self, controller, mutation_rate=0.1, mutation_scale=0.2):
+        if controller is None:
+            return
+            
+        with torch.no_grad():
+            for param in controller.parameters():
+                if random.random() < mutation_rate:
+                    param.add_(torch.randn_like(param) * mutation_scale)
 
 # Run the simulation
 if __name__ == "__main__":
