@@ -12,6 +12,7 @@ from collections import defaultdict
 import string
 from collections import deque
 from typing import List, Dict, Tuple, Optional
+from safetensors.torch import save_file
 
 # Simulation parameters
 SIM_WIDTH = 1200
@@ -51,13 +52,30 @@ def list_to_tensor(lst):
     return lst
 
 class NeuralController(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
+    def __init__(self, input_size, hidden_size, output_size, learning_rate=0.01, device='auto'):
         super(NeuralController, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, output_size)
-        self.optimizer = optim.Adam(self.parameters(), lr=0.01)
+        
+        # Set device automatically if requested
+        if device == 'auto':
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
+            
+        self.to(self.device)
+        
+        self.learning_rate = learning_rate
+        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+        self.batch_size = 32  # Default batch size
         
     def forward(self, x):
+        if isinstance(x, np.ndarray):
+            x = torch.tensor(x, dtype=torch.float32)
+        elif not isinstance(x, torch.Tensor):
+            x = torch.tensor([x], dtype=torch.float32)
+            
+        x = x.to(self.device)
         x = torch.relu(self.fc1(x))
         x = torch.sigmoid(self.fc2(x))  # Output between 0 and 1 for muscle tension
         return x
@@ -148,7 +166,7 @@ class Node:
         return ranges
 
 class Bone:
-    def __init__(self, node1_id: int, node2_id: int, length=1, stiffness=1.0):
+    def __init__(self, node1_id: int, node2_id: int, length=1, stiffness=1.0, initial_length=-1.0):
         self.node1_id = node1_id
         self.node2_id = node2_id
         self.stiffness = stiffness
@@ -156,6 +174,8 @@ class Bone:
         self.rest_length = length  # This might be None initially
         self.mass = 0.5  # Bones have some mass too
         self.angle_restriction_strength = 0.5  # Strength of angle restriction enforcement
+        self.initial_length = float(length) if initial_length < 0 else initial_length
+        #self.initial_length = float(length)  # Store initial length for reference
         
     def update_angle_restrictions(self, nodes: Dict[int, Node]):
         """Update angle restrictions based on current bone positions."""
@@ -290,6 +310,7 @@ class Bone:
             'stiffness': self.stiffness,
             'id': self.id,
             'rest_length': tensor_to_list(self.rest_length),
+            'initial_length': self.initial_length,
             'mass': self.mass
         }
 
@@ -304,6 +325,7 @@ class Bone:
         bone.id = data['id']
         bone.mass = data['mass']
         bone.rest_length = list_to_tensor(data["rest_length"])
+        bone.initial_length = data.get('initial_length', data["rest_length"])
         return bone
 
 class Muscle:
@@ -325,6 +347,9 @@ class Muscle:
         self.id = None
         self.control_signal: float = 0.0  # Added for neural control
         self.manual_control: bool = False  # Added to toggle between manual and automatic control
+        self.energy_used = 0.0  # Track energy consumption
+        self.base_energy_cost = 0.01  # Base cost per update
+        self.tension_energy_cost = 0.1  # Additional cost based on tension
         
     def get_connection_point(self, target_id: int, connection_type: CONNECTION_TYPES, nodes: Dict[int, Node], bones: Dict[int, Bone]) -> torch.Tensor:
         if target_id in nodes:
@@ -352,6 +377,10 @@ class Muscle:
         return torch.zeros(2)  # Default fallback
         
     def update(self, time_step, nodes: Dict[int, Node], bones: Dict[int, Bone]):
+        energy_cost = (self.base_energy_cost + 
+                      self.tension_energy_cost * self.current_tension) * time_step
+        self.energy_used += energy_cost
+
         if self.manual_control:
             # Use neural control signal directly
             self.current_tension = self.control_signal
@@ -447,58 +476,84 @@ class Organism:
         self.training_mode = False
         self.fitness = 0.0
         self.time = 0.0 
+        self.total_energy_used = 0.0
+        self.max_speed = 0.0
+        self.average_speed = 0.0
+        self.speed_samples = 0
+
+        self.fitness_history = []
         
         # Only build body if we're not loading from JSON
         if node_count is not None and bone_count is not None:
             self.build_body(node_count, bone_count, muscle_density)
         
 
-    def setup_neural_controller(self):
+    def setup_neural_controller(self, learning_rate=0.01, batch_size=32, device='auto'):
         if not self.muscles:
             return
             
-        # Inputs: current phase (time), muscle lengths, node positions
-        input_size = 1 + len(self.muscles) * 2 + len(self.nodes) * 2
-        output_size = len(self.muscles)
-        hidden_size = 16  # Small network for simple creatures
+        # Inputs: current phase (time), muscle lengths, node positions, bone lengths
+        input_size = 1 + len(self.muscles) * 2 + len(self.nodes) * 2 + len(self.bones)
+        output_size = len(self.muscles) + len(self.bones)  # Output muscle tensions + bone length adjustments
         
-        self.controller = NeuralController(input_size, hidden_size, output_size)
+        hidden_size = 32  # Small network for simple creatures
+        
+        self.controller = NeuralController(
+            input_size, hidden_size, output_size,
+            learning_rate=learning_rate,
+            device=device
+        )
+        self.controller.batch_size = batch_size
         
         # Enable manual control for all muscles
         for muscle in self.muscles.values():
             muscle.manual_control = True
-            
+         
     def neural_control_step(self, time_step):
         if not self.controller or not self.muscles:
             return
             
         # Prepare input features
         inputs = []
-        
+
         # 1. Time signal
         inputs.append(math.sin(self.time * 0.1))  # Oscillating time signal
-        
-        # 2. Muscle lengths
+
+        # 2. Muscle lengths and tensions
         for muscle in self.muscles.values():
             point1 = muscle.get_connection_point(muscle.attachment1[0], muscle.attachment1[1], self.nodes, self.bones)
             point2 = muscle.get_connection_point(muscle.attachment2[0], muscle.attachment2[1], self.nodes, self.bones)
             length = torch.dist(point1, point2)
             inputs.append(length.item())
             inputs.append(muscle.current_tension)
-        
+
         # 3. Node positions (relative to center)
         com = self.position
         for node in self.nodes.values():
             rel_pos = node.position - com
             inputs.extend(rel_pos.tolist())
-        
+            
+        # 4. Bone lengths (normalized to initial lengths)
+        for bone in self.bones.values():
+            inputs.append((bone.rest_length / bone.initial_length).item())
+
         # Convert to tensor and get control signals
-        input_tensor = torch.tensor(inputs, dtype=torch.float32).unsqueeze(0)
+        input_tensor = torch.tensor(inputs, dtype=torch.float32).unsqueeze(0).to(self.controller.device)
         control_signals = self.controller(input_tensor).squeeze(0)
-        
-        # Apply control signals to muscles
+
+        # Apply control signals to muscles and bones
         for i, (muscle_id, muscle) in enumerate(self.muscles.items()):
-            muscle.control_signal = control_signals[i].item()
+            if i < len(self.muscles):
+                muscle.control_signal = control_signals[i].item()
+                
+        # Apply bone length adjustments (last len(bones) outputs)
+        for j, (bone_id, bone) in enumerate(self.bones.items()):
+            adjustment = control_signals[len(self.muscles) + j].item()
+            # Scale adjustment to be within reasonable bounds (e.g., ±20% of initial length)
+            new_length = bone.initial_length * (0.8 + 0.4 * adjustment)  # Maps [0,1] to [0.8,1.2] of initial length
+            bone.rest_length = torch.clamp(torch.tensor(new_length), 
+                                         torch.tensor(bone.initial_length * 0.5), 
+                                         torch.tensor(bone.initial_length * 1.5))
             
     def update_fitness(self):
         if self.last_position is None:
@@ -506,9 +561,47 @@ class Organism:
             return
             
         # Calculate distance moved in x direction (ignore vertical movement)
-        distance = (self.position[0] - self.last_position[0]).abs().item()
-        self.distance_traveled += distance
-        self.fitness += distance
+        distance = (self.position[0] - self.last_position[0]).item()
+        
+        # Calculate current speed (absolute value)
+        current_speed = abs(distance / TIME_STEP)
+        
+        # Update speed metrics
+        if current_speed > self.max_speed:
+            self.max_speed = current_speed
+            
+        # Update running average of speed
+        self.speed_samples += 1
+        self.average_speed += (current_speed - self.average_speed) / self.speed_samples
+        
+        # Update total distance
+        self.distance_traveled += abs(distance)
+        
+        # Calculate total energy used by all muscles
+        current_energy = sum(m.energy_used for m in self.muscles.values())
+        self.total_energy_used += current_energy
+        
+        # Calculate energy efficiency (distance per energy unit)
+        energy_efficiency = 0.0
+        if self.total_energy_used > 0:
+            energy_efficiency = self.distance_traveled / self.total_energy_used
+            
+        # Composite fitness calculation
+        # Weights can be adjusted based on what's more important
+        distance_weight = 1.0
+        speed_weight = 0.5
+        efficiency_weight = 0.3
+        
+        # Fitness components are normalized by their "good" values
+        # Good distance: 500 pixels
+        # Good speed: 50 pixels/second
+        # Good efficiency: 50 pixels/energy unit
+        self.fitness = (
+            (distance_weight * min(self.distance_traveled / 500, 1.0)) +
+            (speed_weight * min(self.average_speed / 50, 1.0)) +
+            (efficiency_weight * min(energy_efficiency / 50, 1.0))
+        )
+        
         self.last_position = self.position.clone()
 
     def generate_random_name(self):
@@ -653,8 +746,8 @@ class Organism:
                 point2 = self.get_connection_point(*conn2)
                 current_len = torch.dist(point1, point2)
                 
-                min_len = current_len * (0.7 + random.random() * 0.2)
-                max_len = current_len * (1.1 + random.random() * 0.3)
+                min_len = float(current_len * (0.7 + random.random() * 0.2))
+                max_len = float(current_len * (1.1 + random.random() * 0.3))
                 min_tension = random.random() * 0.3
                 max_tension = 0.7 + random.random() * 0.3
                 strength = 0.1 + random.random() * 0.2
@@ -1001,6 +1094,30 @@ class Organism:
         self.velocity = total_velocity / total_mass
         self.position = com
 
+    def reset_trial(self):
+        """Reset metrics for a new trial"""
+        self.distance_traveled = 0.0
+        self.last_position = None
+        self.total_energy_used = 0.0
+        self.max_speed = 0.0
+        self.average_speed = 0.0
+        self.speed_samples = 0
+        self.fitness = 0.0
+        
+        # Reset muscle energy
+        for muscle in self.muscles.values():
+            muscle.energy_used = 0.0
+            
+        # Reset position but keep slight randomness
+        self.position = torch.tensor([
+            random.uniform(-50, 50), 
+            SIM_HEIGHT - 150
+        ], dtype=torch.float32)
+        
+        # Reset velocities
+        for node in self.nodes.values():
+            node.velocity = torch.zeros(2, dtype=torch.float32)
+
     def to_dict(self):
         return {
             'name': self.name,
@@ -1010,11 +1127,10 @@ class Organism:
             'muscle_density': self.muscle_density,
             'is_mobile': self.is_mobile,
             'next_id': self.next_id,
-            'nodes': {str(nid): node.to_dict() for nid, node in self.nodes.items()},  # Convert keys to strings
+            'nodes': {str(nid): node.to_dict() for nid, node in self.nodes.items()},
             'bones': {str(bid): bone.to_dict() for bid, bone in self.bones.items()},
             'muscles': {str(mid): muscle.to_dict() for mid, muscle in self.muscles.items()},
             'has_controller': self.controller is not None,
-            'controller_state': self.controller.state_dict() if self.controller else None,
             'fitness': self.fitness
         }
 
@@ -1045,15 +1161,7 @@ class Organism:
         # Restore muscles
         org.muscles = {int(mid): Muscle.from_dict(muscle_data) for mid, muscle_data in data['muscles'].items()}
         
-        if data['has_controller'] and data['controller_state']:
-            org.setup_neural_controller()
-            org.controller.load_state_dict(data['controller_state'])
-            org.controller.optimizer = optim.Adam(org.controller.parameters(), lr=0.01)
-            
-            # Enable manual control for muscles
-            for muscle in org.muscles.values():
-                muscle.manual_control = True
-                
+        # Controller will be loaded separately by Simulation class
         org.fitness = data.get('fitness', 0.0)
 
         return org
@@ -1120,10 +1228,11 @@ class Simulation:
                                                    callback=lambda s, a: self.param_update('muscle_density', a))
                             
                             with dpg.collapsing_header(label="Learning Controls"):
-                                dpg.add_button(label="Setup Neural Control", callback=self.setup_neural_control)
                                 dpg.add_button(label="Start Training", callback=self.start_training)
                                 dpg.add_button(label="Stop Training", callback=self.stop_training)
                                 dpg.add_text("Fitness: 0.0", tag="fitness_display")
+                                dpg.add_text(f"Device: {'GPU available' if torch.cuda.is_available() else 'CPU only'}",tag="gpu_status")
+                                dpg.add_button(label="Setup Neural Control", callback=self.setup_neural_control)
 
                             dpg.add_text("Camera Controls")
                             dpg.add_slider_float(label="Camera Speed", default_value=5.0, min_value=1.0, max_value=20.0, callback=self.set_camera_speed)
@@ -1163,8 +1272,72 @@ class Simulation:
         if not self.organisms:
             return
             
-        for org in self.organisms:
-            org.setup_neural_controller()
+        # Create a popup window to get learning parameters
+        with dpg.window(label="Neural Control Setup", width=400, height=300):
+            dpg.add_text("Neural Network Parameters")
+            
+            dpg.add_slider_float(
+                label="Learning Rate", 
+                min_value=0.0001, 
+                max_value=0.1, 
+                default_value=0.01,
+                format="%.4f",
+                tag="learning_rate"
+            )
+            
+            dpg.add_slider_int(
+                label="Batch Size",
+                min_value=1,
+                max_value=64,
+                default_value=32,
+                tag="batch_size"
+            )
+            
+            dpg.add_radio_button(
+                items=["Auto (GPU if available)", "CPU", "GPU"],
+                label="Device",
+                default_value="Auto (GPU if available)",
+                tag="device_choice"
+            )
+            
+            dpg.add_slider_float(
+                label="Training Duration (seconds)",
+                min_value=1.0,
+                max_value=60.0,
+                default_value=10.0,
+                tag="training_duration"
+            )
+            
+            def apply_parameters():
+                learning_rate = dpg.get_value("learning_rate")
+                batch_size = dpg.get_value("batch_size")
+                device_choice = dpg.get_value("device_choice")
+                training_duration = dpg.get_value("training_duration")
+                
+                # Map device choice
+                if device_choice == "Auto (GPU if available)":
+                    device = 'auto'
+                elif device_choice == "CPU":
+                    device = 'cpu'
+                else:
+                    device = 'cuda'
+                
+                # Update training parameters
+                global TRAINING_TIMESTEPS
+                TRAINING_TIMESTEPS = int(training_duration / TIME_STEP)
+                
+                # Setup controllers for all organisms
+                for org in self.organisms:
+                    org.setup_neural_controller(
+                        learning_rate=learning_rate,
+                        batch_size=batch_size,
+                        device=device
+                    )
+                
+                dpg.delete_item("Neural Control Setup")
+            
+            dpg.add_button(label="Apply", callback=apply_parameters)
+            dpg.add_button(label="Cancel", callback=lambda: dpg.delete_item("Neural Control Setup"))
             
     def start_training(self):
         if not self.organisms:
@@ -1246,17 +1419,7 @@ class Simulation:
         # Reset for next trial
         self.training_timesteps = 0
         for org in self.organisms:
-            org.fitness = 0.0
-            org.distance_traveled = 0.0
-            org.last_position = None
-            # Reset position but keep slight randomness
-            org.position = torch.tensor([
-                random.uniform(-50, 50), 
-                SIM_HEIGHT - 150
-            ], dtype=torch.float32)
-            # Reset velocities
-            for node in org.nodes.values():
-                node.velocity = torch.zeros(2, dtype=torch.float32)
+            org.reset_trial()
                 
     def next_generation(self):
         """Create next generation after all trials are complete"""
@@ -1266,10 +1429,11 @@ class Simulation:
         self.generation += 1
         self.current_trial = 0
         
-        # Calculate average fitness for each organism
+        # Calculate average fitness for each organism across all trials
         for org in self.organisms:
             if org.fitness_history:
-                org.avg_fitness = sum(org.fitness_history) / len(org.fitness_history)
+                # Use the maximum fitness from all trials (encourages peak performance)
+                org.avg_fitness = max(org.fitness_history)
             else:
                 org.avg_fitness = 0.0
                 
@@ -1281,29 +1445,28 @@ class Simulation:
             self.best_fitness = best_org.avg_fitness
             self.best_organism = best_org
             
-        # Create new generation through mutation
+        # Create new generation through mutation and crossover
         new_organisms = []
         for i in range(len(self.organisms)):
             # Create a copy of the best organism
             new_org = self.copy_organism(best_org)
             
-            # Only mutate if the organism has a controller
-            if new_org.controller:
-                self.mutate_controller(new_org.controller)
+            # Mutate both controller and bone lengths
+            self.mutate_creature(new_org)
             
             # Reset for new generation
-            new_org.fitness = 0.0
-            new_org.distance_traveled = 0.0
-            new_org.last_position = None
+            new_org.reset_trial()
             new_org.fitness_history = []
             new_org.position = torch.tensor([0, SIM_HEIGHT - 150], dtype=torch.float32)
-            # Reset velocities
-            for node in new_org.nodes.values():
-                node.velocity = torch.zeros(2, dtype=torch.float32)
                 
             new_organisms.append(new_org)
             
         self.organisms = new_organisms
+        
+        # Update fitness display with new generation info
+        dpg.set_value("fitness_display", 
+                    f"Gen {self.generation}\n"
+                    f"Best Fitness: {self.best_fitness:.2f}")
             
     def stop_training(self):
         self.training = False
@@ -1426,10 +1589,25 @@ class Simulation:
         self.gravity_type = app_data.lower()
 
     def save_creatures(self):
-        """Save all creatures to JSON file"""
+        """Save all creatures to JSON file and neural nets to safetensors"""
         try:
+            # Create a directory for the creature data if it doesn't exist
+            os.makedirs("creature_data", exist_ok=True)
+            
             # Convert all creatures to dictionaries
-            creatures_data = [creature.to_dict() for creature in self.all_creatures]
+            creatures_data = []
+            for creature in self.all_creatures:
+                creature_dict = creature.to_dict()
+                
+                # Save neural network separately if it exists
+                if creature.controller is not None:
+                    nn_filename = f"creature_data/{creature.name.replace(' ', '_')}.safetensors"
+                    save_file(creature.controller.state_dict(), nn_filename)
+                    creature_dict['controller_file'] = nn_filename
+                else:
+                    creature_dict['controller_file'] = None
+                    
+                creatures_data.append(creature_dict)
             
             # Save to file
             with open(CREATURE_DB_FILE, 'w') as f:
@@ -1453,6 +1631,23 @@ class Simulation:
                 # Create organisms from data
                 for creature_data in creatures_data:
                     org = Organism.from_dict(creature_data)
+                    
+                    # Load neural controller if it exists
+                    if creature_data.get('has_controller', False) and 'controller_file' in creature_data:
+                        controller_file = creature_data['controller_file']
+                        if controller_file and os.path.exists(controller_file):
+                            try:
+                                org.setup_neural_controller()
+                                state_dict = torch.load(controller_file)
+                                org.controller.load_state_dict(state_dict)
+                                org.controller.optimizer = optim.Adam(org.controller.parameters(), lr=0.01)
+                                
+                                # Enable manual control for muscles
+                                for muscle in org.muscles.values():
+                                    muscle.manual_control = True
+                            except Exception as e:
+                                print(f"Error loading controller for {org.name}: {e}")
+                    
                     self.all_creatures.append(org)
                 
                 # Update the creature list
@@ -1592,6 +1787,11 @@ class Simulation:
         # Copy all components
         new_org.nodes = {nid: Node.from_dict(node.to_dict()) for nid, node in org.nodes.items()}
         new_org.bones = {bid: Bone.from_dict(bone.to_dict()) for bid, bone in org.bones.items()}
+        new_org.bones = {}
+        for bid, bone in org.bones.items():
+            new_bone = Bone.from_dict(bone.to_dict())
+            new_bone.initial_length = bone.initial_length  # Ensure this is copied
+            new_org.bones[bid] = new_bone
         new_org.muscles = {mid: Muscle.from_dict(muscle.to_dict()) for mid, muscle in org.muscles.items()}
         new_org.next_id = org.next_id
         
@@ -1607,14 +1807,28 @@ class Simulation:
                 
         return new_org
         
-    def mutate_controller(self, controller, mutation_rate=0.1, mutation_scale=0.2):
-        if controller is None:
+    def mutate_creature(self, org, mutation_rate=0.1, mutation_scale=0.2):
+        if org is None:
             return
             
-        with torch.no_grad():
-            for param in controller.parameters():
-                if random.random() < mutation_rate:
-                    param.add_(torch.randn_like(param) * mutation_scale)
+        # Mutate the neural controller if it exists
+        if org.controller:
+            with torch.no_grad():
+                for param in org.controller.parameters():
+                    if random.random() < mutation_rate:
+                        # Create noise tensor on the same device as the parameter
+                        noise = torch.randn_like(param) * mutation_scale
+                        param.add_(noise)
+        
+        # Mutate bone lengths
+        for bone in org.bones.values():
+            if random.random() < mutation_rate:
+                # Adjust bone length within reasonable bounds
+                adjustment = random.uniform(-mutation_scale, mutation_scale)
+                new_length = bone.initial_length * (1 + adjustment)
+                bone.rest_length = torch.clamp(torch.tensor(new_length), 
+                                            torch.tensor(bone.initial_length * 0.5), 
+                                            torch.tensor(bone.initial_length * 1.5))
 
 # Run the simulation
 if __name__ == "__main__":
