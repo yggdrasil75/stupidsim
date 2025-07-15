@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 # import math # Removed: Not explicitly used in the provided code
+import sys
 from typing import Optional
 import dearpygui.dearpygui as dpg
 import numpy as np
@@ -96,6 +97,54 @@ def project_point(point: np.ndarray, view_matrix: np.ndarray, proj_matrix: np.nd
     screen_y = (1 - (ndc_space[1] * 0.5 + 0.5)) * viewport_size[1]
     
     return (screen_x, screen_y)
+
+
+# Add these constants at the top of the file
+MAX_FLOAT = sys.float_info.max
+GROUND_HEIGHT = 0.0
+BONECOLOR = np.array([255, 255, 255])
+JOINTCOLOR = np.array([0, 255, 0])
+MUSCLECOLOR = np.array([255, 0, 0])
+NODECOLOR = np.array([0, 0, 255])
+
+@dataclass
+class SolidObject:
+    """Represents a static object in the environment that can collide with creatures."""
+    id: int
+    vertices: list[np.ndarray]  # List of 3D points
+    triangles: list[tuple]      # List of vertex indices forming triangles
+    color: np.ndarray = field(default_factory=lambda: np.array([200, 200, 200]))
+    
+    @classmethod
+    def create_ground_plane(cls, id: int, size: float = MAX_FLOAT, height: float = GROUND_HEIGHT):
+        """Creates an infinite ground plane at y=height."""
+        # For visualization, we'll create a large but finite plane
+        visual_size = size if size < 1000 else 1000  # Limit visual size
+        half_size = visual_size / 2
+        
+        vertices = [
+            np.array([-half_size, height, -half_size]),
+            np.array([half_size, height, -half_size]),
+            np.array([half_size, height, half_size]),
+            np.array([-half_size, height, half_size])
+        ]
+        
+        triangles = [(0, 1, 2), (0, 2, 3)]
+        return cls(id, vertices, triangles, np.array([150, 150, 150]))  # Gray color
+
+    def get_aabb(self) -> tuple:
+        """Returns the axis-aligned bounding box as (min, max) points."""
+        if not self.vertices:
+            return (np.array([0,0,0]), np.array([0,0,0]))
+        
+        min_coords = np.array([MAX_FLOAT, MAX_FLOAT, MAX_FLOAT])
+        max_coords = np.array([-MAX_FLOAT, -MAX_FLOAT, -MAX_FLOAT])
+        
+        for v in self.vertices:
+            min_coords = np.minimum(min_coords, v)
+            max_coords = np.maximum(max_coords, v)
+            
+        return min_coords, max_coords
 
 @dataclass 
 class Bone:
@@ -272,6 +321,7 @@ class Creature:
     inertia: np.ndarray = field(default_factory=lambda: np.eye(3))
     damping: float = 0.1  # Linear damping
     angular_damping: float = 0.1  # Angular damping
+    restitution: float = 0.2 
 
     def __post_init__(self):
         self._update_mass_properties()
@@ -368,10 +418,11 @@ class Creature:
         return T @ rotationMatrix
     
     def get_global_position(self, local_pos: np.ndarray) -> np.ndarray:
-        local_pos_hom = np.append(local_pos, 1.0)
+        """Converts a local position to world space coordinates."""
+        local_pos_hom = np.append(local_pos, 1.0)  # Convert to homogeneous coordinates
         model_matrix = self._get_creature_model_matrix()
         global_pos_hom = model_matrix @ local_pos_hom
-        return global_pos_hom[:3]
+        return global_pos_hom[:3]  # Convert back to 3D coordinates
     
     def step(self, dt: float, excitations: Optional[dict[int, float]] = None):
         excitations = excitations or {}
@@ -406,35 +457,22 @@ class Creature:
             for node_id in muscle_data['nodes']:
                 if node_id in self.nodes:
                     pass
-    
-    def _update_physics(self, dt: float):
-        self.velocity *= (1 - self.damping * dt)
-        self.angularVelocity *= (1 - self.angular_damping * dt)
-        self.position += self.velocity * dt
-        
-        self.rotation += self.angularVelocity * dt
-        self.rotation = np.mod(self.rotation + np.pi, 2 * np.pi) - np.pi  # Wrap to [-π, π]
-        
-    def calculate_3d_coordinates(self) -> tuple[dict[int, np.ndarray], list[tuple[int, int, int]]]:
+            
+    def calculate_3d_coordinates(self) -> tuple[dict[int, tuple[np.ndarray, np.ndarray]], list[tuple[int, int, int, str]]]:
         """
         Calculates the 3D coordinates of all vertices in the creature's structure and
         returns a tuple containing:
-        1. A dictionary mapping vertex IDs to their 3D coordinates
-        2. A list of triangles (each as a tuple of 3 vertex IDs)
-        
-        The function creates vertices for:
-        - Bone endpoints (cylinders)
-        - Joint centers (spheres)
-        - Muscle attachment points
+        1. A dictionary mapping vertex IDs to their (3D coordinates, color)
+        2. A list of triangles (each as a tuple of 3 vertex IDs and component type)
         """
         vertices = {}
         triangles = []
         vertex_id_counter = 0
         
         # Helper function to add a vertex and return its ID
-        def add_vertex(pos: np.ndarray) -> int:
+        def add_vertex(pos: np.ndarray, color: np.ndarray) -> int:
             nonlocal vertex_id_counter
-            vertices[vertex_id_counter] = pos
+            vertices[vertex_id_counter] = (pos.copy(), color.copy())  # Ensure we store copies
             vertex_id_counter += 1
             return vertex_id_counter - 1
         
@@ -455,7 +493,6 @@ class Creature:
             end_point = pos + rotated_dir
             
             # Add vertices for the bone cylinder
-            # We'll create a cylinder with 8 sides for simplicity
             cylinder_resolution = 8
             radius = bone.thickness / 2
             
@@ -476,30 +513,30 @@ class Creature:
                 
                 # Start circle vertices
                 start_vert = start_point + offset
-                start_id = add_vertex(start_vert)
+                start_id = add_vertex(start_vert, BONECOLOR)
                 start_vertex_ids.append(start_id)
                 
                 # End circle vertices
                 end_vert = end_point + offset
-                end_id = add_vertex(end_vert)
+                end_id = add_vertex(end_vert, BONECOLOR)
                 end_vertex_ids.append(end_id)
             
             # Create triangles for the cylinder sides
             for i in range(cylinder_resolution):
                 next_i = (i + 1) % cylinder_resolution
                 # Two triangles per side segment
-                triangles.append((start_vertex_ids[i], end_vertex_ids[i], end_vertex_ids[next_i]))
-                triangles.append((start_vertex_ids[i], end_vertex_ids[next_i], start_vertex_ids[next_i]))
+                triangles.append((start_vertex_ids[i], end_vertex_ids[i], end_vertex_ids[next_i], 'bone'))
+                triangles.append((start_vertex_ids[i], end_vertex_ids[next_i], start_vertex_ids[next_i], 'bone'))
             
             # Create triangles for the end caps
-            center_start = add_vertex(start_point)
-            center_end = add_vertex(end_point)
+            center_start = add_vertex(start_point, BONECOLOR)
+            center_end = add_vertex(end_point, BONECOLOR)
             for i in range(cylinder_resolution):
                 next_i = (i + 1) % cylinder_resolution
                 # Start cap
-                triangles.append((center_start, start_vertex_ids[next_i], start_vertex_ids[i]))
+                triangles.append((center_start, start_vertex_ids[next_i], start_vertex_ids[i], 'bone'))
                 # End cap
-                triangles.append((center_end, end_vertex_ids[i], end_vertex_ids[next_i]))
+                triangles.append((center_end, end_vertex_ids[i], end_vertex_ids[next_i], 'bone'))
         
         # Process joints (represented as spheres)
         for joint_id, joint_data in self.joints.items():
@@ -525,7 +562,7 @@ class Creature:
             for v in vertices_pos:
                 v_norm = normalize(np.array(v))
                 vertex_pos = pos + v_norm * radius
-                base_vertex_ids.append(add_vertex(vertex_pos))
+                base_vertex_ids.append(add_vertex(vertex_pos, JOINTCOLOR))
             
             # Base icosahedron triangles
             sphere_tris = [
@@ -540,7 +577,8 @@ class Creature:
                 triangles.append((
                     base_vertex_ids[tri[0]],
                     base_vertex_ids[tri[1]],
-                    base_vertex_ids[tri[2]]
+                    base_vertex_ids[tri[2]],
+                    'joint'
                 ))
         
         # Process muscles (represented as tapered cylinders between attachment points)
@@ -574,20 +612,20 @@ class Creature:
                 
                 # Start circle vertices
                 start_vert = start_pos + offset_start
-                start_id = add_vertex(start_vert)
+                start_id = add_vertex(start_vert, MUSCLECOLOR)
                 start_vertex_ids.append(start_id)
                 
                 # End circle vertices
                 end_vert = end_pos + offset_end
-                end_id = add_vertex(end_vert)
+                end_id = add_vertex(end_vert, MUSCLECOLOR)
                 end_vertex_ids.append(end_id)
             
             # Create triangles for the muscle body
             for i in range(cylinder_resolution):
                 next_i = (i + 1) % cylinder_resolution
                 # Two triangles per side segment
-                triangles.append((start_vertex_ids[i], end_vertex_ids[i], end_vertex_ids[next_i]))
-                triangles.append((start_vertex_ids[i], end_vertex_ids[next_i], start_vertex_ids[next_i]))
+                triangles.append((start_vertex_ids[i], end_vertex_ids[i], end_vertex_ids[next_i], 'muscle'))
+                triangles.append((start_vertex_ids[i], end_vertex_ids[next_i], start_vertex_ids[next_i], 'muscle'))
         
         return vertices, triangles
         
@@ -739,9 +777,52 @@ class Creature:
         
         return creature
     
+    def _check_ground_collision(self, dt: float):
+        """Checks for and resolves collisions with the ground plane."""
+        ground_height = GROUND_HEIGHT
+        
+        # Simple collision - just check if any bone is below ground
+        for bone_data in self.bones.values():
+            bone_pos = bone_data['pos']
+            global_pos = self.get_global_position(bone_pos)
+            
+            # Check if bone is below ground
+            if global_pos[1] < ground_height:
+                penetration = ground_height - global_pos[1]
+                
+                # Apply correction to position
+                self.position[1] += penetration * 1.1  # Small over-correction to prevent sticking
+                
+                # Apply bounce (reflect velocity with restitution)
+                if self.velocity[1] < 0:
+                    self.velocity[1] = -self.velocity[1] * self.restitution
+                
+                # Apply friction to horizontal motion
+                self.velocity[0] *= (1 - 0.5 * dt)
+                self.velocity[2] *= (1 - 0.5 * dt)
+                
+                # Small angular velocity change from hitting ground
+                self.angularVelocity[0] += np.random.uniform(-1, 1)
+                self.angularVelocity[2] += np.random.uniform(-1, 1)
+                break
+    
+    def _update_physics(self, dt: float):
+        # Apply gravity
+        self.velocity[1] -= 9.8 * dt  # Earth gravity
+        
+        # Update position and rotation
+        self.velocity *= (1 - self.damping * dt)
+        self.angularVelocity *= (1 - self.angular_damping * dt)
+        self.position += self.velocity * dt
+        self.rotation += self.angularVelocity * dt
+        self.rotation = np.mod(self.rotation + np.pi, 2 * np.pi) - np.pi  # Wrap to [-π, π]
+        
+        # Check for collisions
+        self._check_ground_collision(dt)
+
 class CreatureRenderer:
     def __init__(self):
-        self.camera_pos = np.array([0.0, 0.0, -5.0])
+        self.camera_distance = 5.0 
         self.camera_pitch = 15
         self.camera_yaw = 0
         self.fov = 60.0
@@ -756,9 +837,30 @@ class CreatureRenderer:
         # Camera rotation control
         self.camera_rotating = True
         self.rotation_speed = 10.0  # degrees per second
+        self.ground = SolidObject.create_ground_plane(0)
+
+        self.creature_bounds = [np.array([MAX_FLOAT, MAX_FLOAT, MAX_FLOAT]), 
+                               np.array([-MAX_FLOAT, -MAX_FLOAT, -MAX_FLOAT])]
         
+    def calculate_creature_bounds(self, creature: Creature) -> tuple[np.ndarray, np.ndarray]:
+        """Calculates the axis-aligned bounding box of the creature in world space."""
+        min_bounds = np.array([MAX_FLOAT, MAX_FLOAT, MAX_FLOAT])
+        max_bounds = np.array([-MAX_FLOAT, -MAX_FLOAT, -MAX_FLOAT])
+        
+        # Get all vertices from the creature's geometry
+        vertices, _ = creature.calculate_3d_coordinates()
+        
+        for vertex_data in vertices.values():
+            v_pos, _ = vertex_data  # Unpack the position and color
+            world_pos = creature.get_global_position(v_pos)
+            min_bounds = np.minimum(min_bounds, world_pos)
+            max_bounds = np.maximum(max_bounds, world_pos)
+        
+        return min_bounds, max_bounds
+    
     def create_simple_creature(self) -> Creature:
         creature = Creature.generate_random_creature()
+        creature.position = np.array([0, 30.0, 0])  
         return creature
     
     def setup_dpg(self):
@@ -821,19 +923,46 @@ class CreatureRenderer:
             label="Start Camera" if not self.camera_rotating else "Stop Camera"
         )
 
-    def update_camera(self, dt):
+    def update_camera_distance(self, creature: Creature):
+        """Updates camera distance to fit the entire creature in view."""
+        # Calculate creature bounds
+        min_bounds, max_bounds = self.calculate_creature_bounds(creature)
+        
+        # Calculate creature dimensions
+        size = max_bounds - min_bounds
+        max_dimension = max(size[0], size[1], size[2])
+        
+        # Calculate required distance based on FOV and creature size
+        # Using trigonometry to calculate required distance to fit object in view
+        fov_rad = np.radians(self.fov)
+        required_distance = (max_dimension * 1.2) / (2 * np.tan(fov_rad / 2))
+        
+        # Ensure we don't get too close
+        min_distance = max_dimension * 0.8
+        self.camera_distance = max(required_distance, min_distance)
+        
+        # Update camera position
+        self.update_camera_position()
+    
+    def update_camera_position(self):
+        """Updates camera position based on current distance, pitch and yaw."""
+        self.camera_pos = np.array([
+            self.camera_distance * np.sin(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch)),
+            self.camera_distance * np.sin(np.radians(self.camera_pitch)),
+            -self.camera_distance * np.cos(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch))
+        ])
+    
+    def update_camera(self, dt, creature: Creature):
         """Updates camera position if auto-rotation is enabled."""
         if self.camera_rotating:
             self.camera_yaw += self.rotation_speed * dt
             self.camera_yaw %= 360  # Keep within 0-360 range
             
-            # Orbit around the origin at fixed distance
-            radius = np.linalg.norm(self.camera_pos)
-            self.camera_pos = np.array([
-                radius * np.sin(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch)),
-                radius * np.sin(np.radians(self.camera_pitch)),
-                -radius * np.cos(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch))
-            ])
+        # Update camera distance to fit creature
+        self.update_camera_distance(creature)
+        
+        # Update camera position based on current parameters
+        self.update_camera_position()
 
     def render_creature(self, creature: Creature):
         """Renders the creature in the viewport with distinct styles for each component."""
@@ -848,61 +977,52 @@ class CreatureRenderer:
         view_matrix = create_fps_matrix(self.camera_pos, self.camera_pitch, self.camera_yaw)
         proj_matrix = create_perspective_matrix(np.radians(self.fov), aspect_ratio, self.near_plane, self.far_plane)
         
+        self._render_solid_object(self.ground, view_matrix, proj_matrix, viewport_width, viewport_height)
+
         # Get creature geometry
         vertices, triangles = creature.calculate_3d_coordinates()
         
-        # Transform vertices to world space
-        world_vertices = {}
-        for v_id, v_pos in vertices.items():
-            world_vertices[v_id] = creature.get_global_position(v_pos)
-        
         # Draw each triangle with appropriate coloring based on component type
         for tri in triangles:
-            v0 = world_vertices[tri[0]]
-            v1 = world_vertices[tri[1]]
-            v2 = world_vertices[tri[2]]
+            v0_id, v1_id, v2_id, component_type = tri
+            v0, color0 = vertices[v0_id]
+            v1, color1 = vertices[v1_id]
+            v2, color2 = vertices[v2_id]
+            
+            # Use the first vertex's color for the whole triangle
+            base_color = color0
             
             # Calculate normal for lighting
             edge1 = v1 - v0
             edge2 = v2 - v0
             normal = normalize(cross(edge1, edge2))
             
-            # Default to bone color (white)
-            base_color = np.array([255, 255, 255])
-            is_outline = False
-            
-            # Determine component type by analyzing vertex positions
-            # This is a simplified approach - in a real implementation you'd want to track
-            # which vertices belong to which components during creation
-            
-            avg_size = np.linalg.norm(v1-v0) + np.linalg.norm(v2-v1) + np.linalg.norm(v0-v2)
-            if avg_size < 0.5:  # Small triangles are probably nodes
-                base_color = np.array([0, 0, 255])  # Blue
-                is_outline = True
-            # Check if this is likely a muscle (tapered cylinder)
-            elif any(np.linalg.norm(v - v0) > 1.5 for v in [v1, v2]):  # Long thin triangles
-                base_color = np.array([255, 0, 0])  # Red
-                is_outline = True
-            # Check if this is likely a joint (medium sphere)
-            elif avg_size < 1.2:  # Medium triangles are probably joints
-                base_color = np.array([0, 255, 0])  # Green
-                is_outline = True
-            
             # Calculate lighting (simple Lambertian)
             light_intensity = self.ambient + self.diffuse * max(0, dot(normal, -self.light_dir))
             color = base_color * light_intensity
             color = np.clip(color, 0, 255).astype(int)
             
-            # Project vertices to screen space
-            p0 = project_point(v0, view_matrix, proj_matrix, (viewport_width, viewport_height))
-            p1 = project_point(v1, view_matrix, proj_matrix, (viewport_width, viewport_height))
-            p2 = project_point(v2, view_matrix, proj_matrix, (viewport_width, viewport_height))
+            # Transform vertices to world space and project
+            world_v0 = creature.get_global_position(v0)
+            world_v1 = creature.get_global_position(v1)
+            world_v2 = creature.get_global_position(v2)
             
-            if is_outline:
-                # Draw as outline
+            p0 = project_point(world_v0, view_matrix, proj_matrix, (viewport_width, viewport_height))
+            p1 = project_point(world_v1, view_matrix, proj_matrix, (viewport_width, viewport_height))
+            p2 = project_point(world_v2, view_matrix, proj_matrix, (viewport_width, viewport_height))
+            
+            # Determine rendering style based on component type
+            if component_type == 'bone':
+                # Solid bones
+                dpg.draw_triangle(p0, p1, p2, 
+                                color=(color[0], color[1], color[2], 255),
+                                fill=(color[0], color[1], color[2], 255),
+                                parent="Canvas")
+            else:
+                # Outlines for other components
                 thickness = 1
                 dpg.draw_triangle(p0, p1, p2, 
-                                color=(color[0], color[1], color[2], 50),  # Semi-transparent fill
+                                color=(color[0], color[1], color[2], 50),
                                 thickness=thickness,
                                 fill=(color[0], color[1], color[2], 30),
                                 parent="Canvas")
@@ -918,16 +1038,38 @@ class CreatureRenderer:
                             color=(color[0], color[1], color[2], 255),
                             thickness=thickness,
                             parent="Canvas")
-            else:
-                # Draw as solid
-                dpg.draw_triangle(p0, p1, p2, 
-                                color=(color[0], color[1], color[2], 255),
-                                fill=(color[0], color[1], color[2], 255),
-                                parent="Canvas")
         
         # Draw coordinate axes for reference
         self._draw_axes(view_matrix, proj_matrix, (viewport_width, viewport_height))
     
+    def _render_solid_object(self, obj: SolidObject, view_matrix, proj_matrix, viewport_width, viewport_height):
+        """Renders a solid object to the canvas."""
+        for tri in obj.triangles:
+            v0 = obj.vertices[tri[0]]
+            v1 = obj.vertices[tri[1]]
+            v2 = obj.vertices[tri[2]]
+            
+            # Calculate normal for lighting
+            edge1 = v1 - v0
+            edge2 = v2 - v0
+            normal = normalize(cross(edge1, edge2))
+            
+            # Calculate lighting
+            light_intensity = self.ambient + self.diffuse * max(0, dot(normal, -self.light_dir))
+            color = obj.color * light_intensity
+            color = np.clip(color, 0, 255).astype(int)
+            
+            # Project vertices
+            p0 = project_point(v0, view_matrix, proj_matrix, (viewport_width, viewport_height))
+            p1 = project_point(v1, view_matrix, proj_matrix, (viewport_width, viewport_height))
+            p2 = project_point(v2, view_matrix, proj_matrix, (viewport_width, viewport_height))
+            
+            # Draw with solid fill
+            dpg.draw_triangle(p0, p1, p2, 
+                            color=(color[0], color[1], color[2], 255),
+                            fill=(color[0], color[1], color[2], 255),  # Changed from 100 to 255 for solid
+                            parent="Canvas")
+            
     def _draw_axes(self, view_matrix, proj_matrix, viewport_size):
         """Draws XYZ axes at the origin for reference."""
         origin = np.array([0, 0, 0])
@@ -955,7 +1097,7 @@ class CreatureRenderer:
             last_time = current_time
             
             # Update camera position
-            self.update_camera(dt)
+            self.update_camera(dt, creature)
             
             # Update creature (simple animation for demo)
             excitation = (np.sin(current_time) + 1) / 2  # 0-1 oscillation
@@ -966,6 +1108,7 @@ class CreatureRenderer:
             dpg.render_dearpygui_frame()
         
         dpg.destroy_context()
+
 # Run the application
 if __name__ == "__main__":
     renderer = CreatureRenderer()
