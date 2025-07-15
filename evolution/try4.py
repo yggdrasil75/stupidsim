@@ -1260,18 +1260,17 @@ class CreatureViewer2D:
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Reset View", callback=self.reset_view)
                 dpg.add_slider_float(label="Zoom", default_value=self.scale, 
-                                   min_value=10, max_value=200, 
-                                   callback=self.update_scale)
-                                   
+                                min_value=10, max_value=200, tag="zoom_slider",
+                                callback=self.update_scale)
+                                
         # Set mouse callbacks
         with dpg.handler_registry():
             dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, 
-                                      callback=self.on_drag)
+                                    callback=self.on_drag)
             dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left, 
-                                         callback=self.on_drag_end)
+                                        callback=self.on_drag_end)
             dpg.add_mouse_wheel_handler(callback=self.on_mouse_wheel)
         dpg.setup_dearpygui()
-        #dpg.set_primary_window(window="Main_Window", value=True)
         dpg.show_viewport()
             
     def reset_view(self):
@@ -1302,7 +1301,8 @@ class CreatureViewer2D:
         zoom_factor = 1.1 if app_data > 0 else 0.9
         self.scale *= zoom_factor
         self.scale = np.clip(self.scale, 10, 200)
-        dpg.set_value("Zoom", self.scale)
+        if dpg.does_item_exist("zoom_slider"):  # Check if slider exists
+            dpg.set_value("zoom_slider", self.scale)
         self.draw_creature()
         
     def world_to_screen(self, pos):
