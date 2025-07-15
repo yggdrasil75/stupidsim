@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-import math
+# import math # Removed: Not explicitly used in the provided code
 from typing import Optional
 import dearpygui.dearpygui as dpg
 import numpy as np
@@ -167,7 +167,8 @@ class Joint:
             [0, 0, 1]
         ])
         
-        return np.matmul(np.matmul(Rz, Ry), Rx)
+        # Changed np.matmul to @ operator for consistency with other numpy matrix multiplications
+        return Rz @ Ry @ Rx 
     
     def calculate_restoring_torque(self):
         angles = np.radians([self.flexion, self.abduction, self.rotation])
@@ -669,7 +670,7 @@ class Creature:
             
             if not possible_connected:
                 # If no connected bones, just pick another random bone
-                bone2_id, _, _ = np.random.choice([b for b in bones if b[0] != bone1_id])
+                bone2_id, _, _ = np.random.choice([b[0] for b in bones if b[0] != bone1_id]) # Ensured bone2_id is scalar
             else:
                 pcid = np.random.choice(len(possible_connected))
                 bone2_id, _, _ = possible_connected[pcid]
@@ -741,7 +742,7 @@ class Creature:
 class CreatureRenderer:
     def __init__(self):
         self.camera_pos = np.array([0.0, 0.0, -5.0])
-        self.camera_pitch = 0
+        self.camera_pitch = 15
         self.camera_yaw = 0
         self.fov = 60.0
         self.near_plane = 0.1
@@ -752,11 +753,9 @@ class CreatureRenderer:
         self.ambient = 0.2
         self.diffuse = 0.7
         
-        # Control state
-        self.mouse_dragging = False
-        self.last_mouse_pos = (0, 0)
-        self.rotating = False
-        self.panning = False
+        # Camera rotation control
+        self.camera_rotating = True
+        self.rotation_speed = 10.0  # degrees per second
         
     def create_simple_creature(self) -> Creature:
         creature = Creature.generate_random_creature()
@@ -782,27 +781,22 @@ class CreatureRenderer:
                 with dpg.child_window(tag="Controls", width=200, height=500):
                     dpg.add_text("Camera Controls")
                     dpg.add_slider_float(label="FOV", default_value=self.fov, min_value=10, max_value=120, callback=lambda s: setattr(self, 'fov', s))
-                    dpg.add_slider_float(label="Pitch", default_value=self.camera_pitch, min_value=-89, max_value=89, callback=lambda s: setattr(self, 'camera_pitch', s))
-                    dpg.add_slider_float(label="Yaw", default_value=self.camera_yaw, min_value=-180, max_value=180, callback=lambda s: setattr(self, 'camera_yaw', s))
+                    
+                    # Add toggle button for camera rotation
+                    self.rotation_button = dpg.add_button(
+                        label="Stop Camera", 
+                        callback=self.toggle_camera_rotation
+                    )
                     
                     dpg.add_text("Lighting")
                     dpg.add_slider_float(label="Ambient", default_value=self.ambient, min_value=0, max_value=1, callback=lambda s: setattr(self, 'ambient', s))
                     dpg.add_slider_float(label="Diffuse", default_value=self.diffuse, min_value=0, max_value=1, callback=lambda s: setattr(self, 'diffuse', s))
-                    
-                    dpg.add_button(label="Reset View", callback=self.reset_camera)
-        
-        # Register handlers
-        with dpg.handler_registry():
-            dpg.add_mouse_down_handler(callback=self._on_mouse_down)
-            dpg.add_mouse_release_handler(callback=self._on_mouse_release)
-            dpg.add_mouse_drag_handler(callback=self._on_mouse_drag)
-            dpg.add_mouse_wheel_handler(callback=self._on_mouse_wheel)
         
         dpg.setup_dearpygui()
         dpg.set_primary_window("Primary Window", True)
         dpg.set_viewport_resize_callback(self.on_viewport_resize)
         dpg.show_viewport()
-    
+
     def on_viewport_resize(self):
         viewport_width = dpg.get_viewport_width()
         viewport_height = dpg.get_viewport_height()
@@ -819,53 +813,28 @@ class CreatureRenderer:
         dpg.configure_item("Controls", height=canvas_height)
         pass
 
-    def reset_camera(self):
-        """Resets camera to default position."""
-        self.camera_pos = np.array([0, 0, -5])
-        self.camera_pitch = 0
-        self.camera_yaw = 0
-        self.fov = 60.0
-    
-    def _on_mouse_down(self):
-        if dpg.is_key_down(dpg.mvKey_LControl):
-            self.rotating = True
-        else:
-            self.panning = True
-        self.last_mouse_pos = dpg.get_mouse_pos()
-    
-    def _on_mouse_release(self):
-        self.panning = False
-        self.rotating = False
-    
-    def _on_mouse_drag(self, sender, app_data):
-        current_mouse_pos = dpg.get_mouse_pos()
-        dx = current_mouse_pos[0] - self.last_mouse_pos[0]
-        dy = current_mouse_pos[1] - self.last_mouse_pos[1]
-        
-        if self.rotating:
-            # Rotate around creature center
-            self.camera_yaw -= dx * 0.5
-            self.camera_pitch -= dy * 0.5
-            self.camera_pitch = np.clip(self.camera_pitch, -89, 89)
-        elif self.panning:
-            # Pan camera
-            right = np.array([np.cos(np.radians(self.camera_yaw)), 0, np.sin(np.radians(self.camera_yaw))])
-            up = np.array([0, 1, 0])
-            self.camera_pos += right * dx * 0.01
-            self.camera_pos += up * dy * -0.01
+    def toggle_camera_rotation(self):
+        """Toggles the automatic camera rotation."""
+        self.camera_rotating = not self.camera_rotating
+        dpg.configure_item(
+            self.rotation_button, 
+            label="Start Camera" if not self.camera_rotating else "Stop Camera"
+        )
+
+    def update_camera(self, dt):
+        """Updates camera position if auto-rotation is enabled."""
+        if self.camera_rotating:
+            self.camera_yaw += self.rotation_speed * dt
+            self.camera_yaw %= 360  # Keep within 0-360 range
             
-        self.last_mouse_pos = current_mouse_pos
-    
-    def _on_mouse_wheel(self, sender, app_data):
-        # Zoom in/out along view direction
-        forward = np.array([
-            np.sin(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch)),
-            np.sin(np.radians(self.camera_pitch)),
-            -np.cos(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch))
-        ])
-        self.camera_pos = self.camera_pos.astype(np.float64)
-        self.camera_pos += forward * app_data * 0.2
-    
+            # Orbit around the origin at fixed distance
+            radius = np.linalg.norm(self.camera_pos)
+            self.camera_pos = np.array([
+                radius * np.sin(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch)),
+                radius * np.sin(np.radians(self.camera_pitch)),
+                -radius * np.cos(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch))
+            ])
+
     def render_creature(self, creature: Creature):
         """Renders the creature in the viewport with distinct styles for each component."""
         dpg.delete_item("Canvas", children_only=True)
@@ -978,10 +947,17 @@ class CreatureRenderer:
     def run(self):
         """Main application loop."""
         creature = self.create_simple_creature()
+        last_time = dpg.get_total_time()
         
         while dpg.is_dearpygui_running():
-            # Update creature (simple animation for demo)
             current_time = dpg.get_total_time()
+            dt = current_time - last_time
+            last_time = current_time
+            
+            # Update camera position
+            self.update_camera(dt)
+            
+            # Update creature (simple animation for demo)
             excitation = (np.sin(current_time) + 1) / 2  # 0-1 oscillation
             creature.step(0.016, {1: excitation})
             
@@ -990,7 +966,6 @@ class CreatureRenderer:
             dpg.render_dearpygui_frame()
         
         dpg.destroy_context()
-
 # Run the application
 if __name__ == "__main__":
     renderer = CreatureRenderer()
