@@ -589,7 +589,154 @@ class Creature:
                 triangles.append((start_vertex_ids[i], end_vertex_ids[next_i], start_vertex_ids[next_i]))
         
         return vertices, triangles
-    
+        
+    @classmethod
+    def generate_random_creature(cls, id: int = 1, 
+                                num_bones: int = 3, 
+                                num_joints: int = 2, 
+                                num_muscles: int = 2) -> 'Creature':
+        """
+        Generates a random creature with the specified number of components.
+        
+        Args:
+            id: ID for the creature
+            num_bones: Number of bones to generate (minimum 1)
+            num_joints: Number of joints to generate (minimum 1)
+            num_muscles: Number of muscles to generate (minimum 1)
+            
+        Returns:
+            A new Creature instance with randomly generated components
+        """
+        # Ensure minimum counts
+        num_bones = max(1, num_bones)
+        num_joints = max(1, num_joints)
+        num_muscles = max(1, num_muscles)
+        
+        creature = cls(id=id)
+        
+        # Generate nodes first (one more node than bones)
+        nodes = []
+        for i in range(num_bones + 1):
+            node_id = i + 1
+            # Position nodes in a roughly vertical line with some random variation
+            pos = np.array([
+                np.random.uniform(-0.5, 0.5),
+                i * 1.5,
+                np.random.uniform(-0.5, 0.5)
+            ])
+            node = Node(id=node_id)
+            creature.add_node(node, pos)
+            nodes.append((node_id, pos))
+        
+        # Generate bones between consecutive nodes
+        bones = []
+        for i in range(num_bones):
+            bone_id = i + 1
+            node1_id, node1_pos = nodes[i]
+            node2_id, node2_pos = nodes[i + 1]
+            
+            # Calculate length from node positions
+            length = np.linalg.norm(node2_pos - node1_pos)
+            
+            bone = Bone(
+                id=bone_id,
+                length=float(length),
+                thickness=np.random.uniform(0.2, 0.5),
+                density=np.random.uniform(1.5, 2.5),
+                youngModulus=np.random.uniform(8000, 12000),
+                maxCompression=np.random.uniform(150, 200),
+                maxTension=np.random.uniform(100, 150)
+            )
+            
+            # Random rotation (slightly tilted)
+            rotation = np.array([
+                np.random.uniform(-15, 15),
+                np.random.uniform(-15, 15),
+                np.random.uniform(-15, 15)
+            ])
+            
+            creature.add_bone(bone, node1_pos, node1_id, node2_id, rotation)
+            bones.append((bone_id, node1_id, node2_id))
+        
+        # Generate joints between random bones
+        for i in range(num_joints):
+            joint_id = i + 1
+            
+            # Select two random bones that share a node
+            rid = np.random.choice(len(bones))
+            bone1_id, bone1_node1, bone1_node2 = bones[rid]
+            possible_connected = [b for b in bones if b[1] == bone1_node2 or b[2] == bone1_node1]
+            
+            if not possible_connected:
+                # If no connected bones, just pick another random bone
+                bone2_id, _, _ = np.random.choice([b for b in bones if b[0] != bone1_id])
+            else:
+                pcid = np.random.choice(len(possible_connected))
+                bone2_id, _, _ = possible_connected[pcid]
+            
+            # Joint position at the connection point between bones
+            bone1_data = creature.bones[bone1_id]
+            bone2_data = creature.bones[bone2_id]
+            
+            # Find common node position
+            common_nodes = set(bone1_data['nodes']) & set(bone2_data['nodes'])
+            if common_nodes:
+                joint_pos = creature.nodes[next(iter(common_nodes))]['pos']
+            else:
+                # If bones don't share a node (shouldn't happen with our generation), use midpoint
+                joint_pos = (bone1_data['pos'] + bone2_data['pos']) / 2
+            
+            joint = Joint(
+                id=joint_id,
+                bone1=bone1_id,
+                bone2=bone2_id,
+                rotation=np.random.uniform(-10, 10),
+                flexion=np.random.uniform(-20, 20),
+                abduction=np.random.uniform(-10, 10),
+                stiffness=np.random.uniform(30, 100),
+                damping=np.random.uniform(1, 10),
+                friction=np.random.uniform(0.05, 0.2),
+                limits={
+                    'flexion': (np.random.uniform(-45, -20), np.random.uniform(20, 45)),
+                    'abduction': (np.random.uniform(-30, -10), np.random.uniform(10, 30)),
+                    'rotation': (np.random.uniform(-20, -5), np.random.uniform(5, 20))
+                }
+            )
+            creature.add_joint(joint, joint_pos)
+        
+        # Generate muscles between random nodes
+        for i in range(num_muscles):
+            muscle_id = i + 1
+            
+            # Select two distinct random nodes
+            node1_idx, node2_idx = np.random.choice(len(nodes), 2, replace=False)
+            node1_id, node1_pos = nodes[node1_idx]
+            node2_id, node2_pos = nodes[node2_idx]
+            
+            # Calculate optimal length based on distance between nodes
+            distance = np.linalg.norm(node2_pos - node1_pos)
+            optimal_length = distance * np.random.uniform(0.8, 1.2)
+            
+            # Offset attachment points slightly from node centers
+            offset1 = np.random.uniform(-0.3, 0.3, size=3)
+            offset2 = np.random.uniform(-0.3, 0.3, size=3)
+            attachment1 = node1_pos + offset1
+            attachment2 = node2_pos + offset2
+            
+            muscle = Muscle(
+                id=muscle_id,
+                maxForce=np.random.uniform(200, 500),
+                optimalLength=float(optimal_length),
+                tendenRatio=np.random.uniform(0.05, 0.2),
+                activationTime=np.random.uniform(0.03, 0.08),
+                deactivationTime=np.random.uniform(0.01, 0.05),
+                stiffness=np.random.uniform(30, 80),
+                damping=np.random.uniform(1, 5)
+            )
+            
+            creature.add_muscle(muscle, [attachment1, attachment2], [node1_id, node2_id])
+        
+        return creature
     
 class CreatureRenderer:
     def __init__(self):
@@ -610,36 +757,7 @@ class CreatureRenderer:
         self.last_mouse_pos = (0, 0)
         
     def create_simple_creature(self) -> Creature:
-        """Creates a simple test creature with 2 bones, 1 joint, and 1 muscle."""
-        creature = Creature(id=1)
-        
-        # Add nodes
-        node1 = Node(id=1)
-        node2 = Node(id=2)
-        node3 = Node(id=3)
-        
-        creature.add_node(node1, np.array([0, 0, 0]))
-        creature.add_node(node2, np.array([0, 2, 0]))
-        creature.add_node(node3, np.array([0, 4, 0]))
-        
-        # Add bones
-        bone1 = Bone(id=1, length=2.0, thickness=0.3)
-        bone2 = Bone(id=2, length=2.0, thickness=0.3)
-        
-        creature.add_bone(bone1, np.array([0, 0, 0]), 1, 2)
-        creature.add_bone(bone2, np.array([0, 2, 0]), 2, 3)
-        
-        # Add joint
-        joint = Joint(id=1, bone1=1, bone2=2, 
-                     flexion=0, abduction=0, rotation=0,
-                     stiffness=50, damping=2,
-                     limits={'flexion': (-45, 45), 'abduction': (-30, 30), 'rotation': (-30, 30)})
-        creature.add_joint(joint, np.array([0, 2, 0]))
-        
-        # Add muscle
-        muscle = Muscle(id=1, maxForce=300, optimalLength=2.0, tendenRatio=0.1)
-        creature.add_muscle(muscle, [np.array([0.5, 0, 0]), np.array([0.5, 4, 0])], [1, 3])
-        
+        creature = Creature.generate_random_creature()
         return creature
     
     def setup_dpg(self):
@@ -650,11 +768,11 @@ class CreatureRenderer:
         with dpg.window(tag="Primary Window"):
             with dpg.group(horizontal=True):
                 # Viewport for 3D rendering
-                with dpg.child_window(tag="Viewport", width=600, height=600):
-                    dpg.add_drawlist(tag="Canvas", width=600, height=600)
+                with dpg.child_window(tag="Viewport", width=600, height=500):
+                    dpg.add_drawlist(tag="Canvas", width=600, height=500)
                 
                 # Control panel
-                with dpg.child_window(tag="Controls", width=200, height=600):
+                with dpg.child_window(tag="Controls", width=200, height=500):
                     dpg.add_text("Camera Controls")
                     dpg.add_slider_float(label="FOV", default_value=self.fov, min_value=10, max_value=120, callback=lambda s: setattr(self, 'fov', s))
                     dpg.add_slider_float(label="Pitch", default_value=self.camera_pitch, min_value=-89, max_value=89, callback=lambda s: setattr(self, 'camera_pitch', s))
@@ -674,8 +792,26 @@ class CreatureRenderer:
             dpg.add_mouse_wheel_handler(callback=self._on_mouse_wheel)
         
         dpg.setup_dearpygui()
+        dpg.set_primary_window("Primary Window", True)
+        dpg.set_viewport_resize_callback(self.on_viewport_resize)
         dpg.show_viewport()
     
+    def on_viewport_resize(self):
+        viewport_width = dpg.get_viewport_width()
+        viewport_height = dpg.get_viewport_height()
+        
+        # Calculate new dimensions (keeping the viewport square or maintaining aspect ratio)
+        canvas_width = max(600, viewport_width - 200)  # Reserve 200px for controls
+        canvas_height = max(550, viewport_height - 50)
+        
+        # Update the drawlist dimensions
+        dpg.configure_item("Canvas", width=canvas_width, height=canvas_height)
+        dpg.configure_item("Viewport", width=canvas_width, height=canvas_height)
+        
+        # Adjust the control panel height to match
+        dpg.configure_item("Controls", height=canvas_height)
+        pass
+
     def reset_camera(self):
         """Resets camera to default position."""
         self.camera_pos = np.array([0, 0, -5])
@@ -707,7 +843,7 @@ class CreatureRenderer:
         self.camera_pos[2] += app_data * 0.2
     
     def render_creature(self, creature: Creature):
-        """Renders the creature in the viewport."""
+        """Renders the creature in the viewport with distinct styles for each component."""
         dpg.delete_item("Canvas", children_only=True)
         
         # Get viewport size
@@ -716,7 +852,6 @@ class CreatureRenderer:
         aspect_ratio = viewport_width / viewport_height
         
         # Create matrices
-        #view_matrix = dpg.create_fps_matrix(eye=self.camera_pos.tolist(), pitch=self.camera_pitch, yaw=self.camera_yaw)
         view_matrix = create_fps_matrix(self.camera_pos, self.camera_pitch, self.camera_yaw)
         proj_matrix = create_perspective_matrix(np.radians(self.fov), aspect_ratio, self.near_plane, self.far_plane)
         
@@ -728,7 +863,7 @@ class CreatureRenderer:
         for v_id, v_pos in vertices.items():
             world_vertices[v_id] = creature.get_global_position(v_pos)
         
-        # Draw each triangle
+        # Draw each triangle with appropriate coloring based on component type
         for tri in triangles:
             v0 = world_vertices[tri[0]]
             v1 = world_vertices[tri[1]]
@@ -739,17 +874,63 @@ class CreatureRenderer:
             edge2 = v2 - v0
             normal = normalize(cross(edge1, edge2))
             
+            # Default to bone color (white)
+            base_color = np.array([255, 255, 255])
+            is_outline = False
+            
+            # Determine component type by analyzing vertex positions
+            # This is a simplified approach - in a real implementation you'd want to track
+            # which vertices belong to which components during creation
+            
+            avg_size = np.linalg.norm(v1-v0) + np.linalg.norm(v2-v1) + np.linalg.norm(v0-v2)
+            if avg_size < 0.5:  # Small triangles are probably nodes
+                base_color = np.array([0, 0, 255])  # Blue
+                is_outline = True
+            # Check if this is likely a muscle (tapered cylinder)
+            elif any(np.linalg.norm(v - v0) > 1.5 for v in [v1, v2]):  # Long thin triangles
+                base_color = np.array([255, 0, 0])  # Red
+                is_outline = True
+            # Check if this is likely a joint (medium sphere)
+            elif avg_size < 1.2:  # Medium triangles are probably joints
+                base_color = np.array([0, 255, 0])  # Green
+                is_outline = True
+            
             # Calculate lighting (simple Lambertian)
             light_intensity = self.ambient + self.diffuse * max(0, dot(normal, -self.light_dir))
-            color = (int(255 * light_intensity), int(255 * light_intensity), int(255 * light_intensity), 255)
+            color = base_color * light_intensity
+            color = np.clip(color, 0, 255).astype(int)
             
             # Project vertices to screen space
             p0 = project_point(v0, view_matrix, proj_matrix, (viewport_width, viewport_height))
             p1 = project_point(v1, view_matrix, proj_matrix, (viewport_width, viewport_height))
             p2 = project_point(v2, view_matrix, proj_matrix, (viewport_width, viewport_height))
             
-            # Draw triangle
-            dpg.draw_triangle(p0, p1, p2, color=color, parent="Canvas")
+            if is_outline:
+                # Draw as outline
+                thickness = 1
+                dpg.draw_triangle(p0, p1, p2, 
+                                color=(color[0], color[1], color[2], 50),  # Semi-transparent fill
+                                thickness=thickness,
+                                fill=(color[0], color[1], color[2], 30),
+                                parent="Canvas")
+                dpg.draw_line(p0, p1, 
+                            color=(color[0], color[1], color[2], 255),
+                            thickness=thickness,
+                            parent="Canvas")
+                dpg.draw_line(p1, p2, 
+                            color=(color[0], color[1], color[2], 255),
+                            thickness=thickness,
+                            parent="Canvas")
+                dpg.draw_line(p2, p0, 
+                            color=(color[0], color[1], color[2], 255),
+                            thickness=thickness,
+                            parent="Canvas")
+            else:
+                # Draw as solid
+                dpg.draw_triangle(p0, p1, p2, 
+                                color=(color[0], color[1], color[2], 255),
+                                fill=(color[0], color[1], color[2], 255),
+                                parent="Canvas")
         
         # Draw coordinate axes for reference
         self._draw_axes(view_matrix, proj_matrix, (viewport_width, viewport_height))
