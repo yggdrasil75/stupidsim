@@ -1,20 +1,15 @@
 from dataclasses import dataclass, field
-# import math # Removed: Not explicitly used in the provided code
+import datetime
 import sys
 from typing import Optional
-import dearpygui.dearpygui as dpg
 import numpy as np
+import glfw
+from OpenGL.GL import *
+from OpenGL.GLU import *
+from OpenGL.GL.shaders import compileProgram, compileShader
+from dearpygui import dearpygui as dpg
 
-
-# --- Helper functions for 3D Math ---
-def normalize(v):
-    norm = np.linalg.norm(v)
-    if norm == 0:
-        return v
-    return v / norm
-
-def cross(v1, v2):
-    return np.cross(v1, v2)
+# --- Helper functions for 3D Math (keep the same as before) ---
 
 def dot(v1, v2):
     return np.dot(v1, v2)
@@ -41,7 +36,6 @@ def rotate_vector_by_euler(vec: np.ndarray, euler_angles_rad: np.ndarray) -> np.
         [0, 0, 1]
     ])
     
-    # Apply rotations in ZYX order (common for object rotation, first X, then Y, then Z)
     return Rz @ Ry @ Rx @ vec
 
 def create_perspective_matrix(fov: float, aspect_ratio: float, near: float, far: float) -> np.ndarray:
@@ -56,11 +50,9 @@ def create_perspective_matrix(fov: float, aspect_ratio: float, near: float, far:
 
 def create_fps_matrix(position: np.ndarray, pitch: float, yaw: float) -> np.ndarray:
     """Creates a first-person view matrix."""
-    # Convert angles to radians
     pitch_rad = np.radians(pitch)
     yaw_rad = np.radians(yaw)
     
-    # Calculate rotation matrices
     Rx = np.array([
         [1, 0, 0],
         [0, np.cos(pitch_rad), -np.sin(pitch_rad)],
@@ -73,39 +65,19 @@ def create_fps_matrix(position: np.ndarray, pitch: float, yaw: float) -> np.ndar
         [-np.sin(yaw_rad), 0, np.cos(yaw_rad)]
     ])
     
-    # Combine rotations and translation
     R = Rx @ Ry
     T = np.eye(4)
     T[:3, :3] = R
     T[:3, 3] = -R @ position
     return T
 
-def project_point(point: np.ndarray, view_matrix: np.ndarray, proj_matrix: np.ndarray, viewport_size: tuple) -> tuple:
-    """Projects a 3D point to 2D screen coordinates."""
-    # Convert to homogeneous coordinates
-    point_hom = np.append(point, 1.0)
-    
-    # Apply view and projection matrices
-    view_space = view_matrix @ point_hom
-    clip_space = proj_matrix @ view_space
-    
-    # Perspective division
-    ndc_space = clip_space[:3] / clip_space[3]
-    
-    # Convert to screen coordinates
-    screen_x = (ndc_space[0] * 0.5 + 0.5) * viewport_size[0]
-    screen_y = (1 - (ndc_space[1] * 0.5 + 0.5)) * viewport_size[1]
-    
-    return (screen_x, screen_y)
-
-
-# Add these constants at the top of the file
+# --- Constants and Classes (keep the same as before) ---
 MAX_FLOAT = sys.float_info.max
 GROUND_HEIGHT = 0.0
-BONECOLOR = np.array([255, 255, 255])
-JOINTCOLOR = np.array([0, 255, 0])
-MUSCLECOLOR = np.array([255, 0, 0])
-NODECOLOR = np.array([0, 0, 255])
+BONECOLOR = np.array([255, 255, 255]) / 255.0
+JOINTCOLOR = np.array([0, 255, 0]) / 255.0
+MUSCLECOLOR = np.array([255, 0, 0]) / 255.0
+NODECOLOR = np.array([0, 0, 255]) / 255.0
 
 @dataclass
 class SolidObject:
@@ -150,7 +122,7 @@ class SolidObject:
 class Bone:
     # bone cant change structure. its position and rotation can be changed by muscles
     id: int
-    length: float = field(default=10.0, metadata={"sigma": 0.1})
+    length: float | np.floating = field(default=10.0, metadata={"sigma": 0.1})
     thickness: float = field(default=1.0, metadata={"sigma": 0.01})
     density: float = field(default=1.9)
     youngModulus: float = field(default=10000.0)
@@ -228,7 +200,7 @@ class Muscle:
     # muscle does most of the effort here, moving bones, joints, etc.
     id: int
     maxForce: float = field(default=300.0) # in newtons
-    optimalLength: float = field(default=0.3) # in meters
+    optimalLength: float | np.floating = field(default=0.3) # in meters
     tendenRatio: float = field(default=0.1) # percent ratio for tendon length
 
     activation: float = field(default=0.0)
@@ -241,7 +213,7 @@ class Muscle:
     damping: float = field(default=2.0) # in newton second per meter
 
     def __post_init__(self):
-        self.length = self.restLength
+        self.length = float(self.restLength)
 
     @property
     def restLength(self):
@@ -504,8 +476,8 @@ class Creature:
             if np.allclose(rotated_dir, [0, 0, 1]):
                 perp1 = np.array([1, 0, 0])
             else:
-                perp1 = normalize(np.cross(rotated_dir, np.array([0, 0, 1])))
-            perp2 = normalize(np.cross(rotated_dir, perp1))
+                perp1 = np.linalg.norm(np.cross(rotated_dir, np.array([0, 0, 1])))
+            perp2 = np.linalg.norm(np.cross(rotated_dir, perp1))
             
             for i in range(cylinder_resolution):
                 angle = 2 * np.pi * i / cylinder_resolution
@@ -560,7 +532,7 @@ class Creature:
             # Normalize and scale vertices
             base_vertex_ids = []
             for v in vertices_pos:
-                v_norm = normalize(np.array(v))
+                v_norm = np.linalg.norm(np.array(v))
                 vertex_pos = pos + v_norm * radius
                 base_vertex_ids.append(add_vertex(vertex_pos, JOINTCOLOR))
             
@@ -602,8 +574,8 @@ class Creature:
             if np.allclose(direction, [0, 0, 1]):
                 perp1 = np.array([1, 0, 0])
             else:
-                perp1 = normalize(np.cross(direction, np.array([0, 0, 1])))
-            perp2 = normalize(np.cross(direction, perp1))
+                perp1 = np.linalg.norm(np.cross(direction, np.array([0, 0, 1])))
+            perp2 = np.linalg.norm(np.cross(direction, perp1))
             
             for i in range(cylinder_resolution):
                 angle = 2 * np.pi * i / cylinder_resolution
@@ -820,297 +792,624 @@ class Creature:
         # Check for collisions
         self._check_ground_collision(dt)
 
-class CreatureRenderer:
-    def __init__(self):
-        self.camera_distance = 5.0 
-        self.camera_pitch = 15
-        self.camera_yaw = 0
-        self.fov = 60.0
-        self.near_plane = 0.1
-        self.far_plane = 100.0
+    @classmethod
+    def generate_cat_creature(cls, id: int = 1) -> 'Creature':
+        """
+        Generates a creature that approximates a cat's skeletal structure.
+        """
+        creature = cls(id=id)
         
-        # Lighting parameters
-        self.light_dir = normalize(np.array([1, -1, -1]))
-        self.ambient = 0.2
-        self.diffuse = 0.7
+        # Define cat proportions (in meters)
+        body_length = 0.5
+        leg_length = 0.2
+        tail_length = 0.4
+        head_size = 0.15
+        spine_segments = 5
         
-        # Camera rotation control
-        self.camera_rotating = True
-        self.rotation_speed = 10.0  # degrees per second
-        self.ground = SolidObject.create_ground_plane(0)
-
-        self.creature_bounds = [np.array([MAX_FLOAT, MAX_FLOAT, MAX_FLOAT]), 
-                               np.array([-MAX_FLOAT, -MAX_FLOAT, -MAX_FLOAT])]
+        # Create nodes for the spine
+        spine_nodes = []
+        for i in range(spine_segments):
+            node_id = i + 1
+            # Position nodes along a slight curve to simulate spine curvature
+            pos = np.array([
+                0,
+                i * (body_length / (spine_segments-1)),
+                np.sin(i/(spine_segments-1) * np.pi) * -0.05  # slight downward curve
+            ])
+            node = Node(id=node_id)
+            creature.add_node(node, pos)
+            spine_nodes.append((node_id, pos))
         
-    def calculate_creature_bounds(self, creature: Creature) -> tuple[np.ndarray, np.ndarray]:
-        """Calculates the axis-aligned bounding box of the creature in world space."""
-        min_bounds = np.array([MAX_FLOAT, MAX_FLOAT, MAX_FLOAT])
-        max_bounds = np.array([-MAX_FLOAT, -MAX_FLOAT, -MAX_FLOAT])
+        # Create bones for the spine
+        spine_bones = []
+        for i in range(spine_segments - 1):
+            bone_id = i + 1
+            node1_id, node1_pos = spine_nodes[i]
+            node2_id, node2_pos = spine_nodes[i + 1]
+            
+            length = np.linalg.norm(node2_pos - node1_pos)
+            
+            bone = Bone(
+                id=bone_id,
+                length=float(length),
+                thickness=0.05 if i < 2 else 0.04,  # thicker near shoulders
+                density=1.8,
+                youngModulus=10000,
+                maxCompression=180,
+                maxTension=130
+            )
+            
+            # Slight rotation to follow spine curve
+            direction = node2_pos - node1_pos
+            rotation = np.array([
+                np.degrees(np.arctan2(direction[2], direction[1])),
+                0,
+                0
+            ])
+            
+            creature.add_bone(bone, node1_pos, node1_id, node2_id, rotation)
+            spine_bones.append((bone_id, node1_id, node2_id))
         
-        # Get all vertices from the creature's geometry
-        vertices, _ = creature.calculate_3d_coordinates()
+        # Add head
+        head_node_id = spine_segments + 1
+        head_pos = spine_nodes[-1][1] + np.array([0, head_size/2, -0.02])
+        head_node = Node(id=head_node_id)
+        creature.add_node(head_node, head_pos)
         
-        for vertex_data in vertices.values():
-            v_pos, _ = vertex_data  # Unpack the position and color
-            world_pos = creature.get_global_position(v_pos)
-            min_bounds = np.minimum(min_bounds, world_pos)
-            max_bounds = np.maximum(max_bounds, world_pos)
+        neck_bone_id = spine_segments
+        neck_length = np.linalg.norm(head_pos - spine_nodes[-1][1])
+        neck_bone = Bone(
+            id=neck_bone_id,
+            length=float(neck_length),
+            thickness=0.04,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(neck_bone, spine_nodes[-1][1], spine_nodes[-1][0], head_node_id)
         
-        return min_bounds, max_bounds
-    
-    def create_simple_creature(self) -> Creature:
-        creature = Creature.generate_random_creature()
-        creature.position = np.array([0, 30.0, 0])  
+        # Add legs (front and hind)
+        leg_nodes = []
+        # Front legs (attached to 2nd spine node)
+        shoulder_node_id = spine_nodes[1][0]
+        shoulder_pos = spine_nodes[1][1]
+        
+        # Right front leg
+        upper_leg_pos = shoulder_pos + np.array([0.08, -0.05, 0])
+        lower_leg_pos = upper_leg_pos + np.array([0, -leg_length*0.6, 0])
+        foot_pos = lower_leg_pos + np.array([0, -leg_length*0.4, 0.02])
+        
+        # Create nodes and bones for right front leg
+        r_upper_leg_node_id = head_node_id + 1
+        r_lower_leg_node_id = r_upper_leg_node_id + 1
+        r_foot_node_id = r_lower_leg_node_id + 1
+        
+        creature.add_node(Node(r_upper_leg_node_id), upper_leg_pos)
+        creature.add_node(Node(r_lower_leg_node_id), lower_leg_pos)
+        creature.add_node(Node(r_foot_node_id), foot_pos)
+        
+        # Upper leg bone
+        upper_leg_bone = Bone(
+            id=neck_bone_id + 1,
+            length=float(np.linalg.norm(upper_leg_pos - shoulder_pos)),
+            thickness=0.03,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(upper_leg_bone, shoulder_pos, shoulder_node_id, r_upper_leg_node_id)
+        
+        # Lower leg bone
+        lower_leg_bone = Bone(
+            id=neck_bone_id + 2,
+            length=float(np.linalg.norm(lower_leg_pos - upper_leg_pos)),
+            thickness=0.025,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(lower_leg_bone, upper_leg_pos, r_upper_leg_node_id, r_lower_leg_node_id)
+        
+        # Foot bone
+        foot_bone = Bone(
+            id=neck_bone_id + 3,
+            length=float(np.linalg.norm(foot_pos - lower_leg_pos)),
+            thickness=0.02,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(foot_bone, lower_leg_pos, r_lower_leg_node_id, r_foot_node_id)
+        
+        # Left front leg (mirror of right)
+        upper_leg_pos = shoulder_pos + np.array([-0.08, -0.05, 0])
+        lower_leg_pos = upper_leg_pos + np.array([0, -leg_length*0.6, 0])
+        foot_pos = lower_leg_pos + np.array([0, -leg_length*0.4, 0.02])
+        
+        l_upper_leg_node_id = r_foot_node_id + 1
+        l_lower_leg_node_id = l_upper_leg_node_id + 1
+        l_foot_node_id = l_lower_leg_node_id + 1
+        
+        creature.add_node(Node(l_upper_leg_node_id), upper_leg_pos)
+        creature.add_node(Node(l_lower_leg_node_id), lower_leg_pos)
+        creature.add_node(Node(l_foot_node_id), foot_pos)
+        
+        # Upper leg bone
+        upper_leg_bone = Bone(
+            id=neck_bone_id + 4,
+            length=float(np.linalg.norm(upper_leg_pos - shoulder_pos)),
+            thickness=0.03,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(upper_leg_bone, shoulder_pos, shoulder_node_id, l_upper_leg_node_id)
+        
+        # Lower leg bone
+        lower_leg_bone = Bone(
+            id=neck_bone_id + 5,
+            length=float(np.linalg.norm(lower_leg_pos - upper_leg_pos)),
+            thickness=0.025,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(lower_leg_bone, upper_leg_pos, l_upper_leg_node_id, l_lower_leg_node_id)
+        
+        # Foot bone
+        foot_bone = Bone(
+            id=neck_bone_id + 6,
+            length=float(np.linalg.norm(foot_pos - lower_leg_pos)),
+            thickness=0.02,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(foot_bone, lower_leg_pos, l_lower_leg_node_id, l_foot_node_id)
+        
+        # Hind legs (attached to 4th spine node)
+        hip_node_id = spine_nodes[-2][0]
+        hip_pos = spine_nodes[-2][1]
+        
+        # Right hind leg
+        upper_leg_pos = hip_pos + np.array([0.07, -0.08, 0])
+        lower_leg_pos = upper_leg_pos + np.array([0, -leg_length*0.7, 0])
+        foot_pos = lower_leg_pos + np.array([0, -leg_length*0.3, 0.03])
+        
+        r_upper_leg_node_id = l_foot_node_id + 1
+        r_lower_leg_node_id = r_upper_leg_node_id + 1
+        r_foot_node_id = r_lower_leg_node_id + 1
+        
+        creature.add_node(Node(r_upper_leg_node_id), upper_leg_pos)
+        creature.add_node(Node(r_lower_leg_node_id), lower_leg_pos)
+        creature.add_node(Node(r_foot_node_id), foot_pos)
+        
+        # Upper leg bone
+        upper_leg_bone = Bone(
+            id=neck_bone_id + 7,
+            length=float(np.linalg.norm(upper_leg_pos - hip_pos)),
+            thickness=0.035,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(upper_leg_bone, hip_pos, hip_node_id, r_upper_leg_node_id)
+        
+        # Lower leg bone
+        lower_leg_bone = Bone(
+            id=neck_bone_id + 8,
+            length=float(np.linalg.norm(lower_leg_pos - upper_leg_pos)),
+            thickness=0.03,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(lower_leg_bone, upper_leg_pos, r_upper_leg_node_id, r_lower_leg_node_id)
+        
+        # Foot bone
+        foot_bone = Bone(
+            id=neck_bone_id + 9,
+            length=float(np.linalg.norm(foot_pos - lower_leg_pos)),
+            thickness=0.025,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(foot_bone, lower_leg_pos, r_lower_leg_node_id, r_foot_node_id)
+        
+        # Left hind leg (mirror of right)
+        upper_leg_pos = hip_pos + np.array([-0.07, -0.08, 0])
+        lower_leg_pos = upper_leg_pos + np.array([0, -leg_length*0.7, 0])
+        foot_pos = lower_leg_pos + np.array([0, -leg_length*0.3, 0.03])
+        
+        l_upper_leg_node_id = r_foot_node_id + 1
+        l_lower_leg_node_id = l_upper_leg_node_id + 1
+        l_foot_node_id = l_lower_leg_node_id + 1
+        
+        creature.add_node(Node(l_upper_leg_node_id), upper_leg_pos)
+        creature.add_node(Node(l_lower_leg_node_id), lower_leg_pos)
+        creature.add_node(Node(l_foot_node_id), foot_pos)
+        
+        # Upper leg bone
+        upper_leg_bone = Bone(
+            id=neck_bone_id + 10,
+            length=np.linalg.norm(upper_leg_pos - hip_pos),
+            thickness=0.035,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(upper_leg_bone, hip_pos, hip_node_id, l_upper_leg_node_id)
+        
+        # Lower leg bone
+        lower_leg_bone = Bone(
+            id=neck_bone_id + 11,
+            length=np.linalg.norm(lower_leg_pos - upper_leg_pos),
+            thickness=0.03,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(lower_leg_bone, upper_leg_pos, l_upper_leg_node_id, l_lower_leg_node_id)
+        
+        # Foot bone
+        foot_bone = Bone(
+            id=neck_bone_id + 12,
+            length=np.linalg.norm(foot_pos - lower_leg_pos),
+            thickness=0.025,
+            density=1.8,
+            youngModulus=10000,
+            maxCompression=180,
+            maxTension=130
+        )
+        creature.add_bone(foot_bone, lower_leg_pos, l_lower_leg_node_id, l_foot_node_id)
+        
+        # Add tail
+        tail_segments = 4
+        tail_nodes = []
+        prev_node_id = spine_nodes[-1][0]
+        prev_pos = spine_nodes[-1][1]
+        
+        for i in range(tail_segments):
+            node_id = l_foot_node_id + 1 + i
+            # Position tail segments curving upward
+            pos = prev_pos + np.array([
+                0,
+                0,
+                tail_length/tail_segments * (i+1)/tail_segments
+            ])
+            node = Node(id=node_id)
+            creature.add_node(node, pos)
+            tail_nodes.append((node_id, pos))
+            
+            # Add tail bone
+            if i > 0:
+                bone_id = neck_bone_id + 12 + i
+                length = np.linalg.norm(pos - prev_pos)
+                tail_bone = Bone(
+                    id=bone_id,
+                    length=float(length),
+                    thickness=0.02 * (1 - i/tail_segments),  # Taper tail
+                    density=1.8,
+                    youngModulus=10000,
+                    maxCompression=180,
+                    maxTension=130
+                )
+                creature.add_bone(tail_bone, prev_pos, prev_node_id, node_id)
+            
+            prev_node_id = node_id
+            prev_pos = pos
+        
+        # Add joints at key locations
+        # Shoulder joints (front legs)
+        shoulder_joint = Joint(
+            id=1,
+            bone1=spine_bones[1][0],  # Second spine bone
+            bone2=neck_bone_id + 1,    # Right upper leg bone
+            flexion=0,
+            abduction=0,
+            rotation=0,
+            stiffness=80,
+            damping=5,
+            friction=0.1,
+            limits={
+                'flexion': (-45, 45),
+                'abduction': (-30, 30),
+                'rotation': (-15, 15)
+            }
+        )
+        creature.add_joint(shoulder_joint, shoulder_pos)
+        
+        # Hip joints (hind legs)
+        hip_joint = Joint(
+            id=2,
+            bone1=spine_bones[-2][0],  # Second-to-last spine bone
+            bone2=neck_bone_id + 7,     # Right upper hind leg bone
+            flexion=0,
+            abduction=0,
+            rotation=0,
+            stiffness=80,
+            damping=5,
+            friction=0.1,
+            limits={
+                'flexion': (-45, 45),
+                'abduction': (-30, 30),
+                'rotation': (-15, 15)
+            }
+        )
+        creature.add_joint(hip_joint, hip_pos)
+        
+        # Knee joints (front legs)
+        knee_joint = Joint(
+            id=3,
+            bone1=neck_bone_id + 2,    # Right lower leg bone
+            bone2=neck_bone_id + 3,    # Right foot bone
+            flexion=0,
+            abduction=0,
+            rotation=0,
+            stiffness=100,
+            damping=8,
+            friction=0.15,
+            limits={
+                'flexion': (-120, 0),  # Knees can't bend backward
+                'abduction': (-10, 10),
+                'rotation': (-5, 5)
+            }
+        )
+        creature.add_joint(knee_joint, lower_leg_pos)
+        
+        # Add muscles for key movement groups
+        # Back muscles (along spine)
+        for i in range(spine_segments - 2):
+            muscle_id = i + 1
+            start_pos = spine_nodes[i][1] + np.array([0, 0, 0.02])
+            end_pos = spine_nodes[i+2][1] + np.array([0, 0, 0.02])
+            
+            muscle = Muscle(
+                id=muscle_id,
+                maxForce=200,
+                optimalLength=np.linalg.norm(end_pos - start_pos),
+                tendenRatio=0.1,
+                activationTime=0.05,
+                deactivationTime=0.02,
+                stiffness=50,
+                damping=2
+            )
+            creature.add_muscle(muscle, [start_pos, end_pos], 
+                               [spine_nodes[i][0], spine_nodes[i+2][0]])
+        
+        # Leg muscles (biceps/triceps equivalents)
+        # Right front leg biceps
+        muscle_id = spine_segments
+        start_pos = shoulder_pos + np.array([0.05, 0, 0])
+        end_pos = lower_leg_pos + np.array([0.02, 0.05, 0])
+        
+        muscle = Muscle(
+            id=muscle_id,
+            maxForce=300,
+            optimalLength=np.linalg.norm(end_pos - start_pos),
+            tendenRatio=0.15,
+            activationTime=0.04,
+            deactivationTime=0.01,
+            stiffness=60,
+            damping=3
+        )
+        creature.add_muscle(muscle, [start_pos, end_pos], 
+                           [shoulder_node_id, r_lower_leg_node_id])
+        
+        # Right front leg triceps
+        muscle_id += 1
+        start_pos = shoulder_pos + np.array([-0.05, 0, 0])
+        end_pos = lower_leg_pos + np.array([-0.02, 0.05, 0])
+        
+        muscle = Muscle(
+            id=muscle_id,
+            maxForce=300,
+            optimalLength=np.linalg.norm(end_pos - start_pos),
+            tendenRatio=0.15,
+            activationTime=0.04,
+            deactivationTime=0.01,
+            stiffness=60,
+            damping=3
+        )
+        creature.add_muscle(muscle, [start_pos, end_pos], 
+                           [shoulder_node_id, r_lower_leg_node_id])
+        
+        # Add similar muscles for other legs...
+        
         return creature
-    
-    def setup_dpg(self):
-        """Sets up Dear PyGui context and windows."""
+
+class CreatureViewer2D:
+    def __init__(self, creature, width=800, height=600):
+        self.creature = creature
+        self.width = width
+        self.height = height
+        self.scale = 50.0  # Pixels per meter
+        self.offset = np.array([width/2, height/2])  # Center of view
+        self.drag_start_pos = None
+        self.pan_offset = np.array([0.0, 0.0])
+        self.selected_component = None
+        
+        # Create DPG context and window
+        #dpg.create_context()
+        self.setup_ui()
+        
+    def setup_ui(self):
         dpg.create_context()
         dpg.create_viewport(title='Creature Renderer', width=800, height=600)
-        
-        with dpg.theme() as no_scroll_theme:
-            with dpg.theme_component(dpg.mvAll):
-                dpg.add_theme_style(dpg.mvStyleVar_ScrollbarSize, 0)
-
-        with dpg.window(tag="Primary Window"):
-            dpg.bind_theme(no_scroll_theme)
-            with dpg.group(horizontal=True):
-                # Viewport for 3D rendering
-                with dpg.child_window(tag="Viewport", width=600, height=500):
-                    dpg.add_drawlist(tag="Canvas", width=600, height=500)
+        # Main window
+        with dpg.window(label="Main_Window"):
+            # Add a drawing canvas
+            with dpg.drawlist(width=self.width-20, height=self.height-20, 
+                            tag="drawing_canvas"):
+                pass
                 
-                # Control panel
-                with dpg.child_window(tag="Controls", width=200, height=500):
-                    dpg.add_text("Camera Controls")
-                    dpg.add_slider_float(label="FOV", default_value=self.fov, min_value=10, max_value=120, callback=lambda s: setattr(self, 'fov', s))
-                    
-                    # Add toggle button for camera rotation
-                    self.rotation_button = dpg.add_button(
-                        label="Stop Camera", 
-                        callback=self.toggle_camera_rotation
-                    )
-                    
-                    dpg.add_text("Lighting")
-                    dpg.add_slider_float(label="Ambient", default_value=self.ambient, min_value=0, max_value=1, callback=lambda s: setattr(self, 'ambient', s))
-                    dpg.add_slider_float(label="Diffuse", default_value=self.diffuse, min_value=0, max_value=1, callback=lambda s: setattr(self, 'diffuse', s))
-        
+            # Controls
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Reset View", callback=self.reset_view)
+                dpg.add_slider_float(label="Zoom", default_value=self.scale, 
+                                   min_value=10, max_value=200, 
+                                   callback=self.update_scale)
+                                   
+        # Set mouse callbacks
+        with dpg.handler_registry():
+            dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, 
+                                      callback=self.on_drag)
+            dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left, 
+                                         callback=self.on_drag_end)
+            dpg.add_mouse_wheel_handler(callback=self.on_mouse_wheel)
         dpg.setup_dearpygui()
-        dpg.set_primary_window("Primary Window", True)
-        dpg.set_viewport_resize_callback(self.on_viewport_resize)
+        #dpg.set_primary_window(window="Main_Window", value=True)
         dpg.show_viewport()
-
-    def on_viewport_resize(self):
-        viewport_width = dpg.get_viewport_width()
-        viewport_height = dpg.get_viewport_height()
-        
-        # Calculate new dimensions (keeping the viewport square or maintaining aspect ratio)
-        canvas_width = max(600, viewport_width - 200)  # Reserve 200px for controls
-        canvas_height = max(550, viewport_height - 50)
-        
-        # Update the drawlist dimensions
-        dpg.configure_item("Canvas", width=canvas_width, height=canvas_height)
-        dpg.configure_item("Viewport", width=canvas_width, height=canvas_height)
-        
-        # Adjust the control panel height to match
-        dpg.configure_item("Controls", height=canvas_height)
-        pass
-
-    def toggle_camera_rotation(self):
-        """Toggles the automatic camera rotation."""
-        self.camera_rotating = not self.camera_rotating
-        dpg.configure_item(
-            self.rotation_button, 
-            label="Start Camera" if not self.camera_rotating else "Stop Camera"
-        )
-
-    def update_camera_distance(self, creature: Creature):
-        """Updates camera distance to fit the entire creature in view."""
-        # Calculate creature bounds
-        min_bounds, max_bounds = self.calculate_creature_bounds(creature)
-        
-        # Calculate creature dimensions
-        size = max_bounds - min_bounds
-        max_dimension = max(size[0], size[1], size[2])
-        
-        # Calculate required distance based on FOV and creature size
-        # Using trigonometry to calculate required distance to fit object in view
-        fov_rad = np.radians(self.fov)
-        required_distance = (max_dimension * 1.2) / (2 * np.tan(fov_rad / 2))
-        
-        # Ensure we don't get too close
-        min_distance = max_dimension * 0.8
-        self.camera_distance = max(required_distance, min_distance)
-        
-        # Update camera position
-        self.update_camera_position()
-    
-    def update_camera_position(self):
-        """Updates camera position based on current distance, pitch and yaw."""
-        self.camera_pos = np.array([
-            self.camera_distance * np.sin(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch)),
-            self.camera_distance * np.sin(np.radians(self.camera_pitch)),
-            -self.camera_distance * np.cos(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch))
-        ])
-    
-    def update_camera(self, dt, creature: Creature):
-        """Updates camera position if auto-rotation is enabled."""
-        if self.camera_rotating:
-            self.camera_yaw += self.rotation_speed * dt
-            self.camera_yaw %= 360  # Keep within 0-360 range
             
-        # Update camera distance to fit creature
-        self.update_camera_distance(creature)
+    def reset_view(self):
+        self.scale = 50.0
+        self.pan_offset = np.array([0.0, 0.0])
+        self.draw_creature()
         
-        # Update camera position based on current parameters
-        self.update_camera_position()
-
-    def render_creature(self, creature: Creature):
-        """Renders the creature in the viewport with distinct styles for each component."""
-        dpg.delete_item("Canvas", children_only=True)
+    def update_scale(self, sender, app_data):
+        self.scale = app_data
+        self.draw_creature()
         
-        # Get viewport size
-        viewport_width = dpg.get_item_width("Canvas")
-        viewport_height = dpg.get_item_height("Canvas")
-        aspect_ratio = viewport_width / viewport_height
-        
-        # Create matrices
-        view_matrix = create_fps_matrix(self.camera_pos, self.camera_pitch, self.camera_yaw)
-        proj_matrix = create_perspective_matrix(np.radians(self.fov), aspect_ratio, self.near_plane, self.far_plane)
-        
-        self._render_solid_object(self.ground, view_matrix, proj_matrix, viewport_width, viewport_height)
-
-        # Get creature geometry
-        vertices, triangles = creature.calculate_3d_coordinates()
-        
-        # Draw each triangle with appropriate coloring based on component type
-        for tri in triangles:
-            v0_id, v1_id, v2_id, component_type = tri
-            v0, color0 = vertices[v0_id]
-            v1, color1 = vertices[v1_id]
-            v2, color2 = vertices[v2_id]
-            
-            # Use the first vertex's color for the whole triangle
-            base_color = color0
-            
-            # Calculate normal for lighting
-            edge1 = v1 - v0
-            edge2 = v2 - v0
-            normal = normalize(cross(edge1, edge2))
-            
-            # Calculate lighting (simple Lambertian)
-            light_intensity = self.ambient + self.diffuse * max(0, dot(normal, -self.light_dir))
-            color = base_color * light_intensity
-            color = np.clip(color, 0, 255).astype(int)
-            
-            # Transform vertices to world space and project
-            world_v0 = creature.get_global_position(v0)
-            world_v1 = creature.get_global_position(v1)
-            world_v2 = creature.get_global_position(v2)
-            
-            p0 = project_point(world_v0, view_matrix, proj_matrix, (viewport_width, viewport_height))
-            p1 = project_point(world_v1, view_matrix, proj_matrix, (viewport_width, viewport_height))
-            p2 = project_point(world_v2, view_matrix, proj_matrix, (viewport_width, viewport_height))
-            
-            # Determine rendering style based on component type
-            if component_type == 'bone':
-                # Solid bones
-                dpg.draw_triangle(p0, p1, p2, 
-                                color=(color[0], color[1], color[2], 255),
-                                fill=(color[0], color[1], color[2], 255),
-                                parent="Canvas")
+    def on_drag(self, sender, app_data):
+        if dpg.is_item_hovered("drawing_canvas"):
+            if self.drag_start_pos is None:
+                self.drag_start_pos = np.array([app_data[1], app_data[2]])
             else:
-                # Outlines for other components
-                thickness = 1
-                dpg.draw_triangle(p0, p1, p2, 
-                                color=(color[0], color[1], color[2], 50),
-                                thickness=thickness,
-                                fill=(color[0], color[1], color[2], 30),
-                                parent="Canvas")
-                dpg.draw_line(p0, p1, 
-                            color=(color[0], color[1], color[2], 255),
-                            thickness=thickness,
-                            parent="Canvas")
-                dpg.draw_line(p1, p2, 
-                            color=(color[0], color[1], color[2], 255),
-                            thickness=thickness,
-                            parent="Canvas")
-                dpg.draw_line(p2, p0, 
-                            color=(color[0], color[1], color[2], 255),
-                            thickness=thickness,
-                            parent="Canvas")
+                current_pos = np.array([app_data[1], app_data[2]])
+                delta = (current_pos - self.drag_start_pos) / self.scale
+                self.pan_offset += delta * np.array([1, -1])  # Invert y-axis
+                self.drag_start_pos = current_pos
+                self.draw_creature()
+                
+    def on_drag_end(self, sender, app_data):
+        self.drag_start_pos = None
         
-        # Draw coordinate axes for reference
-        self._draw_axes(view_matrix, proj_matrix, (viewport_width, viewport_height))
-    
-    def _render_solid_object(self, obj: SolidObject, view_matrix, proj_matrix, viewport_width, viewport_height):
-        """Renders a solid object to the canvas."""
-        for tri in obj.triangles:
-            v0 = obj.vertices[tri[0]]
-            v1 = obj.vertices[tri[1]]
-            v2 = obj.vertices[tri[2]]
-            
-            # Calculate normal for lighting
-            edge1 = v1 - v0
-            edge2 = v2 - v0
-            normal = normalize(cross(edge1, edge2))
-            
-            # Calculate lighting
-            light_intensity = self.ambient + self.diffuse * max(0, dot(normal, -self.light_dir))
-            color = obj.color * light_intensity
-            color = np.clip(color, 0, 255).astype(int)
-            
-            # Project vertices
-            p0 = project_point(v0, view_matrix, proj_matrix, (viewport_width, viewport_height))
-            p1 = project_point(v1, view_matrix, proj_matrix, (viewport_width, viewport_height))
-            p2 = project_point(v2, view_matrix, proj_matrix, (viewport_width, viewport_height))
-            
-            # Draw with solid fill
-            dpg.draw_triangle(p0, p1, p2, 
-                            color=(color[0], color[1], color[2], 255),
-                            fill=(color[0], color[1], color[2], 255),  # Changed from 100 to 255 for solid
-                            parent="Canvas")
-            
-    def _draw_axes(self, view_matrix, proj_matrix, viewport_size):
-        """Draws XYZ axes at the origin for reference."""
-        origin = np.array([0, 0, 0])
-        x_axis = np.array([1, 0, 0])
-        y_axis = np.array([0, 1, 0])
-        z_axis = np.array([0, 0, 1])
+    def on_mouse_wheel(self, sender, app_data):
+        # Zoom in/out based on mouse wheel
+        zoom_factor = 1.1 if app_data > 0 else 0.9
+        self.scale *= zoom_factor
+        self.scale = np.clip(self.scale, 10, 200)
+        dpg.set_value("Zoom", self.scale)
+        self.draw_creature()
         
-        o = project_point(origin, view_matrix, proj_matrix, viewport_size)
-        x = project_point(x_axis, view_matrix, proj_matrix, viewport_size)
-        y = project_point(y_axis, view_matrix, proj_matrix, viewport_size)
-        z = project_point(z_axis, view_matrix, proj_matrix, viewport_size)
+    def world_to_screen(self, pos):
+        """Convert world coordinates to screen coordinates"""
+        # Note: We're using X-Z plane for 2D side view (ignoring Y)
+        x = pos[0] * self.scale + self.offset[0] + self.pan_offset[0] * self.scale
+        y = -pos[2] * self.scale + self.offset[1] + self.pan_offset[1] * self.scale  # Invert Z for screen Y
+        return [x, y]
         
-        dpg.draw_line(o, x, color=(255, 0, 0, 255), thickness=2, parent="Canvas")
-        dpg.draw_line(o, y, color=(0, 255, 0, 255), thickness=2, parent="Canvas")
-        dpg.draw_line(o, z, color=(0, 0, 255, 255), thickness=2, parent="Canvas")
-    
+    def draw_creature(self):
+        """Draw the creature in 2D"""
+        dpg.delete_item("drawing_canvas", children_only=True)
+        
+        # Draw ground plane
+        ground_y = self.world_to_screen([0, 0, 0])[1]
+        dpg.draw_line([0, ground_y], [self.width, ground_y], 
+                      color=(150, 150, 150, 255), parent="drawing_canvas")
+        
+        # Draw bones as lines
+        for bone_id, bone_data in self.creature.bones.items():
+            start_pos = bone_data['pos']
+            # Calculate end position based on bone length and rotation
+            bone_dir = np.array([0, bone_data['bone'].length, 0])
+            rotated_dir = rotate_vector_by_euler(bone_dir, np.radians(bone_data['rotation']))
+            end_pos = start_pos + rotated_dir
+            
+            # Convert to screen coordinates
+            start_screen = self.world_to_screen(start_pos)
+            end_screen = self.world_to_screen(end_pos)
+            
+            # Draw bone
+            dpg.draw_line(start_screen, end_screen, 
+                          color=(255, 255, 255, 255), 
+                          thickness=bone_data['bone'].thickness * self.scale * 0.5,
+                          parent="drawing_canvas")
+            
+            # Draw bone endpoints (joints)
+            dpg.draw_circle(start_screen, radius=5, color=(0, 255, 0, 255),
+                           parent="drawing_canvas")
+            dpg.draw_circle(end_screen, radius=5, color=(0, 255, 0, 255),
+                           parent="drawing_canvas")
+            
+        # Draw muscles as colored lines
+        for muscle_id, muscle_data in self.creature.muscles.items():
+            if len(muscle_data['attachments']) < 2:
+                continue
+                
+            start_screen = self.world_to_screen(muscle_data['attachments'][0])
+            end_screen = self.world_to_screen(muscle_data['attachments'][1])
+            
+            # Color based on activation level
+            activation = muscle_data['muscle'].activation
+            color = (255, int(255 * (1 - activation)), int(255 * (1 - activation)), 255)
+            
+            dpg.draw_line(start_screen, end_screen, 
+                          color=color, 
+                          thickness=3,
+                          parent="drawing_canvas")
+        
+        # Draw creature position indicator
+        creature_pos_screen = self.world_to_screen([0, 0, 0])
+        dpg.draw_circle(creature_pos_screen, radius=3, color=(255, 0, 0, 255),
+                       parent="drawing_canvas")
+        
+        
+    def update(self, creature=None):
+        if creature is not None:
+            self.creature = creature
+        self.draw_creature()
+        
     def run(self):
-        """Main application loop."""
-        creature = self.create_simple_creature()
-        last_time = dpg.get_total_time()
-        
+        self.draw_creature()
         while dpg.is_dearpygui_running():
             current_time = dpg.get_total_time()
-            dt = current_time - last_time
-            last_time = current_time
-            
-            # Update camera position
-            self.update_camera(dt, creature)
-            
-            # Update creature (simple animation for demo)
-            excitation = (np.sin(current_time) + 1) / 2  # 0-1 oscillation
-            creature.step(0.016, {1: excitation})
-            
-            # Render
-            self.render_creature(creature)
+            #print(current_time)
             dpg.render_dearpygui_frame()
-        
         dpg.destroy_context()
+
+    def rotate_vector_by_euler(v, euler_angles):
+        """Rotate vector by euler angles (XYZ order)"""
+        rx, ry, rz = euler_angles
+        
+        # X rotation
+        x_rot = np.array([
+            [1, 0, 0],
+            [0, np.cos(rx), -np.sin(rx)],
+            [0, np.sin(rx), np.cos(rx)]
+        ])
+        
+        # Y rotation
+        y_rot = np.array([
+            [np.cos(ry), 0, np.sin(ry)],
+            [0, 1, 0],
+            [-np.sin(ry), 0, np.cos(ry)]
+        ])
+        
+        # Z rotation
+        z_rot = np.array([
+            [np.cos(rz), -np.sin(rz), 0],
+            [np.sin(rz), np.cos(rz), 0],
+            [0, 0, 1]
+        ])
+        
+        return z_rot @ y_rot @ x_rot @ v
 
 # Run the application
 if __name__ == "__main__":
-    renderer = CreatureRenderer()
-    renderer.setup_dpg()
-    renderer.run()
+    creature = Creature.generate_cat_creature()
+    viewer = CreatureViewer2D(creature)
+    viewer.run()
