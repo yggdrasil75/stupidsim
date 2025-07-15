@@ -740,7 +740,7 @@ class Creature:
     
 class CreatureRenderer:
     def __init__(self):
-        self.camera_pos = np.array([0, 0, -5])
+        self.camera_pos = np.array([0.0, 0.0, -5.0])
         self.camera_pitch = 0
         self.camera_yaw = 0
         self.fov = 60.0
@@ -755,6 +755,8 @@ class CreatureRenderer:
         # Control state
         self.mouse_dragging = False
         self.last_mouse_pos = (0, 0)
+        self.rotating = False
+        self.panning = False
         
     def create_simple_creature(self) -> Creature:
         creature = Creature.generate_random_creature()
@@ -765,7 +767,12 @@ class CreatureRenderer:
         dpg.create_context()
         dpg.create_viewport(title='Creature Renderer', width=800, height=600)
         
+        with dpg.theme() as no_scroll_theme:
+            with dpg.theme_component(dpg.mvAll):
+                dpg.add_theme_style(dpg.mvStyleVar_ScrollbarSize, 0)
+
         with dpg.window(tag="Primary Window"):
+            dpg.bind_theme(no_scroll_theme)
             with dpg.group(horizontal=True):
                 # Viewport for 3D rendering
                 with dpg.child_window(tag="Viewport", width=600, height=500):
@@ -820,27 +827,44 @@ class CreatureRenderer:
         self.fov = 60.0
     
     def _on_mouse_down(self):
-        self.mouse_dragging = True
+        if dpg.is_key_down(dpg.mvKey_LControl):
+            self.rotating = True
+        else:
+            self.panning = True
         self.last_mouse_pos = dpg.get_mouse_pos()
     
     def _on_mouse_release(self):
-        self.mouse_dragging = False
+        self.panning = False
+        self.rotating = False
     
     def _on_mouse_drag(self, sender, app_data):
-        if self.mouse_dragging:
-            current_mouse_pos = dpg.get_mouse_pos()
-            dx = current_mouse_pos[0] - self.last_mouse_pos[0]
-            dy = current_mouse_pos[1] - self.last_mouse_pos[1]
-            
+        current_mouse_pos = dpg.get_mouse_pos()
+        dx = current_mouse_pos[0] - self.last_mouse_pos[0]
+        dy = current_mouse_pos[1] - self.last_mouse_pos[1]
+        
+        if self.rotating:
+            # Rotate around creature center
             self.camera_yaw -= dx * 0.5
             self.camera_pitch -= dy * 0.5
             self.camera_pitch = np.clip(self.camera_pitch, -89, 89)
+        elif self.panning:
+            # Pan camera
+            right = np.array([np.cos(np.radians(self.camera_yaw)), 0, np.sin(np.radians(self.camera_yaw))])
+            up = np.array([0, 1, 0])
+            self.camera_pos += right * dx * 0.01
+            self.camera_pos += up * dy * -0.01
             
-            self.last_mouse_pos = current_mouse_pos
+        self.last_mouse_pos = current_mouse_pos
     
     def _on_mouse_wheel(self, sender, app_data):
-        # Zoom in/out
-        self.camera_pos[2] += app_data * 0.2
+        # Zoom in/out along view direction
+        forward = np.array([
+            np.sin(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch)),
+            np.sin(np.radians(self.camera_pitch)),
+            -np.cos(np.radians(self.camera_yaw)) * np.cos(np.radians(self.camera_pitch))
+        ])
+        self.camera_pos = self.camera_pos.astype(np.float64)
+        self.camera_pos += forward * app_data * 0.2
     
     def render_creature(self, creature: Creature):
         """Renders the creature in the viewport with distinct styles for each component."""
