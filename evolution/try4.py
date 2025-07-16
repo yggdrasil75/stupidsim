@@ -1236,31 +1236,62 @@ class CreatureViewer2D:
         self.creature = creature
         self.width = width
         self.height = height
-        self.scale = 50.0  # Pixels per meter
         self.offset = np.array([width/2, height/2])  # Center of view
         self.drag_start_pos = None
         self.pan_offset = np.array([0.0, 0.0])
         self.selected_component = None
+        self.scale = self.calculate_initial_scale()
         
         # Create DPG context and window
         #dpg.create_context()
         self.setup_ui()
         
+    def calculate_initial_scale(self):
+        """Calculate scale to make creature about half the size of the viewport"""
+        # Get all bone positions to determine creature size
+        positions = []
+        for bone_data in self.creature.bones.values():
+            positions.append(bone_data['pos'])
+            # Calculate end position based on bone length and rotation
+            bone_dir = np.array([0, bone_data['bone'].length, 0])
+            rotated_dir = rotate_vector_by_euler(bone_dir, np.radians(bone_data['rotation']))
+            end_pos = bone_data['pos'] + rotated_dir
+            positions.append(end_pos)
+            
+        if not positions:
+            return 50.0  # Default if no bones
+            
+        positions = np.array(positions)
+        # Use X and Z coordinates (ignoring Y for 2D view)
+        x_coords = positions[:, 0]
+        z_coords = positions[:, 2]
+        
+        # Calculate bounding box size in world coordinates
+        x_size = np.max(x_coords) - np.min(x_coords)
+        z_size = np.max(z_coords) - np.min(z_coords)
+        max_size = max(x_size, z_size)
+        
+        if max_size == 0:
+            return 50.0  # Prevent division by zero
+            
+        # Calculate scale so creature takes up about half the viewport
+        viewport_min_dimension = min(self.width, self.height)
+        return (viewport_min_dimension * 0.5) / max_size
+    
     def setup_ui(self):
         dpg.create_context()
         dpg.create_viewport(title='Creature Renderer', width=800, height=600)
         # Main window
-        with dpg.window(label="Main_Window"):
+        with dpg.window(label="Main_Window", width=self.width,height=self.height):
             # Add a drawing canvas
-            with dpg.drawlist(width=self.width-20, height=self.height-20, 
-                            tag="drawing_canvas"):
+            with dpg.drawlist(width=self.width-20, height=self.height-20, tag="drawing_canvas"):
                 pass
                 
             # Controls
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Reset View", callback=self.reset_view)
                 dpg.add_slider_float(label="Zoom", default_value=self.scale, 
-                                min_value=10, max_value=200, tag="zoom_slider",
+                                min_value=self.scale / 10, max_value=self.scale * 10, tag="zoom_slider",
                                 callback=self.update_scale)
                                 
         # Set mouse callbacks
