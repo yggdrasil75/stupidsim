@@ -312,30 +312,31 @@ class BlockRenderer:
         self.orbitRadius = dpg.get_value("orbitradius")
 
     def update_camera_position(self):
-        angle_step = self.orbitSpeed / 60
-        
+        angle_step = self.orbitSpeed / 60.0
+
         for i in range(3):
             if self.orbitEnable[i]:
                 self.orbitAngles[i] += angle_step
         
         xAngle, yAngle, zAngle = self.orbitAngles
-        
-        yAngle = np.clip(yAngle, -np.pi/2 + 0.01, np.pi/2 - 0.01)
+
+        yAngle = np.clip(yAngle, -np.pi / 2.0 + 1e-6, np.pi / 2.0 - 1e-6)
         self.orbitAngles[1] = yAngle
 
-        x = self.orbitRadius * np.cos(yAngle) * np.sin(xAngle)
-        y = self.orbitRadius * np.sin(yAngle)
-        z = self.orbitRadius * np.cos(yAngle) * np.cos(xAngle)
-        self.eye = torch.tensor([x, y, z], dtype=torch.float32, device=DEVICE)
+        eye_x = self.orbitRadius * np.cos(yAngle) * np.sin(xAngle)
+        eye_y = self.orbitRadius * np.sin(yAngle)
+        eye_z = self.orbitRadius * np.cos(yAngle) * np.cos(xAngle)
+        self.eye = torch.tensor([eye_x, eye_y, eye_z], dtype=torch.float32, device=DEVICE) + self.lookat
 
-        forward = (self.lookat - self.eye)
+        forward = self.lookat - self.eye
         forward = forward / torch.norm(forward)
 
-        world_up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)
+        up_x_dir = -np.sin(yAngle) * np.sin(xAngle)
+        up_y_dir = np.cos(yAngle)
+        up_z_dir = -np.sin(yAngle) * np.cos(xAngle)
+        up_unrolled = torch.tensor([up_x_dir, up_y_dir, up_z_dir], dtype=torch.float32, device=DEVICE)
 
-        right = torch.linalg.cross(forward, world_up)
-        if torch.norm(right) < 1e-6:
-            right = torch.linalg.cross(forward, torch.tensor([0.0, 0.0, -1.0], device=DEVICE))
+        right = torch.linalg.cross(forward, up_unrolled)
         right = right / torch.norm(right)
         
         true_up = torch.linalg.cross(right, forward)
@@ -391,27 +392,6 @@ class BlockRenderer:
                     fill=triangle['color']
                 )
         
-    def _draw_blocks(self):
-        for block in self.blocks:
-            # Convert vertices to CPU numpy if they're on GPU
-            vertices = block.vertices.cpu().numpy() if block.vertices.is_cuda else block.vertices.numpy()
-            color = block.color.cpu().numpy() if block.color.is_cuda else block.color.numpy()
-            
-            # Normalize color to 0-1 range
-            normalized_color = (color / 255.0).tolist()
-            
-            # Draw each triangle
-            for tri in block.tris:
-                v0 = vertices[tri[0]]
-                v1 = vertices[tri[1]]
-                v2 = vertices[tri[2]]
-                
-                dpg.draw_triangle([v0[0], v0[1], v0[2]],[v1[0], v1[1], v1[2]],[v2[0], v2[1], v2[2]],color=normalized_color,fill=normalized_color)
-
-
 if __name__ == "__main__":
     renderer = BlockRenderer()
-    renderer._draw_blocks = renderer.render_frame
-    
-    # Render
     renderer.render()
