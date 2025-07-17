@@ -7,11 +7,6 @@ from dataclasses import dataclass, field
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-class ProjectionType(Enum):
-    PERSPECTIVE = 0
-    ISOMETRIC = 1
-    CABINET = 2
-
 @dataclass
 class block:
     id: int
@@ -179,9 +174,8 @@ class block:
         # Create the block
         return cls(id=id, vertices=vertices, tris=tris)
 
-    def project_2d(self, eye: torch.Tensor, lookat: torch.Tensor, projection_type: ProjectionType = ProjectionType.PERSPECTIVE,
-                    fov: float = 90, res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000,
-                    cabinet_angle: float = 45, cabinet_scale: float = 0.5) -> tuple[torch.Tensor, list[tuple[int, int, int]]]:
+    def project_2d(self, eye: torch.Tensor, lookat: torch.Tensor, fov: float = 90,
+                    res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000,) -> tuple[torch.Tensor, list[tuple[int, int, int]]]:
         up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)
         zAxis = lookat - eye
         zAxis = zAxis / torch.norm(zAxis)
@@ -200,72 +194,23 @@ class block:
 
         aspectRatio = res[0] / res[1]
 
-        if projection_type == ProjectionType.PERSPECTIVE:
-            # Perspective projection
-            fovRad = np.radians(fov)
-            tanhalf = np.tan(fovRad / 2.0)
-            f = 1.0 / tanhalf
+        # Perspective projection
+        fovRad = np.radians(fov)
+        tanhalf = np.tan(fovRad / 2.0)
+        f = 1.0 / tanhalf
 
-            projMatrix = torch.zeros((4,4), dtype=torch.float32, device=DEVICE)
-            projMatrix[0,0] = 1 / (aspectRatio * tanhalf)
-            projMatrix[1,1] = f
-            projMatrix[2,2] = (far + near) / (near - far)
-            projMatrix[2,3] = (-2 * far * near) / (near - far)
-            projMatrix[3,2] = -1.0
-            
-        elif projection_type == ProjectionType.ISOMETRIC:
-            # Isometric projection
-            # Remove perspective, equal scale on all axes
-            scale = 100  # Adjust this to control the zoom level
-            projMatrix = torch.zeros((4,4), dtype=torch.float32, device=DEVICE)
-            projMatrix[0,0] = scale / aspectRatio
-            projMatrix[1,1] = scale
-            projMatrix[2,2] = 0
-            projMatrix[3,3] = 1
-            
-            # Apply isometric rotation (35.264° around X, 45° around Y)
-            angle_x = np.radians(35.264)
-            angle_y = np.radians(45)
-            
-            rot_x = torch.eye(4, dtype=torch.float32, device=DEVICE)
-            rot_x[1,1] = np.cos(angle_x)
-            rot_x[1,2] = -np.sin(angle_x)
-            rot_x[2,1] = np.sin(angle_x)
-            rot_x[2,2] = np.cos(angle_x)
-            
-            rot_y = torch.eye(4, dtype=torch.float32, device=DEVICE)
-            rot_y[0,0] = np.cos(angle_y)
-            rot_y[0,2] = np.sin(angle_y)
-            rot_y[2,0] = -np.sin(angle_y)
-            rot_y[2,2] = np.cos(angle_y)
-            
-            projMatrix = torch.matmul(projMatrix, torch.matmul(rot_x, rot_y))
-            
-        elif projection_type == ProjectionType.CABINET:
-            # Cabinet projection (oblique)
-            angle_rad = np.radians(cabinet_angle)
-            scale = 100
-            projMatrix = torch.zeros((4,4), dtype=torch.float32, device=DEVICE)
-            projMatrix[0,0] = scale / aspectRatio
-            projMatrix[1,1] = scale
-            projMatrix[2,2] = 0
-            projMatrix[3,3] = 1
-            
-            # Apply oblique shear
-            shear = torch.eye(4, dtype=torch.float32, device=DEVICE)
-            shear[0,2] = -cabinet_scale * np.cos(angle_rad)
-            shear[1,2] = -cabinet_scale * np.sin(angle_rad)
-            
-            projMatrix = torch.matmul(projMatrix, shear)
-            
-        else:
-            raise ValueError(f"Unknown projection type: {projection_type}")
+        projMatrix = torch.zeros((4,4), dtype=torch.float32, device=DEVICE)
+        projMatrix[0,0] = 1 / (aspectRatio * tanhalf)
+        projMatrix[1,1] = f
+        projMatrix[2,2] = (far + near) / (near - far)
+        projMatrix[2,3] = (-2 * far * near) / (near - far)
+        projMatrix[3,2] = -1.0
+        
 
         homogenousVerts = torch.cat([self.vertices, torch.ones((self.vertices.shape[0], 1), dtype=torch.float32, device=DEVICE)], dim=1)
         viewProjMatrix = torch.matmul(projMatrix, viewMatrix)
         projVerts = torch.matmul(homogenousVerts, viewProjMatrix.T)
-        if projection_type == ProjectionType.PERSPECTIVE:
-            projVerts = projVerts / projVerts[:, 3].unsqueeze(1)
+        projVerts = projVerts / projVerts[:, 3].unsqueeze(1)
         screenVerts = torch.empty_like(projVerts[:, :2], dtype=torch.float32, device=DEVICE)
         screenVerts[:, 0] = (projVerts[:, 0] + 1) * 0.5 * res[0]
         screenVerts[:, 1] = (1 - (projVerts[:, 1] + 1) * 0.5) * res[1]
@@ -333,7 +278,6 @@ class BlockRenderer:
                 screen_verts, visible_tris = block.project_2d(
                     eye=self.eye,
                     lookat=self.lookat,
-                    projection_type=ProjectionType.PERSPECTIVE,
                     res=(800, 600),
                     near=0.1,
                     far=10000
