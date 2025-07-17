@@ -126,6 +126,16 @@ class block:
         return tris
 
     @classmethod
+    def subdivide_tri(cls, vertices: torch.Tensor, tri: list[tuple[int,int,int]]):
+        #TODO: each tri becomes 3 tris, 
+        pass
+
+    @classmethod
+    def subdivide_quad(cls, vertices: torch.Tensor, quad: list[tuple[int,int,int]]):
+        #TODO: each quad becomes 4 quads, each edge is split at the midpoint, and a centerpoint for the quad is used as well. 4 vertices become 9.
+        pass
+
+    @classmethod
     def create_ground(cls, id: int, size: float = sys.float_info.max, height: float = 1):
         vertices = torch.tensor([
             [-size, -height, -size],
