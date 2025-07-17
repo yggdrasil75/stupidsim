@@ -1,4 +1,5 @@
 from enum import Enum
+import time
 import dearpygui.dearpygui as dpg
 import sys
 import numpy as np
@@ -175,20 +176,21 @@ class block:
         return cls(id=id, vertices=vertices, tris=tris)
 
     def project_2d(self, eye: torch.Tensor, lookat: torch.Tensor, fov: float = 90,
-                    res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000,) -> tuple[torch.Tensor, list[tuple[int, int, int]]]:
+                    res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
+            -> tuple[torch.Tensor, list[tuple[int, int, int]], torch.Tensor]:
         up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)
-        zAxis = lookat - eye
+
+        zAxis: torch.Tensor = lookat - eye
         zAxis = zAxis / torch.norm(zAxis)
-        xAxis = torch.linalg.cross(up, zAxis)
+        xAxis: torch.Tensor = torch.linalg.cross(up, zAxis)
         xAxis = xAxis / torch.norm(xAxis)
-        yAxis = torch.linalg.cross(zAxis, xAxis)
+        yAxis: torch.Tensor = torch.linalg.cross(zAxis, xAxis)
         yAxis = yAxis / torch.norm(yAxis)
 
         viewMatrix = torch.eye(4, dtype=torch.float32, device=DEVICE)
         viewMatrix[:3, 0] = xAxis
         viewMatrix[:3, 1] = yAxis
-        viewMatrix[:3, 2] = zAxis
-        #viewMatrix[:3, 3] = torch.matmul(viewMatrix[:3, :3], eye)
+        viewMatrix[:3, 2] = -zAxis
         viewMatrix[:3, 3] = eye
         viewMatrix = torch.inverse(viewMatrix)
 
@@ -200,9 +202,9 @@ class block:
         f = 1.0 / tanhalf
 
         projMatrix = torch.zeros((4,4), dtype=torch.float32, device=DEVICE)
-        projMatrix[0,0] = 1 / (aspectRatio * tanhalf)
+        projMatrix[0,0] = 1.0 / (aspectRatio * tanhalf)
         projMatrix[1,1] = f
-        projMatrix[2,2] = (far + near) / (near - far)
+        projMatrix[2,2] = -(far + near) / (near - far)
         projMatrix[2,3] = (-2 * far * near) / (near - far)
         projMatrix[3,2] = -1.0
         
@@ -215,6 +217,16 @@ class block:
         screenVerts[:, 0] = (projVerts[:, 0] + 1) * 0.5 * res[0]
         screenVerts[:, 1] = (1 - (projVerts[:, 1] + 1) * 0.5) * res[1]
 
+        # viewVerts = torch.matmul(homogenousVerts, viewMatrix.T)[:, :3]
+        # visibleTris: list[tuple[int,int,int]] = []
+        # for tri in self.tris:
+        #     v0, v1, v2 = viewVerts[tri[0]], viewVerts[tri[1]], viewVerts[tri[2]]
+        #     normal = torch.linalg.cross(v1 - v0, v2 - v0)
+        #     normal = normal / torch.norm(normal)
+        #     if torch.dot(normal, v0 - eye) < 0:
+        #         visibleTris.append(tri)
+        # return screenVerts, visibleTris
+
         viewVerts = torch.matmul(homogenousVerts, viewMatrix.T)[:, :3]
         visibleTris: list[tuple[int,int,int]] = []
         for tri in self.tris:
@@ -223,17 +235,24 @@ class block:
             normal = normal / torch.norm(normal)
             if torch.dot(normal, v0 - eye) < 0:
                 visibleTris.append(tri)
-        return screenVerts, visibleTris
-
+        
+        # Calculate average depth for each visible triangle
+        depths = torch.zeros(len(visibleTris), dtype=torch.float32, device=DEVICE)
+        for i, tri in enumerate(visibleTris):
+            depths[i] = torch.mean(viewVerts[tri, 2])  # Average Z depth in view space
+        
+        return screenVerts, visibleTris, depths
 
 class BlockRenderer:
     def __init__(self):
         self.blocks: list[block] = []
         self.eye = torch.tensor([5.0, 5.0, 5.0], dtype=torch.float32, device=DEVICE)
         self.lookat = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=DEVICE)
+        self.currentResolution: tuple[int,int] = (800,600)
 
         self.currentID = 0
         ground = block.create_ground(id=self.idCounter())
+        ground.color = torch.tensor([0, 200, 0], dtype=torch.uint8, device=DEVICE)
         sphere1 = block.create_sphere(id=self.idCounter(), radius=1.0, subdivisions=3)
         sphere1.vertices[:, 1] += 1.0
         sphere1.vertices[:, 0] += 1.5
@@ -246,6 +265,15 @@ class BlockRenderer:
         self.add_block(ground)
         self.add_block(sphere1)
         self.add_block(sphere2)
+
+        self.orbitSpeed = 0.5
+        self.orbitRadius = 8.0
+        self.orbitAngles = [0.0,0.0,0.0]
+        self.orbitEnable = [False,False,False]
+        
+        self.target_fps = 60
+        self.frame_time_target = 1.0 / self.target_fps
+        self.last_frame_time = time.time()
 
     def idCounter(self):
         self.currentID += 1
@@ -262,23 +290,86 @@ class BlockRenderer:
             with dpg.drawlist(width=800, height=600, tag="drawlist"):
                 pass
         
+        with dpg.window(label="cameraControls", width=300,height=200):
+            dpg.add_text('Orbit Controls')
+            dpg.add_checkbox(label='Orbit X', tag="orbit_x", callback=lambda: self.toggle_orbit(0))
+            dpg.add_checkbox(label='Orbit Y', tag="orbit_y", callback=lambda: self.toggle_orbit(1))
+            dpg.add_checkbox(label='Orbit Z', tag="orbit_z", callback=lambda: self.toggle_orbit(2))
+            dpg.add_slider_float(label="Orbit Speed", tag="orbitspeed", min_value=0.1, max_value=2.0, default_value=0.5, callback=lambda: self.update_orbit_speed())
+            dpg.add_slider_float(label="Orbit Radius", tag="orbitradius", min_value=1.0, max_value=20.0, default_value=8.0, callback=lambda: self.update_orbit_radius())
+
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("mainView", True)
+        dpg.set_viewport_resize_callback(callback=self._on_resize)
         while dpg.is_dearpygui_running():
-            self.render_frame()
-            dpg.render_dearpygui_frame()
+            current_time = time.time()
+            elapsed = current_time - self.last_frame_time
+            self.update_camera_position()
+            if elapsed >= self.frame_time_target:
+                self.update_camera_position()
+                self.render_frame()
+                dpg.render_dearpygui_frame()
+                frame_time = time.time() - current_time
+                sleep_time = max(0, self.frame_time_target - frame_time)
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                self.last_frame_time = current_time
+            else:
+                dpg.render_dearpygui_frame()
         #dpg.start_dearpygui()
         dpg.destroy_context()
         
+    def toggle_orbit(self, axis):
+        self.orbitEnable[axis] = not self.orbitEnable[axis]
+
+    def update_orbit_speed(self):
+        self.orbit_speed = dpg.get_value("orbit_speed")
+
+    def update_orbit_radius(self):
+        self.orbit_radius = dpg.get_value("orbit_radius")
+
+    def update_camera_position(self):
+        # Fixed angle increment per frame (simulating 60 FPS)
+        angle_step = self.orbitSpeed / 60.0  # Normalized to 60 FPS
+        
+        # Update angles for enabled axes
+        for i in range(3):
+            if self.orbitEnable[i]:
+                self.orbitAngles[i] += angle_step
+        
+        # Extract angles
+        x_angle, y_angle, z_angle = self.orbitAngles
+        
+        # Base spherical coordinates (X/Y rotation)
+        x = self.orbitRadius * np.cos(y_angle) * np.sin(x_angle)
+        y = self.orbitRadius * np.sin(y_angle)
+        z = self.orbitRadius * np.cos(y_angle) * np.cos(x_angle)
+        
+        # Apply Z-axis rotation (camera roll)
+        if self.orbitEnable[2]:
+            rot_x = np.cos(z_angle) * x - np.sin(z_angle) * y
+            rot_y = np.sin(z_angle) * x + np.cos(z_angle) * y
+            x, y = rot_x, rot_y
+        
+        self.eye = torch.tensor([x, y, z], dtype=torch.float32, device=DEVICE)
+
+    def _on_resize(self):
+        windowWidth = dpg.get_item_width("mainView")
+        windowHeight = dpg.get_item_height("mainView")
+        dpg.configure_item("drawlist", width=windowWidth, height=windowHeight)
+        self.currentResolution = (windowWidth, windowHeight)
+
     def render_frame(self):
         dpg.delete_item("drawlist", children_only=True)
+        triangles_to_draw = []
+
         with dpg.draw_node(parent="drawlist"):
             for block in self.blocks:
-                screen_verts, visible_tris = block.project_2d(
+                screen_verts, visible_tris, depths = block.project_2d(
                     eye=self.eye,
                     lookat=self.lookat,
-                    res=(800, 600),
+                    res=self.currentResolution,
                     near=0.1,
                     far=10000
                 )
@@ -287,20 +378,36 @@ class BlockRenderer:
                 screen_verts = screen_verts.cpu().numpy() if screen_verts.is_cuda else screen_verts.numpy()
                 color = block.color.cpu().numpy() if block.color.is_cuda else block.color.numpy()
                 normalized_color = color.tolist()
+                depths = depths.cpu().numpy() if depths.is_cuda else depths.numpy()
                 
                 # Draw each visible triangle
-                for tri in visible_tris:
+                for i, tri in enumerate(visible_tris):
                     v0 = screen_verts[tri[0]]
                     v1 = screen_verts[tri[1]]
                     v2 = screen_verts[tri[2]]
                     
-                    dpg.draw_triangle(
-                        [v0[0], v0[1]],
-                        [v1[0], v1[1]],
-                        [v2[0], v2[1]],
-                        color=normalized_color,
-                        fill=normalized_color
-                    )
+                    triangles_to_draw.append({
+                        'points': [(v0[0], v0[1]), (v1[0], v1[1]), (v2[0], v2[1])],
+                        'color': normalized_color,
+                        'depth': depths[i]
+                    })
+                    # dpg.draw_triangle(
+                    #     [v0[0], v0[1]],
+                    #     [v1[0], v1[1]],
+                    #     [v2[0], v2[1]],
+                    #     color=normalized_color,
+                    #     fill=normalized_color,
+                    # )
+            triangles_to_draw.sort(key=lambda x: -x['depth'])
+  
+        # Draw all triangles in sorted order
+        with dpg.draw_node(parent="drawlist"):
+            for triangle in triangles_to_draw:
+                dpg.draw_triangle(
+                    *triangle['points'],
+                    color=triangle['color'],
+                    fill=triangle['color']
+                )
         
     def _draw_blocks(self):
         for block in self.blocks:
@@ -322,10 +429,6 @@ class BlockRenderer:
 
 if __name__ == "__main__":
     renderer = BlockRenderer()
-        
-    # Modify the render method to use this camera
-    
-    # Update the renderer to use our new render method
     renderer._draw_blocks = renderer.render_frame
     
     # Render
