@@ -8,12 +8,76 @@ from dataclasses import dataclass, field
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Helper function to create a rotation matrix to align one vector with another
+def get_rotation_matrix(v_from, v_to):
+    v_from = v_from / torch.norm(v_from)
+    v_to = v_to / torch.norm(v_to)
+    
+    axis = torch.linalg.cross(v_from, v_to)
+    axis_norm = torch.norm(axis)
+    
+    # If vectors are parallel, no rotation is needed
+    if axis_norm < 1e-8:
+        # Check if they are pointing in opposite directions
+        if torch.dot(v_from, v_to) < -0.9999:
+            # Return 180 degree rotation around an arbitrary orthogonal axis
+            # Find an arbitrary vector not parallel to v_from
+            if torch.abs(v_from[0]) < 0.9:
+                ortho = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=DEVICE)
+            else:
+                ortho = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)
+            axis = torch.linalg.cross(v_from, ortho)
+            axis = axis / torch.norm(axis)
+            cos_a = -1.0
+            sin_a = 0.0
+        else: # pointing in the same direction
+            return torch.eye(3, dtype=torch.float32, device=DEVICE)
+    else:
+        axis = axis / axis_norm
+        cos_a = torch.dot(v_from, v_to)
+        sin_a = torch.sqrt(1.0 - cos_a * cos_a)
+
+    # Rodrigues' rotation formula
+    I = torch.eye(3, dtype=torch.float32, device=DEVICE)
+    K = torch.tensor([[0, -axis[2], axis[1]],[axis[2], 0, -axis[0]],[-axis[1], axis[0], 0]], dtype=torch.float32, device=DEVICE)
+    
+    return I + sin_a * K + (1 - cos_a) * torch.matmul(K, K)
+
+
 @dataclass
 class block:
     id: int
     vertices: torch.Tensor
     tris: list[tuple[int,int,int]]
-    color: torch.Tensor = field(default_factory=lambda: torch.tensor([200,0,0], dtype=torch.uint8, device=DEVICE))
+    # Updated color to include alpha channel for transparency
+    color: torch.Tensor = field(default_factory=lambda: torch.tensor([200,0,0,255], dtype=torch.uint8, device=DEVICE))
+
+    @classmethod
+    def _orient_and_translate_mesh(cls, vertices, start_point, end_point, default_axis=torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)):
+        """Helper to orient a mesh along the vector from start_point to end_point."""
+        direction = end_point - start_point
+        length = torch.norm(direction)
+        if length == 0:
+            return vertices + start_point
+
+        target_direction = direction / length
+        
+        # Scale the mesh to the correct length
+        min_y = torch.min(vertices[:, 1])
+        max_y = torch.max(vertices[:, 1])
+        mesh_height = max_y - min_y
+        scale_factor = length / mesh_height if mesh_height > 0 else 1.0
+        
+        # Center the mesh before scaling and rotating
+        center_offset = torch.tensor([0, (max_y + min_y) / 2, 0], dtype=torch.float32, device=DEVICE)
+        scaled_vertices = (vertices - center_offset) * torch.tensor([1.0, scale_factor, 1.0], dtype=torch.float32, device=DEVICE)
+
+        rot_matrix = get_rotation_matrix(default_axis, target_direction)
+        rotated_vertices = torch.matmul(scaled_vertices, rot_matrix.T)
+        
+        # Translate to the midpoint of the start and end points
+        midpoint = (start_point + end_point) / 2
+        return rotated_vertices + midpoint
 
     @classmethod
     def create_ground(cls, id: int, size: float = sys.float_info.max, height: float = 1):
@@ -29,11 +93,14 @@ class block:
         ], dtype=torch.float32, device=DEVICE)
         tris = [(0,1,2), (0,2,3), (4,6,5),(4,7,6), (3,2,6),(3,6,7), (0,5,1),(0,4,5), (0,3,7),(0,7,4), (1,5,6),(1,6,2)]
         cl = cls(id=id, vertices=vertices, tris=tris)
-        cl.color = torch.tensor([0,200,0], dtype=torch.uint8, device=DEVICE)
+        cl.color = torch.tensor([0,200,0,255], dtype=torch.uint8, device=DEVICE)
         return cl
 
     @classmethod
-    def create_sphere(cls, id: int, radius: float = 1.0, subdivisions: int = 3):
+    def create_sphere(cls, id: int, radius: float = 1.0, subdivisions: int = 3, center: torch.Tensor = None):
+        if center is None:
+            center = torch.zeros(3, device=DEVICE)
+            
         vertices = torch.tensor([
             [-1, -1, -1],
             [1, -1, -1],
@@ -44,7 +111,7 @@ class block:
             [1, 1, 1],
             [-1, 1, 1]
         ], dtype=torch.float32, device=DEVICE)
-        
+
         tris = [
             (0, 1, 2), (0, 2, 3),
             (4, 6, 5), (4, 7, 6),
@@ -85,7 +152,7 @@ class block:
             vertices, tris = subdivide(vertices, tris)
         
         norms = torch.norm(vertices, dim=1, keepdim=True)
-        vertices = vertices / norms * radius
+        vertices = vertices / norms * radius + center
         return cls(id=id, vertices=vertices, tris=tris)
 
     @classmethod
@@ -168,6 +235,198 @@ class block:
         
         # Create the block
         return cls(id=id, vertices=vertices, tris=tris)
+    
+    @classmethod
+    def _create_cylinder_mesh(cls, radius: float, height: float, radial_segments: int):
+        """Creates a cylinder mesh along the Y-axis."""
+        vertices = []
+        tris = []
+        
+        # Top and bottom center vertices
+        bottom_center_idx = 0
+        top_center_idx = 1
+        vertices.append(torch.tensor([0, -height/2, 0], dtype=torch.float32, device=DEVICE))
+        vertices.append(torch.tensor([0,  height/2, 0], dtype=torch.float32, device=DEVICE))
+
+        # Create bottom and top rings
+        for i in range(radial_segments):
+            angle = 2 * np.pi * i / radial_segments
+            x, z = radius * np.cos(angle), radius * np.sin(angle)
+            vertices.append(torch.tensor([x, -height/2, z], dtype=torch.float32, device=DEVICE)) # Bottom ring
+            vertices.append(torch.tensor([x,  height/2, z], dtype=torch.float32, device=DEVICE)) # Top ring
+
+        # Create tris for bottom and top caps and sides
+        for i in range(radial_segments):
+            b_idx = 2 + i * 2
+            t_idx = 3 + i * 2
+            b_next_idx = 2 + ((i + 1) % radial_segments) * 2
+            t_next_idx = 3 + ((i + 1) % radial_segments) * 2
+
+            # Bottom cap
+            tris.append((bottom_center_idx, b_next_idx, b_idx))
+            # Top cap
+            tris.append((top_center_idx, t_idx, t_next_idx))
+            # Sides
+            tris.append((b_idx, b_next_idx, t_idx))
+            tris.append((b_next_idx, t_next_idx, t_idx))
+
+        return torch.stack(vertices), tris
+
+    @classmethod
+    def create_bone(cls, id: int, start_point: torch.Tensor, end_point: torch.Tensor, radius: float = 0.2):
+        """Creates a bone shape (cylinder with spherical ends) between two points."""
+        length = torch.norm(end_point - start_point)
+        if length == 0: return cls(id=id, vertices=torch.empty(0,3, dtype=torch.float32, device=DEVICE), tris=[])
+
+        # 1. Create cylinder part
+        cyl_verts, cyl_tris = cls._create_cylinder_mesh(radius, length, radial_segments=12)
+
+        # 2. Create sphere caps
+        sphere1 = cls.create_sphere(id=-1, radius=radius, subdivisions=2)
+        sphere2 = cls.create_sphere(id=-1, radius=radius, subdivisions=2)
+
+        # Move sphere caps to the ends of the cylinder
+        sphere1.vertices += torch.tensor([0, -length/2, 0], dtype=torch.float32, device=DEVICE)
+        sphere2.vertices += torch.tensor([0, length/2, 0], dtype=torch.float32, device=DEVICE)
+
+        # 3. Combine meshes
+        num_cyl_verts = len(cyl_verts)
+        num_s1_verts = len(sphere1.vertices)
+
+        s1_tris_offset = [(v[0] + num_cyl_verts, v[1] + num_cyl_verts, v[2] + num_cyl_verts) for v in sphere1.tris]
+        s2_tris_offset = [(v[0] + num_cyl_verts + num_s1_verts, v[1] + num_cyl_verts + num_s1_verts, v[2] + num_cyl_verts + num_s1_verts) for v in sphere2.tris]
+
+        all_vertices = torch.cat([cyl_verts, sphere1.vertices, sphere2.vertices], dim=0)
+        all_tris = cyl_tris + s1_tris_offset + s2_tris_offset
+
+        # 4. Orient and translate the final mesh
+        final_vertices = cls._orient_and_translate_mesh(all_vertices, start_point, end_point)
+        
+        bone = cls(id=id, vertices=final_vertices, tris=all_tris)
+        bone.color = torch.tensor([230, 230, 210, 255], dtype=torch.uint8, device=DEVICE)
+        return bone
+
+    @classmethod
+    def create_joint(cls, id: int, center: torch.Tensor, radius: float, angle_limit_deg: float = 45.0):
+        """Creates a joint visualization: a central transparent sphere with two cones."""
+        # 1. Central transparent sphere
+        joint_sphere = cls.create_sphere(id=-1, radius=radius, subdivisions=2, center=center)
+        
+        # 2. Cones for angle visualization
+        cone_height = radius * 2
+        cone_radius = cone_height * np.tan(np.radians(angle_limit_deg))
+        cone_verts, cone_tris = cls._create_cylinder_mesh(cone_radius, cone_height, radial_segments=16)
+        
+        # Make it a cone by squashing one end
+        cone_verts[1] = cone_verts[0] # Top center vertex is now the same as bottom center
+        for i in range(16):
+            cone_verts[3 + i * 2] = cone_verts[0] # Top ring vertices are now the same as bottom center
+
+        cone1_verts = cone_verts.clone()
+        cone2_verts = cone_verts.clone()
+        
+        # Orient and place cones
+        cone1_verts = cls._orient_and_translate_mesh(
+            cone1_verts, center, center + torch.tensor([cone_height,0,0], dtype=torch.float32, device=DEVICE) * 0.75
+        )
+        cone2_verts = cls._orient_and_translate_mesh(
+            cone2_verts, center, center + torch.tensor([-cone_height,0,0], dtype=torch.float32, device=DEVICE) * 0.75
+        )
+        
+        # 3. Combine all meshes
+        num_sphere_verts = len(joint_sphere.vertices)
+        num_cone1_verts = len(cone1_verts)
+        
+        cone1_tris_offset = [(v[0] + num_sphere_verts, v[1] + num_sphere_verts, v[2] + num_sphere_verts) for v in cone_tris]
+        cone2_tris_offset = [(v[0] + num_sphere_verts + num_cone1_verts, v[1] + num_sphere_verts + num_cone1_verts, v[2] + num_sphere_verts + num_cone1_verts) for v in cone_tris]
+        
+        all_vertices = torch.cat([joint_sphere.vertices, cone1_verts, cone2_verts], dim=0)
+        all_tris = joint_sphere.tris + cone1_tris_offset + cone2_tris_offset
+        
+        joint = cls(id=id, vertices=all_vertices, tris=all_tris)
+        joint.color = torch.tensor([150, 150, 255, 100], dtype=torch.uint8, device=DEVICE) # Semi-transparent blue
+        return joint
+
+    @classmethod
+    def create_node(cls, id: int, center: torch.Tensor, radii: torch.Tensor):
+        """Creates a transparent ovular/ellipsoid shape."""
+        # Start with a unit sphere
+        node_sphere = cls.create_sphere(id=-1, radius=1.0, subdivisions=3)
+        
+        # Scale vertices to form an ellipsoid and translate to center
+        node_sphere.vertices = node_sphere.vertices * radii + center
+        
+        node = cls(id=id, vertices=node_sphere.vertices, tris=node_sphere.tris)
+        node.color = torch.tensor([100, 200, 250, 120], dtype=torch.uint8, device=DEVICE) # Light blue, transparent
+        return node
+        
+    @classmethod
+    def create_muscle(cls, id: int, start_point: torch.Tensor, end_point: torch.Tensor, max_radius: float = 0.15, activation: float = 0.0):
+        """Creates a spindle-shaped muscle that can change color with activation."""
+        length = torch.norm(end_point - start_point)
+        if length == 0: return cls(id=id, vertices=torch.empty(0,3, device=DEVICE), tris=[])
+
+        num_segments = 12
+        radial_segments = 10
+        vertices = []
+        tris = []
+
+        # Create vertex rings along the muscle length (Y-axis)
+        for i in range(num_segments + 1):
+            t = i / num_segments
+            # Spindle shape using a sine wave
+            current_radius = max_radius * np.sin(np.pi * t)
+            y = (t - 0.5) * length
+
+            if i == 0 or i == num_segments: # Tip points
+                vertices.append(torch.tensor([0, y, 0], dtype=torch.float32, device=DEVICE))
+                continue
+            
+            for j in range(radial_segments):
+                angle = 2 * np.pi * j / radial_segments
+                x = current_radius * np.cos(angle)
+                z = current_radius * np.sin(angle)
+                vertices.append(torch.tensor([x, y, z], dtype=torch.float32, device=DEVICE))
+
+        # Create tris
+        # Connect first ring to start tip
+        start_tip_idx = 0
+        for j in range(radial_segments):
+            v1 = 1 + j
+            v2 = 1 + (j + 1) % radial_segments
+            tris.append((start_tip_idx, v2, v1))
+        
+        # Connect middle rings
+        for i in range(num_segments - 2):
+            ring_start_idx = 1 + i * radial_segments
+            next_ring_start_idx = 1 + (i + 1) * radial_segments
+            for j in range(radial_segments):
+                v1 = ring_start_idx + j
+                v2 = ring_start_idx + (j + 1) % radial_segments
+                v3 = next_ring_start_idx + j
+                v4 = next_ring_start_idx + (j + 1) % radial_segments
+                tris.append((v1, v2, v3))
+                tris.append((v2, v4, v3))
+
+        # Connect last ring to end tip
+        end_tip_idx = len(vertices) - 1
+        last_ring_start_idx = 1 + (num_segments - 2) * radial_segments
+        for j in range(radial_segments):
+            v1 = last_ring_start_idx + j
+            v2 = last_ring_start_idx + (j + 1) % radial_segments
+            tris.append((end_tip_idx, v1, v2))
+        
+        all_vertices = torch.stack(vertices)
+        final_vertices = cls._orient_and_translate_mesh(all_vertices, start_point, end_point)
+
+        muscle = cls(id=id, vertices=final_vertices, tris=tris)
+        
+        # Color based on activation (lerp between blue/relaxed and red/contracted)
+        red = int(200 * activation + 50 * (1 - activation))
+        blue = int(50 * activation + 200 * (1 - activation))
+        muscle.color = torch.tensor([red, 80, blue, 255], dtype=torch.uint8, device=DEVICE)
+        return muscle
+
 
     def project_2d(self, eye: torch.Tensor, lookat: torch.Tensor, up: torch.Tensor, fov: float = 90,
                     res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
@@ -239,19 +498,33 @@ class BlockRenderer:
         self.orbitEnable = [False, False, False]
         
         ground = block.create_ground(id=self.idCounter())
-        ground.color = torch.tensor([0, 200, 0], dtype=torch.uint8, device=DEVICE)
-        sphere1 = block.create_sphere(id=self.idCounter(), radius=1.0, subdivisions=3)
-        sphere1.vertices[:, 1] += 1.0
-        sphere1.vertices[:, 0] += 1.5
-        sphere1.color = torch.tensor([200, 0, 0], dtype=torch.uint8, device=DEVICE)
-        sphere2 = block.create_sphere(id=self.idCounter(), radius=1.0, subdivisions=3)
-        sphere2.vertices[:, 1] += 1.0
-        sphere2.vertices[:, 0] -= 1.5
-        sphere2.color = torch.tensor([0, 0, 200], dtype=torch.uint8, device=DEVICE)
-
         self.add_block(ground)
-        self.add_block(sphere1)
-        self.add_block(sphere2)
+
+        # A simple articulated "leg"
+        hip_joint = block.create_joint(id=self.idCounter(), center=torch.tensor([0, 2.5, 0], dtype=torch.float32, device=DEVICE), radius=0.3)
+        bone1_start = torch.tensor([0, 2.5, 0], dtype=torch.float32, device=DEVICE)
+        bone1_end = torch.tensor([1, 1, 0], dtype=torch.float32, device=DEVICE)
+        femur = block.create_bone(id=self.idCounter(), start_point=bone1_start, end_point=bone1_end, radius=0.15)
+        
+        knee_joint = block.create_joint(id=self.idCounter(), center=bone1_end, radius=0.2, angle_limit_deg=25)
+        
+        bone2_end = torch.tensor([1, 0.2, 0.5], dtype=torch.float32, device=DEVICE)
+        tibia = block.create_bone(id=self.idCounter(), start_point=bone1_end, end_point=bone2_end, radius=0.12)
+
+        # Muscles connecting the bones
+        muscle1 = block.create_muscle(id=self.idCounter(), start_point=bone1_start + torch.tensor([-0.2,0.2,0], dtype=torch.float32, device=DEVICE), end_point=bone1_end + torch.tensor([0,0.2,0], dtype=torch.float32, device=DEVICE), max_radius=0.1, activation=0.8)
+        muscle2 = block.create_muscle(id=self.idCounter(), start_point=bone1_start + torch.tensor([0.2,-0.2,0], dtype=torch.float32, device=DEVICE), end_point=bone2_end, max_radius=0.1, activation=0.2)
+        
+        # A floating node
+        node1 = block.create_node(id=self.idCounter(), center=torch.tensor([-2, 2, -1], dtype=torch.float32, device=DEVICE), radii=torch.tensor([0.5, 1.0, 0.5], dtype=torch.float32, device=DEVICE))
+
+        self.add_block(hip_joint)
+        self.add_block(femur)
+        self.add_block(knee_joint)
+        self.add_block(tibia)
+        self.add_block(muscle1)
+        self.add_block(muscle2)
+        self.add_block(node1)
         
         self.target_fps = 60
         self.frame_time_target = 1.0 / self.target_fps
@@ -266,13 +539,13 @@ class BlockRenderer:
         
     def render(self):
         dpg.create_context()
-        dpg.create_viewport(title='3D Blocks', width=800, height=600, resizable=True)
+        dpg.create_viewport(title='Creature sim', width=800, height=600, resizable=True)
         
         with dpg.window(label="3D View", tag="mainView"):
             with dpg.drawlist(width=-1, height=-1, tag="drawlist"):
                 pass
         
-        with dpg.window(label="cameraControls", width=300,height=200):
+        with dpg.window(label="Camera Controls", width=300,height=200):
             dpg.add_text('Orbit Controls')
             dpg.add_checkbox(label='Orbit X (Azimuth)', tag="orbit_x", callback=lambda: self.toggle_orbit(0))
             dpg.add_checkbox(label='Orbit Y (Elevation)', tag="orbit_y", callback=lambda: self.toggle_orbit(1))
@@ -284,6 +557,7 @@ class BlockRenderer:
         dpg.show_viewport()
         dpg.set_primary_window("mainView", True)
         dpg.set_viewport_resize_callback(callback=self._on_resize)
+        
         while dpg.is_dearpygui_running():
             current_time = time.time()
             elapsed = current_time - self.last_frame_time
@@ -299,7 +573,6 @@ class BlockRenderer:
                 self.last_frame_time = current_time
             else:
                 dpg.render_dearpygui_frame()
-        #dpg.start_dearpygui()
         dpg.destroy_context()
         
     def toggle_orbit(self, axis):
@@ -312,14 +585,13 @@ class BlockRenderer:
         self.orbitRadius = dpg.get_value("orbitradius")
 
     def update_camera_position(self):
-        angle_step = self.orbitSpeed / 60.0
+        angle_step = self.orbitSpeed / self.target_fps
 
         for i in range(3):
             if self.orbitEnable[i]:
-                self.orbitAngles[i] += angle_step
+                self.orbitAngles[i] = (self.orbitAngles[i] + angle_step) % (2 * np.pi)
         
         xAngle, yAngle, zAngle = self.orbitAngles
-
         yAngle = np.clip(yAngle, -np.pi / 2.0 + 1e-6, np.pi / 2.0 - 1e-6)
         self.orbitAngles[1] = yAngle
 
@@ -334,9 +606,8 @@ class BlockRenderer:
         up_x_dir = -np.sin(yAngle) * np.sin(xAngle)
         up_y_dir = np.cos(yAngle)
         up_z_dir = -np.sin(yAngle) * np.cos(xAngle)
-        up_unrolled = torch.tensor([up_x_dir, up_y_dir, up_z_dir], dtype=torch.float32, device=DEVICE)
-
-        right = torch.linalg.cross(forward, up_unrolled)
+        world_up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)
+        right = torch.linalg.cross(forward, world_up)
         right = right / torch.norm(right)
         
         true_up = torch.linalg.cross(right, forward)
@@ -346,10 +617,9 @@ class BlockRenderer:
         
         self.up = true_up * cos_roll + right * sin_roll
 
-
     def _on_resize(self):
-        windowWidth = dpg.get_item_width("mainView")
-        windowHeight = dpg.get_item_height("mainView")
+        windowWidth = dpg.get_item_width("mainView") or 1
+        windowHeight = dpg.get_item_height("mainView") or 1
         dpg.configure_item("drawlist", width=windowWidth, height=windowHeight)
         self.currentResolution = (windowWidth, windowHeight)
 
@@ -357,7 +627,14 @@ class BlockRenderer:
         dpg.delete_item("drawlist", children_only=True)
         triangles_to_draw = []
 
+        # Separate opaque and transparent objects for correct rendering
+        opaque_triangles = []
+        transparent_triangles = []
+
         for block in self.blocks:
+            # Simple check for transparency
+            is_transparent = block.color[3] < 255
+
             screen_verts, visible_tris, depths = block.project_2d(
                 eye=self.eye,
                 lookat=self.lookat,
@@ -376,18 +653,29 @@ class BlockRenderer:
                 v1 = screen_verts_np[tri[1]]
                 v2 = screen_verts_np[tri[2]]
                 
-                triangles_to_draw.append({
+                triangle_data = {
                     'points': [(v0[0], v0[1]), (v1[0], v1[1]), (v2[0], v2[1])],
                     'color': color_np,
                     'depth': depths_np[i]
-                })
-        triangles_to_draw.sort(key=lambda x: x['depth'], reverse=False)
+                }
+                
+                if is_transparent:
+                    transparent_triangles.append(triangle_data)
+                else:
+                    opaque_triangles.append(triangle_data)
+
+        # Sort opaque triangles from front-to-back (painter's algorithm)
+        opaque_triangles.sort(key=lambda x: x['depth'], reverse=True)
+        # Sort transparent triangles from back-to-front
+        transparent_triangles.sort(key=lambda x: x['depth'], reverse=False)
+
+        # Combine lists: draw all opaque first, then all transparent
+        all_triangles = opaque_triangles + transparent_triangles
   
-        # Draw all triangles in sorted order
         with dpg.draw_node(parent="drawlist"):
-            for triangle in triangles_to_draw:
+            for triangle in all_triangles:
                 dpg.draw_triangle(
-                    *triangle['points'],
+                    p1=triangle['points'][0], p2=triangle['points'][1], p3=triangle['points'][2],
                     color=triangle['color'],
                     fill=triangle['color']
                 )
