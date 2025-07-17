@@ -1,5 +1,6 @@
 from enum import Enum
 import time
+from typing import Optional
 import dearpygui.dearpygui as dpg
 import sys
 import numpy as np
@@ -7,6 +8,10 @@ import torch
 from dataclasses import dataclass, field
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.set_default_device(DEVICE)
+torch.set_default_dtype(torch.float32)
+G = torch.tensor([0.0, -9.81, 0.0], dtype=torch.float32, device=DEVICE)
+PHYSICSSTEPMULT = 8
 
 # Helper function to create a rotation matrix to align one vector with another
 def get_rotation_matrix(v_from, v_to):
@@ -43,7 +48,6 @@ def get_rotation_matrix(v_from, v_to):
     
     return I + sin_a * K + (1 - cos_a) * torch.matmul(K, K)
 
-
 @dataclass
 class block:
     id: int
@@ -51,7 +55,41 @@ class block:
     tris: list[tuple[int,int,int]]
     # Updated color to include alpha channel for transparency
     color: torch.Tensor = field(default_factory=lambda: torch.tensor([200,0,0,255], dtype=torch.uint8, device=DEVICE))
+    physics: bool = True
+    heldblocks: list[int] = field(default_factory=list)
 
+    velocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
+    mass: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0))
+    restitution: torch.Tensor = field(default_factory=lambda: torch.tensor(0.3))
+
+    def collision(self, other: 'block') -> tuple[bool, Optional[torch.Tensor], float] | None:
+        min_s = torch.min(self.vertices, dim=0).values
+        max_s = torch.max(self.vertices, dim=0).values
+        min_o = torch.min(other.vertices, dim=0).values
+        max_o = torch.max(other.vertices, dim=0).values
+
+        if torch.any(max_s < min_o) or torch.any(max_o < min_s):
+            return False, None, 0.0
+        
+        overlaps = torch.min(max_s, max_o) - torch.max(min_s, min_o)
+        min_pen, axis_idx = torch.min(overlaps, dim=0)
+        center_s = (min_s + max_s) / 2.0
+        center_o = (min_o + max_o) / 2.0
+        direction = center_s - center_o
+        normal = torch.zeros(3, dtype=torch.float32, device=DEVICE)
+        if direction[axis_idx] < 0:
+            normal[axis_idx] = -1.0
+        else:
+            normal[axis_idx] = 1.0
+        
+        return True, normal, min_pen.item()
+
+    def apply_gravity(self, delta_time: float):
+        if not self.physics or self.mass <= 0 or self.heldblocks:
+            return
+        self.velocity += G * delta_time
+        self.vertices += self.velocity * delta_time
+        
     @classmethod
     def _orient_and_translate_mesh(cls, vertices, start_point, end_point, default_axis=torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)):
         """Helper to orient a mesh along the vector from start_point to end_point."""
@@ -80,27 +118,38 @@ class block:
         return rotated_vertices + midpoint
 
     @classmethod
+    def quads_to_tris(cls, quads: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int]]:
+        tris = []
+        for quad in quads:
+            tris.append((quad[0], quad[1], quad[2]))
+            tris.append((quad[0], quad[2], quad[3]))
+        return tris
+
+    @classmethod
     def create_ground(cls, id: int, size: float = sys.float_info.max, height: float = 1):
         vertices = torch.tensor([
-            [-size, 0, -size],
-            [size, 0, -size],
-            [size, 0, size],
-            [-size, 0, size],
             [-size, -height, -size],
             [size, -height, -size],
+            [size, 0, -size],
+            [-size, 0, -size],
+            [-size, -height, size],
             [size, -height, size],
-            [-size, -height, size]
+            [size, 0, size],
+            [-size, 0, size]
         ], dtype=torch.float32, device=DEVICE)
-        tris = [(0,1,2), (0,2,3), (4,6,5),(4,7,6), (3,2,6),(3,6,7), (0,5,1),(0,4,5), (0,3,7),(0,7,4), (1,5,6),(1,6,2)]
+        quads = [
+            (0, 1, 2, 3),(4, 5, 6, 7),(0, 4, 7, 3),
+            (1, 5, 6, 2),(0, 1, 5, 4),(3, 2, 6, 7)
+        ]
+        tris = block.quads_to_tris(quads)
         cl = cls(id=id, vertices=vertices, tris=tris)
         cl.color = torch.tensor([0,200,0,255], dtype=torch.uint8, device=DEVICE)
+        cl.physics = False
+        cl.mass = torch.tensor(0.0)
         return cl
 
     @classmethod
-    def create_sphere(cls, id: int, radius: float = 1.0, subdivisions: int = 3, center: torch.Tensor = None):
-        if center is None:
-            center = torch.zeros(3, device=DEVICE)
-            
+    def create_sphere(cls, id: int, radius: float = 1.0, subdivisions: int = 3, center: torch.Tensor = torch.zeros(3, device=DEVICE)):
         vertices = torch.tensor([
             [-1, -1, -1],
             [1, -1, -1],
@@ -159,28 +208,28 @@ class block:
     def create_sphere_quaddivide(cls, id: int, radius: float = 1.0, subdivisions: int = 3):
         # Start with a cube (8 vertices, 6 quad faces)
         vertices = torch.tensor([
-            [-1, -1, -1],  # 0
-            [1, -1, -1],   # 1
-            [1, 1, -1],    # 2
-            [-1, 1, -1],   # 3
-            [-1, -1, 1],   # 4
-            [1, -1, 1],    # 5
-            [1, 1, 1],     # 6
-            [-1, 1, 1]     # 7
+            [-1, -1, -1],
+            [1, -1, -1],
+            [1, 1, -1],
+            [-1, 1, -1],
+            [-1, -1, 1],
+            [1, -1, 1],
+            [1, 1, 1],
+            [-1, 1, 1]
         ], dtype=torch.float32, device=DEVICE)
         
         # Cube faces (6 quads)
         quads = [
-            [0, 1, 2, 3],  # front
-            [4, 5, 6, 7],  # back
-            [0, 4, 7, 3],  # left
-            [1, 5, 6, 2],  # right
-            [0, 1, 5, 4],  # bottom
-            [3, 2, 6, 7]   # top
+            (0, 1, 2, 3),
+            (4, 5, 6, 7),
+            (0, 4, 7, 3),
+            (1, 5, 6, 2),
+            (0, 1, 5, 4),
+            (3, 2, 6, 7)
         ]
         
         def subdivide_quad(vertices, quads):
-            new_quads = []
+            new_quads: list[tuple[int,int,int,int]] = []
             edge_vertices = {}
             face_vertices = {}
             
@@ -198,7 +247,7 @@ class block:
                     edge_points.append(edge_vertices[key])
                 
                 # Get face center
-                face_center = torch.mean(vertices[quad], dim=0)
+                face_center = torch.mean(vertices[torch.tensor(quad)], dim=0)
                 face_key = tuple(sorted(quad))
                 face_vertices[face_key] = len(vertices)
                 vertices = torch.cat([vertices, face_center.unsqueeze(0)], dim=0)
@@ -209,10 +258,10 @@ class block:
                 fc = face_vertices[face_key]
                 
                 new_quads.extend([
-                    [v0, e0, fc, e3],
-                    [e0, v1, e1, fc],
-                    [fc, e1, v2, e2],
-                    [e3, fc, e2, v3]
+                    (v0, e0, fc, e3),
+                    (e0, v1, e1, fc),
+                    (fc, e1, v2, e2),
+                    (e3, fc, e2, v3)
                 ])
             
             return vertices, new_quads
@@ -222,12 +271,7 @@ class block:
             vertices, quads = subdivide_quad(vertices, quads)
         
         # Convert quads to triangles (2 per quad)
-        tris = []
-        for quad in quads:
-            # First triangle
-            tris.append((quad[0], quad[1], quad[2]))
-            # Second triangle
-            tris.append((quad[0], quad[2], quad[3]))
+        tris = cls.quads_to_tris(quads)
         
         # Normalize vertices to make them spherical
         norms = torch.norm(vertices, dim=1, keepdim=True)
@@ -250,8 +294,9 @@ class block:
 
         # Create bottom and top rings
         for i in range(radial_segments):
-            angle = 2 * np.pi * i / radial_segments
-            x, z = radius * np.cos(angle), radius * np.sin(angle)
+            angle = torch.tensor(2 * torch.pi * i / radial_segments)
+            x = radius * torch.cos(angle)
+            z = radius * torch.sin(angle)
             vertices.append(torch.tensor([x, -height/2, z], dtype=torch.float32, device=DEVICE)) # Bottom ring
             vertices.append(torch.tensor([x,  height/2, z], dtype=torch.float32, device=DEVICE)) # Top ring
 
@@ -274,7 +319,6 @@ class block:
 
     @classmethod
     def create_bone(cls, id: int, start_point: torch.Tensor, end_point: torch.Tensor, radius: float = 0.2):
-        """Creates a bone shape (cylinder with spherical ends) between two points."""
         length = torch.norm(end_point - start_point)
         if length == 0: return cls(id=id, vertices=torch.empty(0,3, dtype=torch.float32, device=DEVICE), tris=[])
 
@@ -307,14 +351,14 @@ class block:
         return bone
 
     @classmethod
-    def create_joint(cls, id: int, center: torch.Tensor, radius: float, angle_limit_deg: float = 45.0):
-        """Creates a joint visualization: a central transparent sphere with two cones."""
-        # 1. Central transparent sphere
+    def create_joint(cls, id: int, center: torch.Tensor, radius: float, angle_limit_deg_in: float = 45.0):
+        #radius: torch.Tensor = torch.tensor(radius_in)
+        angle_limit_deg: torch.Tensor = torch.tensor(angle_limit_deg_in)
         joint_sphere = cls.create_sphere(id=-1, radius=radius, subdivisions=2, center=center)
         
         # 2. Cones for angle visualization
         cone_height = radius * 2
-        cone_radius = cone_height * np.tan(np.radians(angle_limit_deg))
+        cone_radius = cone_height * torch.tan(torch.deg2rad(angle_limit_deg))
         cone_verts, cone_tris = cls._create_cylinder_mesh(cone_radius, cone_height, radial_segments=16)
         
         # Make it a cone by squashing one end
@@ -427,7 +471,6 @@ class block:
         muscle.color = torch.tensor([red, 80, blue, 255], dtype=torch.uint8, device=DEVICE)
         return muscle
 
-
     def project_2d(self, eye: torch.Tensor, lookat: torch.Tensor, up: torch.Tensor, fov: float = 90,
                     res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
             -> tuple[torch.Tensor, list[tuple[int, int, int]], torch.Tensor]:
@@ -466,7 +509,6 @@ class block:
         screenVerts[:, 0] = (projVerts[:, 0] + 1) * 0.5 * res[0]
         screenVerts[:, 1] = (1 - (projVerts[:, 1] + 1) * 0.5) * res[1]
 
-        # Back-face culling and depth calculation
         viewVerts = torch.matmul(homogenousVerts, viewMatrix.T)[:, :3]
         visibleTris: list[tuple[int,int,int]] = []
         visible_depths = []
@@ -497,16 +539,15 @@ class BlockRenderer:
         self.orbitAngles = [np.pi/4, np.pi/4, 0.0]
         self.orbitEnable = [False, False, False]
         
-        ground = block.create_ground(id=self.idCounter())
+        ground = block.create_ground(id=self.idCounter(), size=10)
         self.add_block(ground)
 
-        # A simple articulated "leg"
         hip_joint = block.create_joint(id=self.idCounter(), center=torch.tensor([0, 2.5, 0], dtype=torch.float32, device=DEVICE), radius=0.3)
         bone1_start = torch.tensor([0, 2.5, 0], dtype=torch.float32, device=DEVICE)
         bone1_end = torch.tensor([1, 1, 0], dtype=torch.float32, device=DEVICE)
         femur = block.create_bone(id=self.idCounter(), start_point=bone1_start, end_point=bone1_end, radius=0.15)
         
-        knee_joint = block.create_joint(id=self.idCounter(), center=bone1_end, radius=0.2, angle_limit_deg=25)
+        knee_joint = block.create_joint(id=self.idCounter(), center=bone1_end, radius=0.2, angle_limit_deg_in=25)
         
         bone2_end = torch.tensor([1, 0.2, 0.5], dtype=torch.float32, device=DEVICE)
         tibia = block.create_bone(id=self.idCounter(), start_point=bone1_end, end_point=bone2_end, radius=0.12)
@@ -561,9 +602,9 @@ class BlockRenderer:
         while dpg.is_dearpygui_running():
             current_time = time.time()
             elapsed = current_time - self.last_frame_time
-            self.update_camera_position()
             if elapsed >= self.frame_time_target:
                 self.update_camera_position()
+                self.updatePhysics()
                 self.render_frame()
                 dpg.render_dearpygui_frame()
                 frame_time = time.time() - current_time
@@ -603,9 +644,6 @@ class BlockRenderer:
         forward = self.lookat - self.eye
         forward = forward / torch.norm(forward)
 
-        up_x_dir = -np.sin(yAngle) * np.sin(xAngle)
-        up_y_dir = np.cos(yAngle)
-        up_z_dir = -np.sin(yAngle) * np.cos(xAngle)
         world_up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)
         right = torch.linalg.cross(forward, world_up)
         right = right / torch.norm(right)
@@ -616,6 +654,48 @@ class BlockRenderer:
         sin_roll = np.sin(zAngle)
         
         self.up = true_up * cos_roll + right * sin_roll
+
+    def updatePhysics(self):
+        delta_time = self.frame_time_target
+        if delta_time <= 0: return
+        sub_dt = delta_time / PHYSICSSTEPMULT
+        for _ in range(PHYSICSSTEPMULT):
+            for b in self.blocks:
+                b.apply_gravity(sub_dt)
+            for i in range(len(self.blocks)):
+                for j in range(i + 1, len(self.blocks)):
+                    block_a = self.blocks[i]
+                    block_b = self.blocks[j]
+                    if block_a.mass == 0 and block_b.mass == 0:
+                        continue
+                    collided, normal, penetration = block_a.collision(block_b)
+                    if collided:
+                        self.resolve_collision(block_a, block_b, normal, penetration)
+
+    def resolve_collision(self, block_a: block, block_b:block, normal:torch.Tensor, penetration: torch.Tensor):
+        inv_mass_a = 1.0 / block_a.mass if block_a.mass > 0.0 else 0.0
+        inv_mass_b = 1.0 / block_b.mass if block_b.mass > 0.0 else 0.0
+        total_inv_mass = inv_mass_a + inv_mass_b
+        if total_inv_mass == 0:
+            return
+        
+        rel_vel = block_b.velocity - block_a.velocity
+        vel_norm = torch.dot(rel_vel, normal)
+        if vel_norm > 0:
+            return
+        
+        e = torch.min(block_a.restitution, block_b.restitution)
+        j = -(1.0 + 3) * vel_norm / total_inv_mass
+        impulse = j * normal
+        block_a.velocity -= inv_mass_a * impulse
+        block_b.velocity += inv_mass_a * impulse
+        
+        correctPer = 0.4
+        correctSlop = torch.tensor(0.01)
+        correctAmount = max(penetration - correctSlop, 0.0) / total_inv_mass * correctPer
+        correctVec = correctAmount * normal
+        block_a.vertices -= inv_mass_a * correctVec
+        block_b.vertices -= inv_mass_b * correctVec
 
     def _on_resize(self):
         windowWidth = dpg.get_item_width("mainView") or 1
