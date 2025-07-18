@@ -210,27 +210,48 @@ class block:
         newTris[3::4, 2] = e2
         
         return newVerts, newTris
-
+    
     @classmethod
     def subdivide_quad(cls, vertices: torch.Tensor, quads: torch.Tensor):
         numQuads = quads.shape[0]
         numVerts = vertices.shape[0]
+        
+        # Create all edges (4 per quad)
         edges = torch.stack([
             torch.stack([quads[:, 0], quads[:, 1]], dim=1),
             torch.stack([quads[:, 1], quads[:, 2]], dim=1),
             torch.stack([quads[:, 2], quads[:, 3]], dim=1),
             torch.stack([quads[:, 3], quads[:, 0]], dim=1)
         ], dim=0)
+        
         edges = edges.reshape(-1, 2)
+        
+        # Sort edges to make them direction-independent
         edgesSorted, _ = torch.sort(edges, dim=1)
-        uniqueEdges, edgeIndices = torch.unique(edgesSorted, dim=0, return_inverse=True)
-        edgeIndices = edgeIndices.reshape(4, numQuads)
+        
+        # Move to CPU for unique operation to avoid CUDA issues
+        edgesSorted_cpu = edgesSorted.cpu()
+        uniqueEdges_cpu, edgeIndices_cpu = torch.unique(edgesSorted_cpu, dim=0, return_inverse=True)
+        
+        # Move back to original device
+        uniqueEdges = uniqueEdges_cpu.to(device=edges.device)
+        edgeIndices = edgeIndices_cpu.to(device=edges.device)
+        
+        # Calculate edge vertices
         edgeVerts = (vertices[uniqueEdges[:, 0]] + vertices[uniqueEdges[:, 1]]) / 2
+        
+        # Calculate face centers
         faceCenters = torch.mean(vertices[quads], dim=1)
+        
+        # Combine all vertices
         newVerts = torch.cat([vertices, edgeVerts, faceCenters], dim=0)
+        
+        # Adjust indices for new vertices
         edgeIndices = edgeIndices.reshape(4, numQuads) + numVerts
-        faceIndices = torch.arange(numQuads, device=DEVICE) + numVerts + uniqueEdges.shape[0]
-        newQuads = torch.zeros((numQuads * 4, 4), dtype=torch.long, device=DEVICE)
+        faceIndices = torch.arange(numQuads, device=vertices.device) + numVerts + uniqueEdges.shape[0]
+        
+        # Create new quads (4 per original quad)
+        newQuads = torch.zeros((numQuads * 4, 4), dtype=torch.long, device=vertices.device)
 
         v0 = quads[:, 0]
         v1 = quads[:, 1]
@@ -261,7 +282,7 @@ class block:
         newQuads[3::4, 2] = e2
         newQuads[3::4, 3] = v3
         
-        return vertices, newQuads
+        return newVerts, newQuads
 
     @classmethod
     def create_ground(cls, id: int, size: float = sys.float_info.max, height: float = 1):
@@ -291,6 +312,7 @@ class block:
         cl.color = torch.tensor([0,200,0,255], dtype=torch.uint8)
         cl.physics = False
         cl.mass = torch.tensor(0.0, dtype=torch.float32, device=DEVICE)
+        cl.position -= 10.0
         return cl
 
     @classmethod
@@ -598,8 +620,8 @@ class block:
             worldverts[self.tris[:, 1]] - worldverts[self.tris[:, 0]],
             worldverts[self.tris[:, 2]] - worldverts[self.tris[:, 0]]
         )
-        viewDirs = (worldverts[self.tris[:, 0]] - eye).unsqueeze(1)
-        dotProds = torch.bmm(triNorms.unsqueeze(1), viewDirs).squeeze()
+        viewDirs = (worldverts[self.tris[:, 0]] - eye)
+        dotProds = torch.sum(triNorms * viewDirs, dim=1)
         visibleMask = dotProds < 0
         visibleTris = self.tris[visibleMask]
 
@@ -837,17 +859,28 @@ class BlockRenderer:
             
             screen_verts_np = screen_verts.cpu().numpy()
             color_np = block.color.cpu().numpy().tolist()
-            depths_np = depths.cpu().numpy()
+            
+            # Convert depths to a 1D array
+            if len(depths) > 0:
+                depths_np = depths.cpu().numpy().flatten()
+            else:
+                depths_np = np.array([])
             
             for i, tri in enumerate(visible_tris):
                 v0 = screen_verts_np[tri[0]]
                 v1 = screen_verts_np[tri[1]]
                 v2 = screen_verts_np[tri[2]]
                 
+                # Get the scalar depth value (mean of the triangle vertices)
+                if len(depths_np) > 0:
+                    depth_value = float(depths_np[i])
+                else:
+                    depth_value = 0.0
+                
                 triangle_data = {
                     'points': [(v0[0], v0[1]), (v1[0], v1[1]), (v2[0], v2[1])],
                     'color': color_np,
-                    'depth': depths_np[i]
+                    'depth': depth_value
                 }
                 
                 if is_transparent:
@@ -862,7 +895,7 @@ class BlockRenderer:
 
         # Combine lists: draw all opaque first, then all transparent
         all_triangles = opaque_triangles + transparent_triangles
-  
+
         with dpg.draw_node(parent="drawlist"):
             for triangle in all_triangles:
                 dpg.draw_triangle(
