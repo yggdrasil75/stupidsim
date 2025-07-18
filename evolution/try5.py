@@ -126,14 +126,71 @@ class block:
         return tris
 
     @classmethod
-    def subdivide_tri(cls, vertices: torch.Tensor, tri: list[tuple[int,int,int]]):
-        #TODO: each tri becomes 3 tris, 
-        pass
+    def subdivide_tri(cls, vertices: torch.Tensor, tris: list[tuple[int,int,int]]):
+        new_tris = []
+        edge_vertices = {}
+        
+        for tri in tris:
+            edge_points = []
+            for i in range(3):
+                a, b = tri[i], tri[(i+1)%3]
+                key = tuple(sorted((a, b)))
+                if key not in edge_vertices:
+                    new_vertex = (vertices[a] + vertices[b]) / 2
+                    edge_vertices[key] = len(vertices)
+                    vertices = torch.cat([vertices, new_vertex.unsqueeze(0)], dim=0)
+                edge_points.append(edge_vertices[key])
+            
+            v0, v1, v2 = tri[0], tri[1], tri[2]
+            v3, v4, v5 = edge_points[0], edge_points[1], edge_points[2]
+            
+            new_tris.extend([
+                (v0, v3, v5),
+                (v3, v1, v4),
+                (v5, v4, v2),
+                (v3, v4, v5)
+            ])
+        
+        return vertices, new_tris
 
     @classmethod
-    def subdivide_quad(cls, vertices: torch.Tensor, quad: list[tuple[int,int,int]]):
-        #TODO: each quad becomes 4 quads, each edge is split at the midpoint, and a centerpoint for the quad is used as well. 4 vertices become 9.
-        pass
+    def subdivide_quad(cls, vertices: torch.Tensor, quads: list[tuple[int,int,int,int]]):
+        new_quads: list[tuple[int,int,int,int]] = []
+        edge_vertices = {}
+        face_vertices = {}
+        
+        for quad in quads:
+            # Get edge midpoints
+            edge_points = []
+            for i in range(4):
+                a, b = quad[i], quad[(i+1)%4]
+                key = tuple(sorted((a, b)))
+                if key not in edge_vertices:
+                    # Create new vertex at midpoint
+                    new_vertex = (vertices[a] + vertices[b]) / 2
+                    edge_vertices[key] = len(vertices)
+                    vertices = torch.cat([vertices, new_vertex.unsqueeze(0)], dim=0)
+                edge_points.append(edge_vertices[key])
+            
+            # Get face center
+            face_center = torch.mean(vertices[torch.tensor(quad)], dim=0)
+            face_key = tuple(sorted(quad))
+            face_vertices[face_key] = len(vertices)
+            vertices = torch.cat([vertices, face_center.unsqueeze(0)], dim=0)
+            
+            # Create 4 new quads
+            v0, v1, v2, v3 = quad
+            e0, e1, e2, e3 = edge_points
+            fc = face_vertices[face_key]
+            
+            new_quads.extend([
+                (v0, e0, fc, e3),
+                (e0, v1, e1, fc),
+                (fc, e1, v2, e2),
+                (e3, fc, e2, v3)
+            ])
+        
+        return vertices, new_quads
 
     @classmethod
     def create_ground(cls, id: int, size: float = sys.float_info.max, height: float = 1):
@@ -151,6 +208,8 @@ class block:
             (0, 1, 2, 3),(4, 5, 6, 7),(0, 4, 7, 3),
             (1, 5, 6, 2),(0, 1, 5, 4),(3, 2, 6, 7)
         ]
+        for i in range(3):
+            vertices, quads = cls.subdivide_quad(vertices, quads)
         tris = block.quads_to_tris(quads)
         cl = cls(id=id, vertices=vertices, tris=tris)
         cl.color = torch.tensor([0,200,0,255], dtype=torch.uint8, device=DEVICE)
@@ -171,44 +230,18 @@ class block:
             [-1, 1, 1]
         ], dtype=torch.float32, device=DEVICE)
 
-        tris = [
-            (0, 1, 2), (0, 2, 3),
-            (4, 6, 5), (4, 7, 6),
-            (0, 4, 5), (0, 5, 1),
-            (2, 6, 7), (2, 7, 3),
-            (0, 3, 7), (0, 7, 4),
-            (1, 5, 6), (1, 6, 2)
+        quads = [
+            (0, 1, 2, 3),
+            (4, 5, 6, 7),
+            (0, 4, 7, 3),
+            (1, 5, 6, 2),
+            (0, 1, 5, 4),
+            (3, 2, 6, 7)
         ]
-        
-        def subdivide(vertices, tris):
-            new_tris = []
-            edge_vertices = {}
-            
-            for tri in tris:
-                edge_points = []
-                for i in range(3):
-                    a, b = tri[i], tri[(i+1)%3]
-                    key = tuple(sorted((a, b)))
-                    if key not in edge_vertices:
-                        new_vertex = (vertices[a] + vertices[b]) / 2
-                        edge_vertices[key] = len(vertices)
-                        vertices = torch.cat([vertices, new_vertex.unsqueeze(0)], dim=0)
-                    edge_points.append(edge_vertices[key])
-                
-                v0, v1, v2 = tri[0], tri[1], tri[2]
-                v3, v4, v5 = edge_points[0], edge_points[1], edge_points[2]
-                
-                new_tris.extend([
-                    (v0, v3, v5),
-                    (v3, v1, v4),
-                    (v5, v4, v2),
-                    (v3, v4, v5)
-                ])
-            
-            return vertices, new_tris
+        tris = cls.quads_to_tris(quads)
         
         for _ in range(subdivisions):
-            vertices, tris = subdivide(vertices, tris)
+            vertices, tris = cls.subdivide_tri(vertices, tris)
         
         norms = torch.norm(vertices, dim=1, keepdim=True)
         vertices = vertices / norms * radius + center
@@ -238,47 +271,8 @@ class block:
             (3, 2, 6, 7)
         ]
         
-        def subdivide_quad(vertices, quads):
-            new_quads: list[tuple[int,int,int,int]] = []
-            edge_vertices = {}
-            face_vertices = {}
-            
-            for quad in quads:
-                # Get edge midpoints
-                edge_points = []
-                for i in range(4):
-                    a, b = quad[i], quad[(i+1)%4]
-                    key = tuple(sorted((a, b)))
-                    if key not in edge_vertices:
-                        # Create new vertex at midpoint
-                        new_vertex = (vertices[a] + vertices[b]) / 2
-                        edge_vertices[key] = len(vertices)
-                        vertices = torch.cat([vertices, new_vertex.unsqueeze(0)], dim=0)
-                    edge_points.append(edge_vertices[key])
-                
-                # Get face center
-                face_center = torch.mean(vertices[torch.tensor(quad)], dim=0)
-                face_key = tuple(sorted(quad))
-                face_vertices[face_key] = len(vertices)
-                vertices = torch.cat([vertices, face_center.unsqueeze(0)], dim=0)
-                
-                # Create 4 new quads
-                v0, v1, v2, v3 = quad
-                e0, e1, e2, e3 = edge_points
-                fc = face_vertices[face_key]
-                
-                new_quads.extend([
-                    (v0, e0, fc, e3),
-                    (e0, v1, e1, fc),
-                    (fc, e1, v2, e2),
-                    (e3, fc, e2, v3)
-                ])
-            
-            return vertices, new_quads
-        
-        # Subdivide the quads
         for _ in range(subdivisions):
-            vertices, quads = subdivide_quad(vertices, quads)
+            vertices, quads = cls.subdivide_quad(vertices, quads)
         
         # Convert quads to triangles (2 per quad)
         tris = cls.quads_to_tris(quads)
@@ -549,7 +543,7 @@ class BlockRenderer:
         self.orbitAngles = [np.pi/4, np.pi/4, 0.0]
         self.orbitEnable = [False, False, False]
         
-        ground = block.create_ground(id=self.idCounter(), size=10)
+        ground = block.create_ground(id=self.idCounter(), size=100)
         self.add_block(ground)
 
         hip_joint = block.create_joint(id=self.idCounter(), center=torch.tensor([0, 2.5, 0], dtype=torch.float32, device=DEVICE), radius=0.3)
