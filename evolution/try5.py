@@ -60,47 +60,81 @@ class threeDObj:
     heldblocks: list[int] = field(default_factory=list)
 
     velocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
-    mass: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0))
-    restitution: torch.Tensor = field(default_factory=lambda: torch.tensor(0.3))
+    position: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
+    orientation: torch.Tensor = field(default_factory=lambda: torch.eye(3, dtype=torch.float32, device=DEVICE))
+    angular_velocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
+    mass: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32, device=DEVICE))
+    restitution: torch.Tensor = field(default_factory=lambda: torch.tensor(0.3, dtype=torch.float32, device=DEVICE))
+    inertia_tensor_inv: torch.Tensor = field(init=False)
 
     @property
-    def vertices(self):
+    def vertices(self) -> torch.Tensor:
         return self._vertices
     
     @vertices.setter
-    def vertices(self, vertices):
+    def vertices(self, vertices: torch.Tensor):
         self._vertices = vertices
 
     @property
-    def tris(self):
+    def worldVerts(self) -> torch.Tensor:
+        return torch.matmul(self.vertices, self.orientation.T) + self.position
+    
+    @worldVerts.setter
+    def worldVerts(self, worldVerts):
+        self._vertices = torch.matmul(worldVerts - self.position, self.orientation)
+
+    @property
+    def tris(self) -> list[int]:
         return self._tris.tolist()
 
     @tris.setter
-    def tris(self, tris):
+    def tris(self, tris: list[int]):
         self._tris = torch.tensor(tris, dtype=torch.long, device=DEVICE)
 
     @property
-    def torchTri(self):
+    def torchTri(self) -> torch.Tensor:
         return self._tris
     
     @torchTri.setter
-    def torchTri(self, tris):
+    def torchTri(self, tris: torch.Tensor):
         self._tris = tris
 
+    def __post_init__(self):
+        self.inertia_tensor_inv = self.calculate_inverse_inertia()
+
+    def calculate_inverse_inertia(self) -> torch.Tensor:
+        if self.mass <= 0 or len(self.worldVerts) == 0:
+            return torch.zeros((3, 3))
+            
+        min_coords = torch.min(self.worldVerts, dim=0).values
+        max_coords = torch.max(self.worldVerts, dim=0).values
+        size = max_coords - min_coords
+        w, h, d = size[0], size[1], size[2]
+        
+        # Clamp dimensions to avoid zero inertia on flat objects
+        w, h, d = torch.clamp(w, min=1e-6), torch.clamp(h, min=1e-6), torch.clamp(d, min=1e-6)
+
+        I_xx = (1.0 / 12.0) * self.mass * (h*h + d*d)
+        I_yy = (1.0 / 12.0) * self.mass * (w*w + d*d)
+        I_zz = (1.0 / 12.0) * self.mass * (w*w + h*h)
+
+        inertia_tensor = torch.diag(torch.tensor([I_xx, I_yy, I_zz], dtype=torch.float32, device=DEVICE))
+        
+        # Return the inverse of the diagonal tensor
+        return torch.inverse(inertia_tensor)
+    
     def collision(self, other: 'threeDObj') -> tuple[bool, Optional[torch.Tensor], float] | None:
-        min_s = torch.min(self.vertices, dim=0).values
-        max_s = torch.max(self.vertices, dim=0).values
-        min_o = torch.min(other.vertices, dim=0).values
-        max_o = torch.max(other.vertices, dim=0).values
+        min_s = torch.min(self.worldVerts, dim=0).values
+        max_s = torch.max(self.worldVerts, dim=0).values
+        min_o = torch.min(other.worldVerts, dim=0).values
+        max_o = torch.max(other.worldVerts, dim=0).values
 
         if torch.any(max_s < min_o) or torch.any(max_o < min_s):
             return False, None, 0.0
         
         overlaps = torch.min(max_s, max_o) - torch.max(min_s, min_o)
         min_pen, axis_idx = torch.min(overlaps, dim=0)
-        center_s = (min_s + max_s) / 2.0
-        center_o = (min_o + max_o) / 2.0
-        direction = center_s - center_o
+        direction = self.position - other.position
         normal = torch.zeros(3, dtype=torch.float32, device=DEVICE)
         if direction[axis_idx] < 0:
             normal[axis_idx] = -1.0
@@ -113,7 +147,7 @@ class threeDObj:
         if not self.physics or self.mass <= 0 or self.heldblocks:
             return
         self.velocity += G * delta_time
-        self.vertices += self.velocity * delta_time
+        self.worldVerts = self.worldVerts + self.velocity * delta_time
         
     @classmethod
     def _orient_and_translate_mesh(cls, vertices, start_point, end_point, default_axis=torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)):
@@ -366,8 +400,8 @@ class threeDObj:
         num_cyl_verts = len(cyl_verts)
         num_s1_verts = len(sphere1.vertices)
 
-        s1_tris_offset = [(v[0] + num_cyl_verts, v[1] + num_cyl_verts, v[2] + num_cyl_verts) for v in sphere1.tris]
-        s2_tris_offset = [(v[0] + num_cyl_verts + num_s1_verts, v[1] + num_cyl_verts + num_s1_verts, v[2] + num_cyl_verts + num_s1_verts) for v in sphere2.tris]
+        s1_tris_offset = [(v[0] + num_cyl_verts, v[1] + num_cyl_verts, v[2] + num_cyl_verts) for v in sphere1.torchTri]
+        s2_tris_offset = [(v[0] + num_cyl_verts + num_s1_verts, v[1] + num_cyl_verts + num_s1_verts, v[2] + num_cyl_verts + num_s1_verts) for v in sphere2.torchTri]
 
         all_vertices = torch.cat([cyl_verts, sphere1.vertices, sphere2.vertices], dim=0)
         all_tris = cyl_tris + s1_tris_offset + s2_tris_offset
@@ -385,12 +419,10 @@ class threeDObj:
         angle_limit_deg: torch.Tensor = torch.tensor(angle_limit_deg_in)
         joint_sphere = cls.create_sphere(id=-1, radius=radius, subdivisions=2, center=center)
         
-        # 2. Cones for angle visualization
         cone_height = radius * 2
         cone_radius = cone_height * torch.tan(torch.deg2rad(angle_limit_deg))
         cone_verts, cone_tris = cls._create_cylinder_mesh(cone_radius, cone_height, radial_segments=16)
         
-        # Make it a cone by squashing one end
         cone_verts[1] = cone_verts[0] # Top center vertex is now the same as bottom center
         for i in range(16):
             cone_verts[3 + i * 2] = cone_verts[0] # Top ring vertices are now the same as bottom center
@@ -398,7 +430,6 @@ class threeDObj:
         cone1_verts = cone_verts.clone()
         cone2_verts = cone_verts.clone()
         
-        # Orient and place cones
         cone1_verts = cls._orient_and_translate_mesh(
             cone1_verts, center, center + torch.tensor([cone_height,0,0], dtype=torch.float32, device=DEVICE) * 0.75
         )
@@ -406,7 +437,6 @@ class threeDObj:
             cone2_verts, center, center + torch.tensor([-cone_height,0,0], dtype=torch.float32, device=DEVICE) * 0.75
         )
         
-        # 3. Combine all meshes
         num_sphere_verts = len(joint_sphere.vertices)
         num_cone1_verts = len(cone1_verts)
         
@@ -422,12 +452,12 @@ class threeDObj:
 
     @classmethod
     def create_node(cls, id: int, center: torch.Tensor, radii: torch.Tensor):
-        """Creates a transparent ovular/ellipsoid shape."""
         # Start with a unit sphere
         node_sphere = cls.create_sphere(id=-1, radius=1.0, subdivisions=3)
         
         # Scale vertices to form an ellipsoid and translate to center
-        node_sphere.vertices = node_sphere.vertices * radii + center
+        node_sphere.vertices = node_sphere.vertices * radii
+        node_sphere.position = center
         
         node = cls(id=id, _vertices=node_sphere.vertices, _tris=torch.tensor(node_sphere.tris, dtype=torch.long, device=DEVICE))
         node.color = torch.tensor([100, 200, 250, 120], dtype=torch.uint8, device=DEVICE) # Light blue, transparent
@@ -529,7 +559,7 @@ class threeDObj:
         projMatrix[2,3] = (-2 * far * near) / (near - far)
         projMatrix[3,2] = -1.0
         
-        homogenousVerts = torch.cat([self.vertices, torch.ones((self.vertices.shape[0], 1), dtype=torch.float32, device=DEVICE)], dim=1)
+        homogenousVerts = torch.cat([self.worldVerts, torch.ones((self.worldVerts.shape[0], 1), dtype=torch.float32, device=DEVICE)], dim=1)
         viewProjMatrix = torch.matmul(projMatrix, viewMatrix)
         projVerts = torch.matmul(homogenousVerts, viewProjMatrix.T)
         projVerts = projVerts / projVerts[:, 3].unsqueeze(1)
@@ -542,7 +572,7 @@ class threeDObj:
         visibleTris: list[tuple[int,int,int]] = []
         #visible_depths = []
         
-        tri_verts = self.vertices[self.torchTri]  # Shape: [num_tris, 3, 3]
+        tri_verts = self.worldVerts[self.torchTri]  # Shape: [num_tris, 3, 3]
         v0, v1, v2 = tri_verts[:,0], tri_verts[:,1], tri_verts[:,2]
         normal = torch.linalg.cross(v1 - v0, v2 - v0)
         dot_prods = torch.sum(normal * (v0 - eye), dim=1)
@@ -730,8 +760,8 @@ class BlockRenderer:
         correctSlop = torch.tensor(0.01)
         correctAmount = max(penetration - correctSlop, 0.0) / total_inv_mass * correctPer
         correctVec = correctAmount * normal
-        block_a.vertices -= inv_mass_a * correctVec
-        block_b.vertices -= inv_mass_b * correctVec
+        block_a.worldVerts -= inv_mass_a * correctVec
+        block_b.worldVerts -= inv_mass_b * correctVec
 
     def _on_resize(self):
         windowWidth = dpg.get_item_width("mainView") or 1
