@@ -52,7 +52,6 @@ def get_rotation_matrix(v_from, v_to):
 class threeDObj:
     id: int
     _vertices: torch.Tensor
-    #_tris: list[tuple[int,int,int]]
     _tris: torch.Tensor
 
     # Updated color to include alpha channel for transparency
