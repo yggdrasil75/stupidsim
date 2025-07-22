@@ -81,7 +81,27 @@ class threeDObj:
     
     @worldVerts.setter
     def worldVerts(self, worldVerts):
-        self._vertices = torch.matmul(worldVerts - self.position, self.orientation)
+        # self._vertices = torch.matmul(worldVerts - self.position, self.orientation)
+        if not torch.is_tensor(worldVerts):
+            worldVerts = torch.tensor(worldVerts, device=self.vertices.device, dtype=torch.float32)
+
+        # Center the point clouds
+        centroid_verts = self.vertices.mean(dim=0)
+        centroid_new = worldVerts.mean(dim=0)
+
+        # Compute covariance matrix
+        centered_verts = self.vertices - centroid_verts
+        centered_new = worldVerts - centroid_new
+        H = centered_verts.T @ centered_new
+
+        # SVD to find optimal rotation
+        U, S, V = torch.linalg.svd(H)
+        R = V.T @ U.T
+
+        # Update position and orientation
+        self.position = centroid_new - torch.matmul(R, centroid_verts)
+        # self.orientation = R @ self.orientation  # (if you want incremental change)
+        self.orientation = R
 
     @property
     def tris(self) -> list[int]:
@@ -147,7 +167,17 @@ class threeDObj:
         if not self.physics or self.mass <= 0 or self.heldblocks:
             return
         self.velocity += G * delta_time
-        self.worldVerts = self.worldVerts + self.velocity * delta_time
+        # self.worldVerts = self.worldVerts + self.velocity * delta_time
+        self.position += self.velocity * delta_time
+        omega = self.angular_velocity
+        omega_norm = torch.norm(omega)
+        if omega_norm > 1e-6:
+            angle = omega_norm * delta_time
+            axis = omega / omega_norm
+            K = torch.tensor([[0, -axis[2], axis[1]], [axis[2], 0, -axis[0]], [-axis[1], axis[0], 0]], dtype=torch.float32, device=DEVICE)
+            I = torch.eye(3)
+            step_rotation = I + torch.sin(angle) * K + (1 - torch.cos(angle)) * torch.matmul(K, K)
+            self.orientation = torch.matmul(step_rotation, self.orientation)
         
     @classmethod
     def _orient_and_translate_mesh(cls, vertices, start_point, end_point, default_axis=torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)):
@@ -155,7 +185,8 @@ class threeDObj:
         direction = end_point - start_point
         length = torch.norm(direction)
         if length == 0:
-            return vertices + start_point
+            center = torch.mean(vertices, dim=0)
+            return vertices - center
 
         target_direction = direction / length
         
@@ -173,15 +204,18 @@ class threeDObj:
         rotated_vertices = torch.matmul(scaled_vertices, rot_matrix.T)
         
         # Translate to the midpoint of the start and end points
-        midpoint = (start_point + end_point) / 2
-        return rotated_vertices + midpoint
+        return rotated_vertices
 
     @classmethod
-    def quads_to_tris(cls, quads: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int]]:
-        tris = []
-        for quad in quads:
-            tris.append((quad[0], quad[1], quad[2]))
-            tris.append((quad[0], quad[2], quad[3]))
+    def quads_to_tris(cls, quads: torch.Tensor) -> torch.Tensor:
+        num_quads = quads.shape[0]
+        tris = torch.zeros((num_quads * 2, 3), dtype=torch.long, device=DEVICE)
+        tris[::2, 0] = quads[:, 0]
+        tris[::2, 1] = quads[:, 1]
+        tris[::2, 2] = quads[:, 2]
+        tris[1::2, 0] = quads[:, 0]
+        tris[1::2, 1] = quads[:, 2]
+        tris[1::2, 2] = quads[:, 3]
         return tris
 
     @classmethod
@@ -253,27 +287,33 @@ class threeDObj:
 
     @classmethod
     def create_ground(cls, id: int, size: float = sys.float_info.max, height: float = 1):
+        size = size / 2.0
         vertices = torch.tensor([
             [-size, -height, -size],
             [size, -height, -size],
-            [size, 0, -size],
-            [-size, 0, -size],
-            [-size, -height, size],
             [size, -height, size],
+            [-size, -height, size],
+            [-size, 0, -size],
+            [size, 0, -size],
             [size, 0, size],
             [-size, 0, size]
         ], dtype=torch.float32, device=DEVICE)
-        quads = [
-            (0, 1, 2, 3),(4, 5, 6, 7),(0, 4, 7, 3),
-            (1, 5, 6, 2),(0, 1, 5, 4),(3, 2, 6, 7)
-        ]
-        for i in range(3):
+        quads = torch.tensor([
+            [0, 3, 2, 1],
+            [4, 5, 6, 7],
+            [0, 1, 5, 4],
+            [1, 2, 6, 5],
+            [2, 3, 7, 6],
+            [3, 0, 4, 7]
+        ], dtype=torch.long, device=DEVICE)
+        for _ in range(3):
             vertices, quads = cls.subdivide_quad(vertices, quads)
-        tris = threeDObj.quads_to_tris(quads)
-        cl = cls(id=id, _vertices=vertices, _tris=torch.tensor(tris, dtype=torch.long, device=DEVICE))
-        cl.color = torch.tensor([0,200,0,255], dtype=torch.uint8, device=DEVICE)
+        tris = cls.quads_to_tris(torch.tensor(quads, dtype=torch.long, device=DEVICE))
+        cl = cls(id=id, _vertices=vertices, _tris=tris)
+        cl.color = torch.tensor([0,200,0,255], dtype=torch.uint8)
         cl.physics = False
-        cl.mass = torch.tensor(0.0)
+        cl.mass = torch.tensor(0.0, dtype=torch.float32, device=DEVICE)
+        cl.position -= 10.0
         return cl
 
     @classmethod
@@ -297,7 +337,7 @@ class threeDObj:
             (0, 1, 5, 4),
             (3, 2, 6, 7)
         ]
-        tris = cls.quads_to_tris(quads)
+        tris = cls.quads_to_tris(torch.tensor(quads, dtype=torch.long, device=DEVICE))
         
         for _ in range(subdivisions):
             vertices, tris = cls.subdivide_tri(vertices, tris)
@@ -334,7 +374,7 @@ class threeDObj:
             vertices, quads = cls.subdivide_quad(vertices, quads)
         
         # Convert quads to triangles (2 per quad)
-        tris = cls.quads_to_tris(quads)
+        tris = cls.quads_to_tris(torch.tensor(quads, dtype=torch.long, device=DEVICE))
         
         # Normalize vertices to make them spherical
         norms = torch.norm(vertices, dim=1, keepdim=True)
