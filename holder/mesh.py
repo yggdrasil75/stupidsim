@@ -6,8 +6,10 @@ import dearpygui.dearpygui as dpg
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
 @dataclass
 class mesh:
+    torch.set_default_device(DEVICE)
     id: int
     _vertices: torch.Tensor
     _polys: torch.Tensor
@@ -16,8 +18,11 @@ class mesh:
     physics: bool = True #does it fall from gravity
     mass: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0))
     restitution: torch.Tensor = field(default_factory=lambda: torch.tensor(0.3))
-    linearVelocity: torch.Tensor= field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
-    angularVelocity: torch.Tensor= field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
+    linearVelocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
+    angularVelocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
+    _neighbor_map: dict = field(default_factory=dict, init=False)  # Stores adjacency information
+    _needs_neighbor_update: bool = field(default=True, init=False)  # Flag for when to rebuild neighbor map
+    
 
     @property
     def vertices(self):
@@ -40,6 +45,7 @@ class mesh:
                 self._color = self._color.expand(len(value), -1)
         
         self._vertices = value
+        self._needs_neighbor_update = True  # Mark for update when vertices change
 
     @property
     def polys(self):
@@ -56,6 +62,7 @@ class mesh:
                 raise ValueError("Polygon indices exceed vertex array bounds")
         
         self._polys = value
+        self._needs_neighbor_update = True  # Mark for update when polygons change
 
     @property
     def color(self):
@@ -64,19 +71,113 @@ class mesh:
     @color.setter
     def color(self, value):
         if not isinstance(value, torch.Tensor):
-            value = torch.tensor(value, dtype=torch.float32, device=DEVICE)
+            value = torch.tensor(value, dtype=torch.uint8, device=DEVICE)
         
-        # Ensure color has correct shape (either 1 color or N colors where N is number of vertices)
+        # Ensure color has correct shape
         if value.ndim == 1:
-            value = value.unsqueeze(0)  # make it 2D with single color
+            value = value.unsqueeze(0)
         
         if len(value) not in (1, len(self._vertices)):
-            raise ValueError(f"Color must have length 1 or {len(self._vertices)} (number of vertices)")
+            raise ValueError(f"Color must have length 1 or {len(self._vertices)}")
         
         self._color = value
 
     def __post_init__(self):
+        #self._update_neighbor_map()
         pass
+
+    def _update_neighbor_map(self):
+        """Build or update the neighbor map data structure"""
+        if not self._needs_neighbor_update:
+            return
+            
+        self._neighbor_map = {
+            'vertex_to_faces': {},  # Maps vertex indices to list of face indices
+            'face_to_faces': {},    # Maps face indices to adjacent face indices
+            'vertex_to_vertices': {}  # Maps vertex indices to adjacent vertex indices
+        }
+        
+        # Initialize structures
+        for v_idx in range(len(self._vertices)):
+            self._neighbor_map['vertex_to_faces'][v_idx] = []
+            self._neighbor_map['vertex_to_vertices'][v_idx] = set()
+        
+        # Process each face
+        for face_idx, face in enumerate(self._polys):
+            # Remove any padding values (like -1) if present
+            verts = [v for v in face if v >= 0]
+            n_verts = len(verts)
+            
+            # Skip degenerate faces
+            if n_verts < 3:
+                continue
+                
+            # Add this face to each vertex's face list
+            for v in verts:
+                self._neighbor_map['vertex_to_faces'][v].append(face_idx)
+            
+            # For each edge in the face, build adjacency information
+            for i in range(n_verts):
+                v1 = verts[i]
+                v2 = verts[(i+1)%n_verts]
+                
+                # Add to vertex adjacency
+                self._neighbor_map['vertex_to_vertices'][v1].add(v2)
+                self._neighbor_map['vertex_to_vertices'][v2].add(v1)
+        
+        # Convert sets to lists for easier use
+        for v in self._neighbor_map['vertex_to_vertices']:
+            self._neighbor_map['vertex_to_vertices'][v] = list(self._neighbor_map['vertex_to_vertices'][v])
+        
+        # Now build face-to-face adjacency
+        edge_to_faces = {}  # Maps edges (as sorted tuples) to list of face indices
+        
+        for face_idx, face in enumerate(self._polys):
+            verts = [v for v in face if v >= 0]
+            n_verts = len(verts)
+            
+            if n_verts < 3:
+                continue
+                
+            for i in range(n_verts):
+                v1, v2 = verts[i], verts[(i+1)%n_verts]
+                edge = tuple(sorted((v1, v2)))
+                
+                if edge not in edge_to_faces:
+                    edge_to_faces[edge] = []
+                edge_to_faces[edge].append(face_idx)
+        
+        # Now use edge_to_faces to find adjacent faces
+        for face_idx in range(len(self._polys)):
+            self._neighbor_map['face_to_faces'][face_idx] = set()
+        
+        for edge, faces in edge_to_faces.items():
+            if len(faces) > 1:  # Only edges shared by multiple faces create adjacency
+                for i in range(len(faces)):
+                    for j in range(i+1, len(faces)):
+                        self._neighbor_map['face_to_faces'][faces[i]].add(faces[j])
+                        self._neighbor_map['face_to_faces'][faces[j]].add(faces[i])
+        
+        # Convert sets to lists
+        for face_idx in self._neighbor_map['face_to_faces']:
+            self._neighbor_map['face_to_faces'][face_idx] = list(self._neighbor_map['face_to_faces'][face_idx])
+        
+        self._needs_neighbor_update = False
+
+    def get_adjacent_faces(self, face_idx):
+        """Get list of face indices adjacent to the given face"""
+        #self._update_neighbor_map()
+        return self._neighbor_map['face_to_faces'].get(face_idx, [])
+
+    def get_faces_for_vertex(self, vertex_idx):
+        """Get list of face indices that contain the given vertex"""
+        #self._update_neighbor_map()
+        return self._neighbor_map['vertex_to_faces'].get(vertex_idx, [])
+
+    def get_adjacent_vertices(self, vertex_idx):
+        """Get list of vertex indices adjacent to the given vertex"""
+        #self._update_neighbor_map()
+        return self._neighbor_map['vertex_to_vertices'].get(vertex_idx, [])
 
     @classmethod
     def toTri(cls, self):
