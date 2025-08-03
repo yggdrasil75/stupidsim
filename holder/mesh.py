@@ -378,8 +378,9 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
                 tri_verts_view = view_verts[triangles][:, :, :3]  # Get view space coordinates
                 v0, v1, v2 = tri_verts_view[:, 0], tri_verts_view[:, 1], tri_verts_view[:, 2]
                 normals = torch.linalg.cross(v1 - v0, v2 - v0)
-                dot_prods = torch.sum(normals * (v0), dim=1)  # Eye is at origin in view space
-                visible_mask = dot_prods < 0
+                view_dir = -tri_verts_view.mean(dim=1)  # Direction from triangle to camera
+                dot_prods = torch.sum(normals * view_dir, dim=1)
+                visible_mask = dot_prods > 0  # Normal facing towards camera
 
                 visible_tris = triangles[visible_mask].tolist()
                 depths = torch.mean(tri_verts_view[visible_mask][:, :, 2], dim=1)

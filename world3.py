@@ -257,8 +257,9 @@ class World:
             
             self.heightmap = torch.clamp(self.heightmap, self.min_height.item(), self.max_height.item())
         
-        self.update_vertices_based_on_heightmap()
-        self.update_colors()
+        if steps > 0:
+            self.update_vertices_based_on_heightmap()
+            self.update_colors()
 
 
 
