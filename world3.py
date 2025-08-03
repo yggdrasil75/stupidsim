@@ -12,7 +12,7 @@ from util import time_function, print_timing_stats
 @dataclass
 class World:
     torch.set_default_device(DEVICE)
-    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
+    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=64, rings=64))
     sea_level: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0, dtype=torch.float32))
     min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
     max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
@@ -75,58 +75,71 @@ class World:
 
     @time_function
     def _grow_plates(self):
-        """Optimized plate growth using tensor operations and batched processing."""
+        """Optimized but still realistic plate growth using batched frontier processing."""
         vertex_neighbors = self.sphere_mesh._neighbor_map['vertex_to_vertices']
         num_vertices = len(self.sphere_mesh.vertices)
-        
-        # Convert neighbor map to tensor format for faster access
-        max_neighbors = max(len(v) for v in vertex_neighbors.values())
-        neighbor_tensor = torch.full((num_vertices, max_neighbors), -1, dtype=torch.long, device=DEVICE)
-        for v_idx, neighbors in vertex_neighbors.items():
-            neighbor_tensor[v_idx, :len(neighbors)] = torch.tensor(neighbors, dtype=torch.long, device=DEVICE)
-        
-        # Precompute all vertex positions as a tensor
         vertex_positions = self.sphere_mesh.vertices
         
-        # Initialize plate centers
-        plate_centers = torch.zeros(len(self.plates), 3, device=DEVICE)
-        for i, plate in enumerate(self.plates):
-            plate_centers[i] = vertex_positions[plate.vertex_ids[0]]
+        # Precompute plate centers and growth rates
+        plate_centers = torch.stack([vertex_positions[plate.vertex_ids[0]] 
+                                    for plate in self.plates])
+        growth_rates = torch.tensor([plate.growth_rate for plate in self.plates], 
+                                device=DEVICE)
         
-        # Create a mask for unassigned vertices
-        unassigned = self.plate_ids == -1
+        # Convert neighbor map to list of tensors for faster access
+        neighbor_tensors = [torch.tensor(neighbors, device=DEVICE) 
+                            for neighbors in vertex_neighbors.values()]
         
-        while torch.any(unassigned):
-            # Find all frontier vertices (unassigned vertices adjacent to assigned ones)
-            assigned_neighbors = neighbor_tensor[self.plate_ids != -1]
-            frontier_mask = torch.isin(neighbor_tensor, assigned_neighbors) & (self.plate_ids == -1).unsqueeze(1)
-            frontier_verts = torch.unique(torch.where(frontier_mask)[0])
+        while torch.any(self.plate_ids == -1):
+            # Find all assigned vertices
+            assigned_mask = self.plate_ids != -1
+            assigned_indices = torch.where(assigned_mask)[0]
             
-            if len(frontier_verts) == 0:
+            if len(assigned_indices) == 0:
                 break
                 
-            # Get positions of frontier vertices
-            frontier_pos = vertex_positions[frontier_verts]
+            # Find frontier vertices in batches
+            frontier = []
+            batch_size = 1024  # Adjust based on memory constraints
+            for i in range(0, len(assigned_indices), batch_size):
+                batch_indices = assigned_indices[i:i+batch_size]
+                
+                # Get neighbors of all assigned vertices in batch
+                batch_neighbors = torch.cat([neighbor_tensors[idx] 
+                                            for idx in batch_indices])
+                
+                # Find unassigned neighbors
+                unassigned_neighbors = batch_neighbors[self.plate_ids[batch_neighbors] == -1]
+                frontier.append(unassigned_neighbors)
+                
+            if not frontier:
+                break
+                
+            frontier_verts = torch.cat(frontier).unique()
             
-            # Find all possible plate claims (vectorized)
-            # Distance from each frontier vertex to each plate center
+            # For each frontier vertex, find all plates that could claim it
+            frontier_pos = vertex_positions[frontier_verts]
             dists = torch.cdist(frontier_pos, plate_centers)
             
-            # Get growth rates for all plates
-            growth_rates = torch.tensor([p.growth_rate for p in self.plates], device=DEVICE)
-            
-            # Calculate scores (vectorized)
+            # Calculate scores with randomness
             rand_factors = 1.0 + (torch.rand(len(frontier_verts), device=DEVICE) * 0.5)
             scores = (growth_rates / (dists + 1e-6)) * rand_factors.unsqueeze(1)
             
-            # Find best plate for each frontier vertex
-            best_plate_ids = torch.argmax(scores, dim=1)
+            # Get all possible claims (plate, vertex pairs)
+            potential_plates = torch.argmax(scores, dim=1)
+            potential_claims = torch.stack((frontier_verts, potential_plates), dim=1)
             
-            # Update plate assignments
-            self.plate_ids[frontier_verts] = best_plate_ids
+            # Sort claims by score to maintain realistic growth priority
+            sorted_indices = torch.argsort(scores.gather(1, potential_plates.unsqueeze(1)), 
+                                        descending=True)
+            sorted_claims = potential_claims[sorted_indices.flatten()]
             
-            # Update unassigned mask
-            unassigned = self.plate_ids == -1
+            # Process claims in order, tracking which vertices get claimed
+            claimed = torch.zeros(num_vertices, dtype=torch.bool, device=DEVICE)
+            for vert_idx, plate_id in sorted_claims:
+                if not claimed[vert_idx]:
+                    self.plate_ids[vert_idx] = plate_id
+                    claimed[vert_idx] = True
         
         # Update Plate objects with their final vertex sets
         for i, plate in enumerate(self.plates):
