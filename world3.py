@@ -6,11 +6,12 @@ from shapes.sphere import create_sphere_mesh
 import dearpygui.dearpygui as dpg
 import numpy as np
 from plate import Plate
+import math
 
 @dataclass
 class World:
     torch.set_default_device(DEVICE)
-    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
+    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=64, rings=64))
     sea_level: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0, dtype=torch.float32))
     min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
     max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
@@ -251,11 +252,21 @@ class World:
         self.update_vertices_based_on_heightmap()
         self.update_colors()
 
+
+
+
 def render_world():
     world = World()
+    
+    # Initialize camera parameters
     eye = torch.tensor([3.0, 2.0, 3.0], dtype=torch.float32, device=DEVICE)
     lookat = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=DEVICE)
     up = torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32, device=DEVICE)
+    
+    # Camera control parameters
+    camera_distance = torch.norm(eye).item()
+    azimuth = math.atan2(eye[2].item(), eye[0].item())  # Angle around Y axis
+    elevation = math.asin(eye[1].item() / camera_distance)  # Angle above/below horizon
     
     dpg.create_context()
     dpg.create_viewport(title='Procedural World', width=1000, height=700)
@@ -275,9 +286,57 @@ def render_world():
                             with dpg.drawlist(width=20, height=20):
                                 dpg.draw_rectangle((0, 0), (20, 20), color=color, fill=color)
                             dpg.add_text(f"Plate {i} ({plate.plate_type[:4]})")
-    
+
+    def update_camera_position():
+        nonlocal eye
+        # Convert spherical coordinates (distance, azimuth, elevation) to Cartesian
+        x = camera_distance * math.cos(elevation) * math.cos(azimuth)
+        y = camera_distance * math.sin(elevation)
+        z = camera_distance * math.cos(elevation) * math.sin(azimuth)
+        eye = torch.tensor([x, y, z], dtype=torch.float32, device=DEVICE)
+        
+        # Update camera info text
+        dpg.set_value("camera_info", 
+                     f"Camera: Dist={camera_distance:.2f}, Azim={math.degrees(azimuth):.1f}°, Elev={math.degrees(elevation):.1f}°")
+
+    def camera_control_callback(sender, app_data):
+        nonlocal camera_distance, azimuth, elevation
+        if sender == "camera_distance":
+            camera_distance = app_data
+        elif sender == "camera_azimuth":
+            azimuth = math.radians(app_data)
+        elif sender == "camera_elevation":
+            # Limit elevation to prevent flipping
+            elevation = math.radians(max(-89, min(89, app_data)))
+        
+        update_camera_position()
+
+    def mouse_drag_callback(sender, app_data):
+        if dpg.is_mouse_button_dragging(dpg.mvMouseButton_Left, 1.0):
+            drag_delta = dpg.get_mouse_drag_delta()
+            dpg.is_mouse_button_released(dpg.mvMouseButton_Left)
+            
+            nonlocal azimuth, elevation
+            if isinstance(drag_delta, float):
+                azimuth -= drag_delta * 0.01
+                elevation += drag_delta * 0.01
+            # if isinstance(drag_delta, list):
+            #     azimuth -= drag_delta[0] * 0.01
+            #     elevation += drag_delta[1] * 0.01
+
+            elevation = max(-math.pi/2 + 0.1, min(math.pi/2 - 0.1, elevation))
+            
+            update_camera_position()
+
+    def mouse_wheel_callback(sender, app_data):
+        nonlocal camera_distance
+        camera_distance *= 0.9 if app_data > 0 else 1.1
+        camera_distance = max(0.1, min(20.0, camera_distance))
+        update_camera_position()
+        dpg.set_value("camera_distance", camera_distance)
+
     with dpg.window(label="Legend", tag="legend_window", show=True, width=200, pos=(800, 0)):
-        pass # To be populated by callback
+        pass
 
     with dpg.window(label="3D View", tag="primary", width=800, height=600):
         with dpg.group(horizontal=True):
@@ -290,11 +349,45 @@ def render_world():
                 horizontal=True
             )
         
+        # Add camera controls
+        with dpg.collapsing_header(label="Camera Controls", default_open=True):
+            dpg.add_text("Camera Position:", tag="camera_info")
+            dpg.add_slider_float(
+                label="Distance", 
+                tag="camera_distance",
+                min_value=0.5, 
+                max_value=15.0, 
+                default_value=camera_distance,
+                callback=camera_control_callback
+            )
+            dpg.add_slider_float(
+                label="Azimuth (degrees)", 
+                tag="camera_azimuth",
+                min_value=-180, 
+                max_value=180, 
+                default_value=math.degrees(azimuth),
+                callback=camera_control_callback
+            )
+            dpg.add_slider_float(
+                label="Elevation (degrees)", 
+                tag="camera_elevation",
+                min_value=-85, 
+                max_value=85, 
+                default_value=math.degrees(elevation),
+                callback=camera_control_callback
+            )
+        
         with dpg.drawlist(width=800, height=600, tag="draw_area"):
             pass
 
+    # Set up mouse controls
+    with dpg.handler_registry():
+        dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, callback=mouse_drag_callback)
+        dpg.add_mouse_wheel_handler(callback=mouse_wheel_callback)
+
     # Initial setup
     update_colormap_callback(None, world.colormap_mode)
+    update_camera_position()
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.set_primary_window("primary", True)
