@@ -7,11 +7,12 @@ import dearpygui.dearpygui as dpg
 import numpy as np
 from plate import Plate
 import math
+from util import time_function, print_timing_stats
 
 @dataclass
 class World:
     torch.set_default_device(DEVICE)
-    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=64, rings=64))
+    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
     sea_level: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0, dtype=torch.float32))
     min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
     max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
@@ -29,6 +30,7 @@ class World:
     plate_colors: torch.Tensor = field(init=False)
     colormap_mode: str = field(default="plates")  # Changed default to show new feature
     
+    @time_function
     def __post_init__(self):
         # Initialize simulation state arrays based on the sphere mesh vertices
         num_vertices = len(self.sphere_mesh.vertices)
@@ -51,7 +53,9 @@ class World:
         # Generate colors for the final set of plates
         self.plate_colors = torch.randint(0, 256, (len(self.plates), 4), dtype=torch.uint8, device=DEVICE)
         self.plate_colors[:, 3] = 255 # Full alpha
+        print(f'total vertices: {len(self.sphere_mesh.vertices)}')
 
+    @time_function
     def _initialize_plates(self):
         """Selects initial plate centers and creates Plate objects."""
         num_vertices = len(self.sphere_mesh.vertices)
@@ -69,6 +73,7 @@ class World:
             self.plates.append(plate)
             self.plate_ids[center_idx] = i
 
+    @time_function
     def _grow_plates(self):
         """Grows plates from centers until all vertices are assigned using a weighted frontier expansion."""
         vertex_neighbors = self.sphere_mesh._neighbor_map['vertex_to_vertices']
@@ -116,6 +121,7 @@ class World:
         for i, plate in enumerate(self.plates):
             plate.vertex_ids = torch.where(self.plate_ids == i)[0]
 
+    @time_function
     def _validate_and_reindex_plates(self):
         """Checks for disjointed plates, splits or merges them, and re-indexes all plates."""
         vertex_neighbors = self.sphere_mesh._neighbor_map['vertex_to_vertices']
@@ -194,7 +200,7 @@ class World:
         self.plate_ids = new_plate_ids_tensor
         self.plate_count = torch.tensor(len(self.plates))
 
-
+    @time_function
     def update_vertices_based_on_heightmap(self):
         """Update the mesh vertices based on the current heightmap"""
 
@@ -204,6 +210,7 @@ class World:
         #scaled_vertices = normals * (1.0 + self.heightmap.unsqueeze(1))
         #self.sphere_mesh.vertices = scaled_vertices
     
+    @time_function
     def update_colors(self):
         """Update mesh colors based on current colormap mode"""
         num_vertices = len(self.sphere_mesh.vertices)
@@ -235,6 +242,7 @@ class World:
             # TODO: Implement temperature colormap
             self.sphere_mesh.color = torch.full((num_vertices, 4), 128, dtype=torch.uint8, device=DEVICE)
     
+    @time_function
     def simulate_erosion(self, steps: int = 1):
         """Simple erosion simulation step"""
         for _ in range(steps):
@@ -265,49 +273,54 @@ def render_world():
     
     # Camera control parameters
     camera_distance = torch.norm(eye).item()
-    azimuth = math.atan2(eye[2].item(), eye[0].item())  # Angle around Y axis
-    elevation = math.asin(eye[1].item() / camera_distance)  # Angle above/below horizon
+    azimuth = np.atan2(eye[2].item(), eye[0].item())  # Angle around Y axis
+    elevation = np.asin(eye[1].item() / camera_distance)  # Angle above/below horizon
     
     dpg.create_context()
     dpg.create_viewport(title='Procedural World', width=1000, height=700)
 
+    @time_function
     def update_colormap_callback(sender, app_data):
+        oldmap = world.colormap_mode
         world.colormap_mode = app_data
-        dpg.configure_item("legend_window", show=(app_data == "plates"))
-        if app_data == "plates":
-            # Rebuild legend
-            dpg.delete_item("legend_window", children_only=True)
-            with dpg.group(parent="legend_window"):
-                for i, plate in enumerate(world.plates):
-                    if i < len(world.plate_colors):
-                        color = world.plate_colors[i].cpu().numpy().tolist()
-                        with dpg.group(horizontal=True):
-                            # Use a drawlist to create a colored square
-                            with dpg.drawlist(width=20, height=20):
-                                dpg.draw_rectangle((0, 0), (20, 20), color=color, fill=color)
-                            dpg.add_text(f"Plate {i} ({plate.plate_type[:4]})")
+        if world.colormap_mode != oldmap:
+            dpg.configure_item("legend_window", show=(app_data == "plates"))
+            if app_data == "plates":
+                # Rebuild legend
+                dpg.delete_item("legend_window", children_only=True)
+                with dpg.group(parent="legend_window"):
+                    for i, plate in enumerate(world.plates):
+                        if i < len(world.plate_colors):
+                            color = world.plate_colors[i].cpu().numpy().tolist()
+                            with dpg.group(horizontal=True):
+                                # Use a drawlist to create a colored square
+                                with dpg.drawlist(width=20, height=20):
+                                    dpg.draw_rectangle((0, 0), (20, 20), color=color, fill=color)
+                                dpg.add_text(f"Plate {i} ({plate.plate_type[:4]})")
+            world.update_colors()
 
+    @time_function
     def update_camera_position():
         nonlocal eye
         # Convert spherical coordinates (distance, azimuth, elevation) to Cartesian
-        x = camera_distance * math.cos(elevation) * math.cos(azimuth)
-        y = camera_distance * math.sin(elevation)
-        z = camera_distance * math.cos(elevation) * math.sin(azimuth)
+        x = camera_distance * np.cos(elevation) * np.cos(azimuth)
+        y = camera_distance * np.sin(elevation)
+        z = camera_distance * np.cos(elevation) * np.sin(azimuth)
         eye = torch.tensor([x, y, z], dtype=torch.float32, device=DEVICE)
         
         # Update camera info text
         dpg.set_value("camera_info", 
-                     f"Camera: Dist={camera_distance:.2f}, Azim={math.degrees(azimuth):.1f}°, Elev={math.degrees(elevation):.1f}°")
+                     f"Camera: Dist={camera_distance:.2f}, Azim={np.degrees(azimuth):.1f}°, Elev={np.degrees(elevation):.1f}°")
 
     def camera_control_callback(sender, app_data):
         nonlocal camera_distance, azimuth, elevation
         if sender == "camera_distance":
             camera_distance = app_data
         elif sender == "camera_azimuth":
-            azimuth = math.radians(app_data)
+            azimuth = np.radians(app_data)
         elif sender == "camera_elevation":
             # Limit elevation to prevent flipping
-            elevation = math.radians(max(-89, min(89, app_data)))
+            elevation = np.radians(max(-89, min(89, app_data)))
         
         update_camera_position()
 
@@ -349,13 +362,17 @@ def render_world():
                 horizontal=True
             )
         
+        with dpg.drawlist(width=800, height=600, tag="draw_area"):
+            pass
+    
+    with dpg.window(label='Camera Controls'):
         # Add camera controls
         with dpg.collapsing_header(label="Camera Controls", default_open=True):
             dpg.add_text("Camera Position:", tag="camera_info")
             dpg.add_slider_float(
                 label="Distance", 
                 tag="camera_distance",
-                min_value=0.5, 
+                min_value=1.0, 
                 max_value=15.0, 
                 default_value=camera_distance,
                 callback=camera_control_callback
@@ -376,9 +393,6 @@ def render_world():
                 default_value=math.degrees(elevation),
                 callback=camera_control_callback
             )
-        
-        with dpg.drawlist(width=800, height=600, tag="draw_area"):
-            pass
 
     # Set up mouse controls
     with dpg.handler_registry():
@@ -393,8 +407,9 @@ def render_world():
     dpg.set_primary_window("primary", True)
     
     while dpg.is_dearpygui_running():
+        print_timing_stats()
         world.simulate_erosion(steps=0) # Run simulation logic, but don't advance time yet
-        world.update_colors() # ensure colors are correct
+        #world.update_colors() # ensure colors are correct
 
         dpg.delete_item("draw_area", children_only=True)
         

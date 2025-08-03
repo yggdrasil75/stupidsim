@@ -3,8 +3,7 @@ import math
 import torch
 import dearpygui.dearpygui as dpg
 from globals import DEVICE
-
-#DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+from util import time_function
 
 
 @dataclass
@@ -259,7 +258,7 @@ class mesh:
             angularVelocity=self.angularVelocity.clone()
         )
 
-
+@time_function
 def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: torch.Tensor, fov = 90.0,
                 res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
         -> tuple[list[torch.Tensor],list,list[torch.Tensor]]:
