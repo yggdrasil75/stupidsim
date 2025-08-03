@@ -1,10 +1,13 @@
 from dataclasses import dataclass, field
+import heapq
 import math
 import torch
 import dearpygui.dearpygui as dpg
 from globals import DEVICE
 from util import time_function
+import numpy as np
 
+_mesh_cache = {}
 
 @dataclass
 class mesh:
@@ -259,9 +262,40 @@ class mesh:
         )
 
 @time_function
+def get_lod_level(view_verts: torch.Tensor, triangles: torch.Tensor):
+    #TODO: Please implemente
+    pass
+
+@time_function
+def simplify_mesh(vertices: torch.Tensor, 
+                 triangles: torch.Tensor, 
+                 lod_level: float):
+    #TODO: please implement
+    pass
+
+def is_in_frustum(mesh_vertices, view_matrix, proj_matrix):
+    # Transform all vertices to clip space
+    homogenous_verts = torch.cat([mesh_vertices, torch.ones(len(mesh_vertices), 1, device=DEVICE)], dim=1)
+    clip_verts = torch.matmul(homogenous_verts, (view_matrix @ proj_matrix).T)
+    
+    # Normalize to NDC
+    ndc_verts = clip_verts / clip_verts[:, 3].unsqueeze(1)
+    
+    # Check if any vertex is within the frustum
+    in_frustum = ((ndc_verts[:, 0].abs() <= 1.0) & (ndc_verts[:, 1].abs() <= 1.0) & 
+                 (ndc_verts[:, 2] >= -1.0) & (ndc_verts[:, 2] <= 1.0))
+    
+    return torch.any(in_frustum)
+
+@time_function
 def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: torch.Tensor, fov = 90.0,
                 res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
         -> tuple[list[torch.Tensor],list,list[torch.Tensor]]:
+    global _mesh_cache
+    if torch.cuda.is_available():
+        eye = eye.half()
+        lookat = lookat.half()
+        up = up.half()
     fov = torch.tensor(fov, dtype=torch.float32, device=DEVICE)
     zAxis: torch.Tensor = lookat - eye
     zAxis = zAxis / torch.norm(zAxis)
@@ -293,40 +327,63 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
     all_depths = []
 
     for obj in meshes:
-        # Convert to homogeneous coordinates
-        homogenous_verts = torch.cat([
-            obj.vertices, 
-            torch.ones(obj.vertices.shape[0], 1, device=DEVICE), 
-        ], dim=1)
-
-        # Transform to view space
-        view_verts = torch.matmul(homogenous_verts, viewMatrix.T)
-        
-        # Project to clip space
-        proj_verts = torch.matmul(view_verts, projMatrix.T)
-        proj_verts = proj_verts / proj_verts[:, 3].unsqueeze(1)
-
-        # Convert to screen coordinates
-        screen_verts = torch.empty_like(proj_verts[:, :2])
-        screen_verts[:, 0] = (proj_verts[:, 0] + 1) * 0.5 * res[0]
-        screen_verts[:, 1] = (1 - (proj_verts[:, 1] + 1) * 0.5) * res[1]
-
-        # Get triangles (convert to triangles if needed)
-        if obj._polys.shape[1] == 3:
-            triangles = obj._polys
+        # if not is_in_frustum(obj.vertices, viewMatrix, projMatrix):
+        #     all_screen_verts.append(torch.empty(0, 2, device=DEVICE))
+        #     all_visible_tris.append([])
+        #     all_depths.append(torch.empty(0, device=DEVICE))
+        #     continue
+        cache_key = (id(obj), tuple(eye.cpu().numpy()), tuple(lookat.cpu().numpy()), tuple(up.cpu().numpy()))
+        if cache_key in _mesh_cache and not obj._needs_neighbor_update:
+            screen_verts, visible_tris, depths = _mesh_cache[cache_key]
         else:
-            triangulated = obj.toTri(obj)
-            triangles = triangulated._polys
+            mesh_center = torch.mean(obj.vertices, dim=0)
+            view_center = torch.matmul(torch.cat([mesh_center, torch.ones(1, device=DEVICE)]), viewMatrix.T)[:3]
+            if torch.dot(view_center, view_center) < 0:  # Entire mesh is backfacing
+                all_screen_verts.append(torch.empty(0, 2, device=DEVICE))
+                all_visible_tris.append([])
+                all_depths.append(torch.empty(0, device=DEVICE))
+                continue
 
-        # Backface culling
-        tri_verts_view = view_verts[triangles][:, :, :3]  # Get view space coordinates
-        v0, v1, v2 = tri_verts_view[:, 0], tri_verts_view[:, 1], tri_verts_view[:, 2]
-        normals = torch.linalg.cross(v1 - v0, v2 - v0)
-        dot_prods = torch.sum(normals * (v0), dim=1)  # Eye is at origin in view space
-        visible_mask = dot_prods < 0
+            homogenous_verts = torch.cat([obj.vertices, torch.ones(obj.vertices.shape[0], 1, device=DEVICE), ], dim=1)
 
-        visible_tris = triangles[visible_mask].tolist()
-        depths = torch.mean(tri_verts_view[visible_mask][:, :, 2], dim=1)
+            # Transform to view space
+            view_verts = torch.matmul(homogenous_verts, viewMatrix.T)
+            
+            # Project to clip space
+            proj_verts = torch.matmul(view_verts, projMatrix.T)
+            proj_verts = proj_verts / proj_verts[:, 3].unsqueeze(1)
+
+            # Convert to screen coordinates
+            screen_verts = torch.empty_like(proj_verts[:, :2])
+            screen_verts[:, 0] = (proj_verts[:, 0] + 1) * 0.5 * res[0]
+            screen_verts[:, 1] = (1 - (proj_verts[:, 1] + 1) * 0.5) * res[1]
+
+            # Get triangles (convert to triangles if needed)
+            if obj._polys.shape[1] == 3:
+                triangles = obj._polys
+            else:
+                triangulated = obj.toTri(obj)
+                triangles = triangulated._polys
+
+            #if I could figure this out, then I would use this as well. but I cant.
+            # lod_level = get_lod_level(view_verts, triangles)
+            # if lod_level > 0:
+            #     vertices, triangles = simplify_mesh(obj.vertices, triangles, lod_level)
+            #     # Recompute homogenous_verts with simplified vertices
+            #     homogenous_verts = torch.cat([vertices, torch.ones(vertices.shape[0], 1, device=DEVICE)], dim=1)
+
+            # Backface culling
+            with torch.no_grad():
+                tri_verts_view = view_verts[triangles][:, :, :3]  # Get view space coordinates
+                v0, v1, v2 = tri_verts_view[:, 0], tri_verts_view[:, 1], tri_verts_view[:, 2]
+                normals = torch.linalg.cross(v1 - v0, v2 - v0)
+                dot_prods = torch.sum(normals * (v0), dim=1)  # Eye is at origin in view space
+                visible_mask = dot_prods < 0
+
+                visible_tris = triangles[visible_mask].tolist()
+                depths = torch.mean(tri_verts_view[visible_mask][:, :, 2], dim=1)
+
+            _mesh_cache[cache_key] = (screen_verts, visible_tris, depths)
 
         all_screen_verts.append(screen_verts)
         all_visible_tris.append(visible_tris)

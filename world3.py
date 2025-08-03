@@ -28,7 +28,7 @@ class World:
     plate_ids: torch.Tensor = field(init=False)
     plates: list[Plate] = field(default_factory=list, init=False)
     plate_colors: torch.Tensor = field(init=False)
-    colormap_mode: str = field(default="plates")  # Changed default to show new feature
+    colormap_mode: str = field(default="null")  # Changed default to show new feature
     
     @time_function
     def __post_init__(self):
@@ -279,7 +279,7 @@ def render_world():
     dpg.create_context()
     dpg.create_viewport(title='Procedural World', width=1000, height=700)
 
-    @time_function
+    #@time_function
     def update_colormap_callback(sender, app_data):
         oldmap = world.colormap_mode
         world.colormap_mode = app_data
@@ -400,7 +400,7 @@ def render_world():
         dpg.add_mouse_wheel_handler(callback=mouse_wheel_callback)
 
     # Initial setup
-    update_colormap_callback(None, world.colormap_mode)
+    update_colormap_callback(None, "plates")
     update_camera_position()
     dpg.setup_dearpygui()
     dpg.show_viewport()
