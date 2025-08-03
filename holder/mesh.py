@@ -2,9 +2,9 @@ from dataclasses import dataclass, field
 import math
 import torch
 import dearpygui.dearpygui as dpg
+from globals import DEVICE
 
-
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 @dataclass
@@ -77,13 +77,13 @@ class mesh:
         if value.ndim == 1:
             value = value.unsqueeze(0)
         
-        if len(value) not in (1, len(self._vertices)):
-            raise ValueError(f"Color must have length 1 or {len(self._vertices)}")
+        if value.shape[0] != 1 and value.shape[0] != len(self._vertices):
+             raise ValueError(f"Color tensor must have 1 or {len(self._vertices)} rows, but got {value.shape[0]}")
         
         self._color = value
 
     def __post_init__(self):
-        #self._update_neighbor_map()
+        self._update_neighbor_map()
         pass
 
     def _update_neighbor_map(self):
@@ -103,7 +103,7 @@ class mesh:
             self._neighbor_map['vertex_to_vertices'][v_idx] = set()
         
         # Process each face
-        for face_idx, face in enumerate(self._polys):
+        for face_idx, face in enumerate(self._polys.cpu().numpy()):
             # Remove any padding values (like -1) if present
             verts = [v for v in face if v >= 0]
             n_verts = len(verts)
@@ -132,7 +132,7 @@ class mesh:
         # Now build face-to-face adjacency
         edge_to_faces = {}  # Maps edges (as sorted tuples) to list of face indices
         
-        for face_idx, face in enumerate(self._polys):
+        for face_idx, face in enumerate(self._polys.cpu().numpy()):
             verts = [v for v in face if v >= 0]
             n_verts = len(verts)
             
@@ -166,17 +166,17 @@ class mesh:
 
     def get_adjacent_faces(self, face_idx):
         """Get list of face indices adjacent to the given face"""
-        #self._update_neighbor_map()
+        self._update_neighbor_map()
         return self._neighbor_map['face_to_faces'].get(face_idx, [])
 
     def get_faces_for_vertex(self, vertex_idx):
         """Get list of face indices that contain the given vertex"""
-        #self._update_neighbor_map()
+        self._update_neighbor_map()
         return self._neighbor_map['vertex_to_faces'].get(vertex_idx, [])
 
     def get_adjacent_vertices(self, vertex_idx):
         """Get list of vertex indices adjacent to the given vertex"""
-        #self._update_neighbor_map()
+        self._update_neighbor_map()
         return self._neighbor_map['vertex_to_vertices'].get(vertex_idx, [])
 
     @classmethod
