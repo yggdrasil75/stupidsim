@@ -263,7 +263,7 @@ class mesh:
 
 @time_function
 def get_lod_level(view_verts: torch.Tensor, triangles: torch.Tensor):
-    #TODO: Please implemente
+    #TODO: Please implement
     pass
 
 @time_function
@@ -327,6 +327,7 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
     all_depths = []
 
     for obj in meshes:
+        # unfortunately when I tried this I kept getting the main object outside frustrum if any part of it was. so its not in use.
         # if not is_in_frustum(obj.vertices, viewMatrix, projMatrix):
         #     all_screen_verts.append(torch.empty(0, 2, device=DEVICE))
         #     all_visible_tris.append([])
