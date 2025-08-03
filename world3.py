@@ -75,49 +75,60 @@ class World:
 
     @time_function
     def _grow_plates(self):
-        """Grows plates from centers until all vertices are assigned using a weighted frontier expansion."""
+        """Optimized plate growth using tensor operations and batched processing."""
         vertex_neighbors = self.sphere_mesh._neighbor_map['vertex_to_vertices']
+        num_vertices = len(self.sphere_mesh.vertices)
         
-        while torch.any(self.plate_ids == -1):
-            # Find all unassigned vertices adjacent to any assigned vertex (the global frontier)
-            assigned_mask = self.plate_ids != -1
-            assigned_indices = torch.where(assigned_mask)[0]
+        # Convert neighbor map to tensor format for faster access
+        max_neighbors = max(len(v) for v in vertex_neighbors.values())
+        neighbor_tensor = torch.full((num_vertices, max_neighbors), -1, dtype=torch.long, device=DEVICE)
+        for v_idx, neighbors in vertex_neighbors.items():
+            neighbor_tensor[v_idx, :len(neighbors)] = torch.tensor(neighbors, dtype=torch.long, device=DEVICE)
+        
+        # Precompute all vertex positions as a tensor
+        vertex_positions = self.sphere_mesh.vertices
+        
+        # Initialize plate centers
+        plate_centers = torch.zeros(len(self.plates), 3, device=DEVICE)
+        for i, plate in enumerate(self.plates):
+            plate_centers[i] = vertex_positions[plate.vertex_ids[0]]
+        
+        # Create a mask for unassigned vertices
+        unassigned = self.plate_ids == -1
+        
+        while torch.any(unassigned):
+            # Find all frontier vertices (unassigned vertices adjacent to assigned ones)
+            assigned_neighbors = neighbor_tensor[self.plate_ids != -1]
+            frontier_mask = torch.isin(neighbor_tensor, assigned_neighbors) & (self.plate_ids == -1).unsqueeze(1)
+            frontier_verts = torch.unique(torch.where(frontier_mask)[0])
             
-            global_frontier = set()
-            for v_idx in assigned_indices.tolist():
-                plate_id = self.plate_ids[v_idx].item()
-                for neighbor in vertex_neighbors[v_idx]:
-                    if self.plate_ids[neighbor] == -1:
-                        global_frontier.add((neighbor, plate_id))
-
-            if not global_frontier:
-                # Should not happen if graph is connected, but as a safeguard
+            if len(frontier_verts) == 0:
                 break
-
-            # Score each potential claim based on distance, growth rate, and randomness
-            claims = []
-            for frontier_vert_idx, claiming_plate_id in global_frontier:
-                plate = self.plates[claiming_plate_id]
-                center_pos = self.sphere_mesh.vertices[plate.vertex_ids[0]]
-                frontier_vert_pos = self.sphere_mesh.vertices[frontier_vert_idx]
                 
-                dist = torch.norm(center_pos - frontier_vert_pos)
-                rand_factor = 1.0 + (torch.rand(1).item() * 0.5) # Jagged edges
-                
-                score = (plate.growth_rate / (dist + 1e-6)) * rand_factor
-                claims.append((score.item(), frontier_vert_idx, claiming_plate_id))
-
-            # Sort claims by score, highest first
-            claims.sort(key=lambda x: x[0], reverse=True)
+            # Get positions of frontier vertices
+            frontier_pos = vertex_positions[frontier_verts]
             
-            # Process claims, ensuring each vertex is claimed only once per round by the highest bidder
-            claimed_this_round = set()
-            for _, vert_idx, plate_id in claims:
-                if vert_idx not in claimed_this_round:
-                    self.plate_ids[vert_idx] = plate_id
-                    claimed_this_round.add(vert_idx)
+            # Find all possible plate claims (vectorized)
+            # Distance from each frontier vertex to each plate center
+            dists = torch.cdist(frontier_pos, plate_centers)
+            
+            # Get growth rates for all plates
+            growth_rates = torch.tensor([p.growth_rate for p in self.plates], device=DEVICE)
+            
+            # Calculate scores (vectorized)
+            rand_factors = 1.0 + (torch.rand(len(frontier_verts), device=DEVICE) * 0.5)
+            scores = (growth_rates / (dists + 1e-6)) * rand_factors.unsqueeze(1)
+            
+            # Find best plate for each frontier vertex
+            best_plate_ids = torch.argmax(scores, dim=1)
+            
+            # Update plate assignments
+            self.plate_ids[frontier_verts] = best_plate_ids
+            
+            # Update unassigned mask
+            unassigned = self.plate_ids == -1
         
-        # After loop, update the Plate objects with their final vertex sets
+        # Update Plate objects with their final vertex sets
         for i, plate in enumerate(self.plates):
             plate.vertex_ids = torch.where(self.plate_ids == i)[0]
 
@@ -389,8 +400,8 @@ def render_world():
             dpg.add_slider_float(
                 label="Elevation (degrees)", 
                 tag="camera_elevation",
-                min_value=-85, 
-                max_value=85, 
+                min_value=-180, 
+                max_value=180, 
                 default_value=math.degrees(elevation),
                 callback=camera_control_callback
             )
