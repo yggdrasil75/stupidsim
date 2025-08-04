@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import random
 import numba
 import torch
 from holder.mesh import mesh, project_2d
@@ -14,8 +15,7 @@ from util import time_function, print_timing_stats
 
 @njit
 def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
-                       plate_centers, growth_rates, num_vertices):
-    
+                       plate_centers, growth_rates, num_vertices):    
     assigned_mask = plate_ids != -1
     assigned_indices = np.where(assigned_mask)[0]
 
@@ -107,7 +107,7 @@ def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
 @dataclass
 class World:
     torch.set_default_device(DEVICE)
-    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=64, rings=64))
+    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
     sea_level: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0, dtype=torch.float32))
     min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
     max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
