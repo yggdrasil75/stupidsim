@@ -65,11 +65,11 @@ class World:
             center_idx: int = int(center_indices[i].item())
             plate_verts = torch.tensor([center_idx], dtype=torch.long, device=DEVICE)
 
-            if torch.rand(1) < 0.3:  # 30% chance of continental plate
-                plate = Plate.create_continental_plate(plate_verts)
+            if torch.rand(1) < 0.4:
+                plate = Plate.create_continental_plate(ID=i, vertex_ids=plate_verts)
                 plate.add_continental_center(center_idx)
             else:
-                plate = Plate.create_oceanic_plate(plate_verts)
+                plate = Plate.create_oceanic_plate(ID=i, vertex_ids=plate_verts)
             self.plates.append(plate)
             self.plate_ids[center_idx] = i
 

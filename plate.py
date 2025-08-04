@@ -5,6 +5,7 @@ from typing import List
 @dataclass
 class Plate:
     """Represents a tectonic plate in the world simulation."""
+    ID: int
     vertex_ids: torch.Tensor  # Vertex indices belonging to this plate
     speed: torch.Tensor  # Overall movement speed of the plate
     angular_velocity: torch.Tensor  # Rotation speed (radians per time step)
@@ -15,30 +16,32 @@ class Plate:
     continental_centers: List[int]  # Vertex IDs of continental centers
     
     @classmethod
-    def create_oceanic_plate(cls, vertex_ids: torch.Tensor, speed: float = 1.0):
+    def create_oceanic_plate(cls, ID, vertex_ids: torch.Tensor, speed: float = 1.0):
         """Factory method for creating an oceanic plate."""
         return cls(
+            ID = ID,
             vertex_ids=vertex_ids,
             speed=torch.tensor(speed, dtype=torch.float32),
             angular_velocity=torch.tensor(0.01, dtype=torch.float32),
             linear_velocity=torch.randn(3, dtype=torch.float32).normal_(0, 0.1),
             plate_type="oceanic",
             growth_rate=torch.tensor(0.05, dtype=torch.float32),
-            base_elevation=torch.tensor(-0.8, dtype=torch.float32),  # Oceanic plates are lower
+            base_elevation=torch.tensor(6367, dtype=torch.float32),  # Oceanic plates are lower
             continental_centers=[]
         )
     
     @classmethod
-    def create_continental_plate(cls, vertex_ids: torch.Tensor, speed: float = 0.5):
+    def create_continental_plate(cls, ID, vertex_ids: torch.Tensor, speed: float = 0.5):
         """Factory method for creating a continental plate."""
         return cls(
+            ID = ID,
             vertex_ids=vertex_ids,
             speed=torch.tensor(speed, dtype=torch.float32),
             angular_velocity=torch.tensor(0.005, dtype=torch.float32),
             linear_velocity=torch.randn(3, dtype=torch.float32).normal_(0, 0.05),
             plate_type="continental",
             growth_rate=torch.tensor(0.02, dtype=torch.float32),
-            base_elevation=torch.tensor(0.2, dtype=torch.float32),  # Continental plates are higher
+            base_elevation=torch.tensor(6372, dtype=torch.float32),  # Continental plates are higher
             continental_centers=[]
         )
     
@@ -47,12 +50,9 @@ class Plate:
         self.continental_centers.append(vertex_id)
     
     def move(self):
-        """Update plate movement based on velocities."""
-        # Update linear velocity (can add more complex physics here)
         self.linear_velocity = torch.nn.functional.normalize(
             self.linear_velocity, dim=0) * self.speed
         
-        # Update angular velocity (can add torque effects here)
         self.angular_velocity = torch.clamp(
             self.angular_velocity, -0.1, 0.1)
     

@@ -5,7 +5,7 @@ import time
 from functools import wraps
 
 
-_timing_stats = defaultdict(lambda: {'total_time': 0, 'call_count': 0})
+_timing_stats = defaultdict(lambda: {'total_time': 0.0, 'call_count': 0})
 
 def cart_to_sphere(p):
     x, y, z = p

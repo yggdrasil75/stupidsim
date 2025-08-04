@@ -1,11 +1,14 @@
 from dataclasses import dataclass, field
 import heapq
 import math
+import numba
 import torch
 import dearpygui.dearpygui as dpg
 from globals import DEVICE
 from util import time_function
 import numpy as np
+from numba import njit, float32, float64, types, int64
+
 
 _mesh_cache = {}
 
@@ -273,22 +276,58 @@ def simplify_mesh(vertices: torch.Tensor,
     #TODO: please implement
     pass
 
-def is_in_frustum(mesh_vertices, view_matrix, proj_matrix):
-    # Transform all vertices to clip space
-    homogenous_verts = torch.cat([mesh_vertices, torch.ones(len(mesh_vertices), 1, device=DEVICE)], dim=1)
-    clip_verts = torch.matmul(homogenous_verts, (view_matrix @ proj_matrix).T)
+# def is_in_frustum(mesh_vertices, view_matrix, proj_matrix):
+#     # Transform all vertices to clip space
+#     homogenous_verts = torch.cat([mesh_vertices, torch.ones(len(mesh_vertices), 1, device=DEVICE)], dim=1)
+#     clip_verts = torch.matmul(homogenous_verts, (view_matrix @ proj_matrix).T)
     
-    # Normalize to NDC
-    ndc_verts = clip_verts / clip_verts[:, 3].unsqueeze(1)
+#     # Normalize to NDC
+#     ndc_verts = clip_verts / clip_verts[:, 3].unsqueeze(1)
     
-    # Check if any vertex is within the frustum
-    in_frustum = ((ndc_verts[:, 0].abs() <= 1.0) & (ndc_verts[:, 1].abs() <= 1.0) & 
-                 (ndc_verts[:, 2] >= -1.0) & (ndc_verts[:, 2] <= 1.0))
+#     # Check if any vertex is within the frustum
+#     in_frustum = ((ndc_verts[:, 0].abs() <= 1.0) & (ndc_verts[:, 1].abs() <= 1.0) & 
+#                  (ndc_verts[:, 2] >= -1.0) & (ndc_verts[:, 2] <= 1.0))
     
-    return torch.any(in_frustum)
+#     return torch.any(in_frustum)
+
+@njit((float32[:](float32[:], float32[:])))
+def cross(a, b):
+    return np.array([a[1]*b[2] - a[2]*b[1],
+                     a[2]*b[0] - a[0]*b[2],
+                     a[0]*b[1] - a[1]*b[0]])
+
+@njit((float64, float32[:], float32[:], float32[:], int64, int64, int64, float64))
+def comped(fov, lookat, eye, up, res1, res2, far, near):
+    zAxis = lookat - eye
+    zAxis = zAxis / np.linalg.norm(zAxis)
+    xAxis= cross(up, zAxis)
+    xAxis = xAxis / np.linalg.norm(xAxis)
+    yAxis = cross(zAxis, xAxis)
+
+    viewMatrix = np.eye(4, dtype=np.float32)
+    viewMatrix[:3, 0] = xAxis
+    viewMatrix[:3, 1] = yAxis
+    viewMatrix[:3, 2] = -zAxis
+    viewMatrix[:3, 3] = eye
+    viewMatrix = np.linalg.inv(viewMatrix)
+
+    aspectRatio = res1 / res2
+    fovRad = np.radians(fov)
+    tanhalf = np.tan(fovRad / 2.0)
+    f = 1.0 / tanhalf
+
+    projMatrix = np.zeros(shape=(4,4), dtype=np.float32)
+    projMatrix[0,0] = 1.0 / (aspectRatio * tanhalf)
+    projMatrix[1,1] = f
+    projMatrix[2,2] = -(far + near) / (near - far)
+    projMatrix[2,3] = (-2 * far * near) / (near - far)
+    projMatrix[3,2] = -1.0
+
+    return viewMatrix, projMatrix
 
 @time_function
-def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: torch.Tensor, fov = 90.0,
+#@torch.compile(mode="reduce-overhead")
+def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: torch.Tensor, fov: float = 90.0,
                 res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
         -> tuple[list[torch.Tensor],list,list[torch.Tensor]]:
     global _mesh_cache
@@ -296,32 +335,10 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
         eye = eye.half()
         lookat = lookat.half()
         up = up.half()
-    fov = torch.tensor(fov, dtype=torch.float32, device=DEVICE)
-    zAxis: torch.Tensor = lookat - eye
-    zAxis = zAxis / torch.norm(zAxis)
-    xAxis: torch.Tensor = torch.linalg.cross(up, zAxis)
-    xAxis = xAxis / torch.norm(xAxis)
-    yAxis: torch.Tensor = torch.linalg.cross(zAxis, xAxis)
 
-    viewMatrix = torch.eye(4, dtype=torch.float32, device=DEVICE)
-    viewMatrix[:3, 0] = xAxis
-    viewMatrix[:3, 1] = yAxis
-    viewMatrix[:3, 2] = -zAxis
-    viewMatrix[:3, 3] = eye
-    viewMatrix = torch.inverse(viewMatrix)
-
-    aspectRatio = res[0] / res[1]
-    fovRad = torch.deg2rad(fov)
-    tanhalf = torch.tan(fovRad / 2.0)
-    f = 1.0 / tanhalf
-
-    projMatrix = torch.zeros((4,4), dtype=torch.float32, device=DEVICE)
-    projMatrix[0,0] = 1.0 / (aspectRatio * tanhalf)
-    projMatrix[1,1] = f
-    projMatrix[2,2] = -(far + near) / (near - far)
-    projMatrix[2,3] = (-2 * far * near) / (near - far)
-    projMatrix[3,2] = -1.0
-    
+    viewMatrixnp, projMatrixnp = comped(fov, lookat.cpu().numpy(), eye.cpu().numpy(), up.cpu().numpy(), res[0], res[1], far, near)
+    viewMatrix = torch.tensor(viewMatrixnp)
+    projMatrix = torch.tensor(projMatrixnp)
     all_screen_verts = []
     all_visible_tris = []
     all_depths = []
