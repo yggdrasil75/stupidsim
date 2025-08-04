@@ -297,7 +297,7 @@ def cross(a, b):
                      a[0]*b[1] - a[1]*b[0]])
 
 @njit((float64, float32[:], float32[:], float32[:], int64, int64, int64, float64))
-def comped(fov, lookat, eye, up, res1, res2, far, near):
+def comped(fov, lookat, eye, up, res0, res1, far, near):
     zAxis = lookat - eye
     zAxis = zAxis / np.linalg.norm(zAxis)
     xAxis= cross(up, zAxis)
@@ -311,7 +311,7 @@ def comped(fov, lookat, eye, up, res1, res2, far, near):
     viewMatrix[:3, 3] = eye
     viewMatrix = np.linalg.inv(viewMatrix)
 
-    aspectRatio = res1 / res2
+    aspectRatio = res0 / res1
     fovRad = np.radians(fov)
     tanhalf = np.tan(fovRad / 2.0)
     f = 1.0 / tanhalf
@@ -324,6 +324,30 @@ def comped(fov, lookat, eye, up, res1, res2, far, near):
     projMatrix[3,2] = -1.0
 
     return viewMatrix, projMatrix
+
+@njit((float32[:,:], float32[:,:], float32[:,:], int64, int64))
+def compedObj(verts, viewmatrix, projMatrix, res0, res1):
+    n = verts.shape[0]
+    # Create homogeneous coordinates (n x 4)
+    homogenous_verts = np.empty((n, 4), dtype=verts.dtype)
+    homogenous_verts[:, :3] = verts  # Assuming verts is n x 3
+    homogenous_verts[:, 3] = 1.0
+    
+    # Transform vertices (note we need to transpose the multiplication order)
+    # viewmatrix is 4x4, homogenous_verts is n x 4
+    # So we need to transpose homogenous_verts to 4 x n, multiply, then transpose back
+    view_verts = (viewmatrix @ homogenous_verts.T).T
+    proj_verts = (projMatrix @ view_verts.T).T
+    
+    # Perspective division
+    proj_verts = proj_verts / proj_verts[:, 3:4]
+    
+    # Convert to screen coordinates
+    screen_verts = np.empty_like(proj_verts[:, :2])
+    screen_verts[:, 0] = (proj_verts[:, 0] + 1) * 0.5 * res0
+    screen_verts[:, 1] = (1 - (proj_verts[:, 1] + 1) * 0.5) * res1
+    
+    return screen_verts, view_verts
 
 @time_function
 #@torch.compile(mode="reduce-overhead")
@@ -344,13 +368,7 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
     all_depths = []
 
     for obj in meshes:
-        # unfortunately when I tried this I kept getting the main object outside frustrum if any part of it was. so its not in use.
-        # if not is_in_frustum(obj.vertices, viewMatrix, projMatrix):
-        #     all_screen_verts.append(torch.empty(0, 2, device=DEVICE))
-        #     all_visible_tris.append([])
-        #     all_depths.append(torch.empty(0, device=DEVICE))
-        #     continue
-        cache_key = (id(obj), tuple(eye.cpu().numpy()), tuple(lookat.cpu().numpy()), tuple(up.cpu().numpy()))
+        cache_key = (id(obj))
         if cache_key in _mesh_cache and not obj._needs_neighbor_update:
             screen_verts, visible_tris, depths = _mesh_cache[cache_key]
         else:
@@ -362,33 +380,29 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
                 all_depths.append(torch.empty(0, device=DEVICE))
                 continue
 
-            homogenous_verts = torch.cat([obj.vertices, torch.ones(obj.vertices.shape[0], 1, device=DEVICE), ], dim=1)
+            # homogenous_verts = torch.cat([obj.vertices, torch.ones(obj.vertices.shape[0], 1, device=DEVICE), ], dim=1)
 
-            # Transform to view space
-            view_verts = torch.matmul(homogenous_verts, viewMatrix.T)
+            # # Transform to view space
+            # view_verts = torch.matmul(homogenous_verts, viewMatrix.T)
             
-            # Project to clip space
-            proj_verts = torch.matmul(view_verts, projMatrix.T)
-            proj_verts = proj_verts / proj_verts[:, 3].unsqueeze(1)
+            # # Project to clip space
+            # proj_verts = torch.matmul(view_verts, projMatrix.T)
+            # proj_verts = proj_verts / proj_verts[:, 3].unsqueeze(1)
 
-            # Convert to screen coordinates
-            screen_verts = torch.empty_like(proj_verts[:, :2])
-            screen_verts[:, 0] = (proj_verts[:, 0] + 1) * 0.5 * res[0]
-            screen_verts[:, 1] = (1 - (proj_verts[:, 1] + 1) * 0.5) * res[1]
+            # # Convert to screen coordinates
+            # screen_verts = torch.empty_like(proj_verts[:, :2])
+            # screen_verts[:, 0] = (proj_verts[:, 0] + 1) * 0.5 * res[0]
+            # screen_verts[:, 1] = (1 - (proj_verts[:, 1] + 1) * 0.5) * res[1]
 
+            screen_vertsnp, view_vertsnp = compedObj(obj.vertices.cpu().numpy(), viewMatrixnp, projMatrixnp, res[0], res[1])
+            screen_verts = torch.tensor(screen_vertsnp)
+            view_verts = torch.tensor(view_vertsnp)
             # Get triangles (convert to triangles if needed)
             if obj._polys.shape[1] == 3:
                 triangles = obj._polys
             else:
                 triangulated = obj.toTri(obj)
                 triangles = triangulated._polys
-
-            #if I could figure this out, then I would use this as well. but I cant.
-            # lod_level = get_lod_level(view_verts, triangles)
-            # if lod_level > 0:
-            #     vertices, triangles = simplify_mesh(obj.vertices, triangles, lod_level)
-            #     # Recompute homogenous_verts with simplified vertices
-            #     homogenous_verts = torch.cat([vertices, torch.ones(vertices.shape[0], 1, device=DEVICE)], dim=1)
 
             # Backface culling
             with torch.no_grad():
