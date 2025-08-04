@@ -76,7 +76,7 @@ def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
             dists[i,j] = np.sqrt(np.sum((frontier_pos[i] - plate_centers[j])**2))
 
     # Calculate scores with randomness
-    rand_factors = 1.0 + (np.random.rand(len(frontier_verts)) * 0.5)
+    rand_factors = 1.0 + (np.random.rand(len(frontier_verts)) * 0.4)
     scores = (growth_rates / (dists + 1e-6)) * rand_factors.reshape(-1, 1)
 
     # Get all possible claims (plate, vertex pairs)
@@ -104,14 +104,31 @@ def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
 
     return plate_ids
 
+@njit
+def _numba_check_containment(inner_verts, outer_verts_set, 
+                           plate_ids, neighbor_map) -> bool:
+    """
+    Numba-accelerated helper function to check plate containment.
+    """
+    if len(inner_verts) == 0:
+        return False  # Empty plate can't be contained
+    
+    outer_verts = outer_verts_set
+    for vert in inner_verts:
+        for neighbor in neighbor_map[vert]:
+            neighbor_plate = plate_ids[neighbor]
+            if neighbor_plate not in outer_verts and neighbor_plate != plate_ids[vert]:
+                return False
+    return True
+
 @dataclass
 class World:
     torch.set_default_device(DEVICE)
-    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
+    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=64, rings=64))
     sea_level: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0, dtype=torch.float32))
     min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
     max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
-    plate_count: torch.Tensor = field(default_factory=lambda: torch.tensor(15, dtype=torch.int32))
+    plate_count: torch.Tensor = field(default_factory=lambda: torch.tensor(30, dtype=torch.int32))
     rainfall_rate: torch.Tensor = field(default_factory=lambda: torch.tensor(0.1, dtype=torch.float32))
     evaporation_rate: torch.Tensor = field(default_factory=lambda: torch.tensor(0.05, dtype=torch.float32))
     water_flow_max: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
@@ -139,8 +156,8 @@ class World:
 
         print("Initializing plates...")
         self._initialize_plates()
-        print("Growing plates...")
-        self._grow_plates()
+        # print("Growing plates...")
+        # self._grow_plates()
         print("Validating plates...")
         self._validate_and_reindex_plates()
         print(f"Final plate count: {len(self.plates)}")
@@ -167,7 +184,14 @@ class World:
                 plate = Plate.create_oceanic_plate(ID=i, vertex_ids=plate_verts)
             self.plates.append(plate)
             self.plate_ids[center_idx] = i
+        print("Growing plates...")
+        self._grow_plates()
 
+        for i in range(self.plate_count):
+            for j in range(self.plate_count + i):
+                if self.is_plate_contained(i, j):
+                    self.merge_plates(i, j)
+        
     @time_function
     def _grow_plates(self):
         """Optimized but still realistic plate growth using batched frontier processing."""
@@ -192,12 +216,6 @@ class World:
         grownp = growth_rates.cpu().numpy()
 
         while np.any(pidsnp == -1):
-            # print(numba.typeof(pidsnp))
-            # print(numba.typeof(neinp))
-            # print(numba.typeof(vertposnp))
-            # print(numba.typeof(plaecennp))
-            # print(numba.typeof(grownp))
-            # print(numba.typeof(num_vertices))
             pidsnp = _numba_grow_plates(pidsnp, neinp,
                                                 vertposnp, plaecennp,
                                                   grownp, num_vertices)
@@ -205,6 +223,85 @@ class World:
         # Update Plate objects with their final vertex sets
         for i, plate in enumerate(self.plates):
             plate.vertex_ids = torch.where(self.plate_ids == i)[0]
+
+    @time_function
+    def is_plate_contained(self, inner_plate_id: int, outer_plate_id: int) -> bool:
+        """
+        Check if one plate is wholly contained within another plate's territory.
+        Optimized version using numba.
+        """
+        if inner_plate_id == outer_plate_id:
+            return False
+            
+        if inner_plate_id >= len(self.plates) or outer_plate_id >= len(self.plates):
+            return False
+            
+        inner_plate = self.plates[inner_plate_id]
+        outer_plate = self.plates[outer_plate_id]
+        
+        # Check if either plate is empty
+        if len(inner_plate.vertex_ids) == 0 or len(outer_plate.vertex_ids) == 0:
+            return False
+        
+        # Convert to numpy arrays and sets for numba
+        inner_verts_np = inner_plate.vertex_ids.cpu().numpy()
+        outer_verts_set = set(outer_plate.vertex_ids.cpu().numpy())
+        plate_ids_np = self.plate_ids.cpu().numpy()
+        
+        # Convert neighbor map to numba-compatible format
+        neighbor_tensors = [torch.tensor(neighbors, device=DEVICE) 
+                            for neighbors in self.sphere_mesh._neighbor_map['vertex_to_vertices'].values()]
+        neinp = [neighbor_tensor.cpu().numpy() for neighbor_tensor in neighbor_tensors]
+        
+        return _numba_check_containment(inner_verts_np, outer_verts_set, plate_ids_np, neinp)
+
+    @time_function
+    def merge_plates(self, plate_a_id: int, plate_b_id: int):
+        """
+        Merge plate B into plate A, transferring all vertices and properties.
+        
+        Args:
+            plate_a_id: ID of the plate that will absorb the other plate
+            plate_b_id: ID of the plate that will be absorbed
+        """
+        if plate_a_id == plate_b_id:
+            return  # Can't merge a plate with itself
+        
+        if plate_a_id >= len(self.plates) or plate_b_id >= len(self.plates):
+            raise ValueError("Invalid plate ID")
+        
+        plate_a = self.plates[plate_a_id]
+        plate_b = self.plates[plate_b_id]
+        
+        # Transfer all vertices from plate B to plate A
+        plate_a.vertex_ids = torch.cat([plate_a.vertex_ids, plate_b.vertex_ids])
+        self.plate_ids[plate_b.vertex_ids] = plate_a_id
+        
+        # Transfer continental centers if they exist
+        if hasattr(plate_b, 'continental_centers'):
+            if not hasattr(plate_a, 'continental_centers'):
+                plate_a.continental_centers = []
+            plate_a.continental_centers.extend(plate_b.continental_centers)
+        
+        # Update plate properties based on what's being merged
+        if plate_b.plate_type == "continental":
+            plate_a.plate_type = "continental"
+            plate_a.growth_rate = torch.max(plate_a.growth_rate, plate_b.growth_rate)
+        else:
+            # If merging oceanic into continental, keep continental properties
+            if plate_a.plate_type == "continental":
+                pass  # Keep continental properties
+            else:
+                # Both are oceanic - average their properties
+                plate_a.growth_rate = (plate_a.growth_rate + plate_b.growth_rate) / 2
+        
+        
+        # Mark plate B as inactive (we'll clean it up later)
+        plate_b.vertex_ids = torch.tensor([], dtype=torch.long, device=DEVICE)
+        
+        # After merging, we should reindex plates to remove the now-empty plate B
+        # This could be done immediately or during the next validation step
+        #self._validate_and_reindex_plates()
 
     @time_function
     def _validate_and_reindex_plates(self):
@@ -217,6 +314,7 @@ class World:
 
         while plates_to_process:
             plate = plates_to_process.pop(0)
+            if len(plate.vertex_ids) == 0: continue
             plate_id = self.plate_ids[plate.vertex_ids[0]].item()
 
             if plate_id in processed_plate_ids:
