@@ -1,11 +1,9 @@
-
-from matplotlib import colors
 import numpy as np
 import torch
 
 VMIN=-11000
 VMAX=11000
-NORM_ELEVATION = colors.Normalize(vmin=VMIN, vmax=VMAX) # Fixed range for colorbar
+#NORM_ELEVATION = colors.Normalize(vmin=VMIN, vmax=VMAX) # Fixed range for colorbar
 PLATES = 15 #earth rate
 SUBDIVISIONS: int = 3 #3 is balanced for testing, but 5 is needed for reasonable accuracy
 MAX_ANGULAR_VELOCITY_RAD_PER_YR = np.radians(1.0) # Corresponds to ~11 cm/yr at equator for Earth radius. Adjust as needed.

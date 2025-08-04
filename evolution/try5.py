@@ -49,7 +49,7 @@ def get_rotation_matrix(v_from, v_to):
     return I + sin_a * K + (1 - cos_a) * torch.matmul(K, K)
 
 @dataclass
-class threeDObj:
+class mesh:
     id: int
     _vertices: torch.Tensor
     _tris: torch.Tensor
@@ -624,7 +624,7 @@ class threeDObj:
         return screenVerts, visibleTris, depths
 
 @dataclass
-class physicsblock(threeDObj):
+class physicsblock(mesh):
     pass
 
 @dataclass
@@ -633,7 +633,7 @@ class complexblock(physicsblock):
 
 class BlockRenderer:
     def __init__(self):
-        self.blocks: list[threeDObj] = []
+        self.blocks: list[mesh] = []
         self.lookat = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32, device=DEVICE)
         self.currentResolution: tuple[int,int] = (800,600)
         self.currentID = 0
@@ -645,25 +645,25 @@ class BlockRenderer:
         self.orbitAngles = [np.pi/4, np.pi/4, 0.0]
         self.orbitEnable = [False, False, False]
         
-        ground = threeDObj.create_ground(id=self.idCounter(), size=100)
+        ground = mesh.create_ground(id=self.idCounter(), size=100)
         self.add_block(ground)
 
-        hip_joint = threeDObj.create_joint(id=self.idCounter(), center=torch.tensor([0, 2.5, 0], dtype=torch.float32, device=DEVICE), radius=0.3)
+        hip_joint = mesh.create_joint(id=self.idCounter(), center=torch.tensor([0, 2.5, 0], dtype=torch.float32, device=DEVICE), radius=0.3)
         bone1_start = torch.tensor([0, 2.5, 0], dtype=torch.float32, device=DEVICE)
         bone1_end = torch.tensor([1, 1, 0], dtype=torch.float32, device=DEVICE)
-        femur = threeDObj.create_bone(id=self.idCounter(), start_point=bone1_start, end_point=bone1_end, radius=0.15)
+        femur = mesh.create_bone(id=self.idCounter(), start_point=bone1_start, end_point=bone1_end, radius=0.15)
         
-        knee_joint = threeDObj.create_joint(id=self.idCounter(), center=bone1_end, radius=0.2, angle_limit_deg_in=25)
+        knee_joint = mesh.create_joint(id=self.idCounter(), center=bone1_end, radius=0.2, angle_limit_deg_in=25)
         
         bone2_end = torch.tensor([1, 0.2, 0.5], dtype=torch.float32, device=DEVICE)
-        tibia = threeDObj.create_bone(id=self.idCounter(), start_point=bone1_end, end_point=bone2_end, radius=0.12)
+        tibia = mesh.create_bone(id=self.idCounter(), start_point=bone1_end, end_point=bone2_end, radius=0.12)
 
         # Muscles connecting the bones
-        muscle1 = threeDObj.create_muscle(id=self.idCounter(), start_point=bone1_start + torch.tensor([-0.2,0.2,0], dtype=torch.float32, device=DEVICE), end_point=bone1_end + torch.tensor([0,0.2,0], dtype=torch.float32, device=DEVICE), max_radius=0.1, activation=0.8)
-        muscle2 = threeDObj.create_muscle(id=self.idCounter(), start_point=bone1_start + torch.tensor([0.2,-0.2,0], dtype=torch.float32, device=DEVICE), end_point=bone2_end, max_radius=0.1, activation=0.2)
+        muscle1 = mesh.create_muscle(id=self.idCounter(), start_point=bone1_start + torch.tensor([-0.2,0.2,0], dtype=torch.float32, device=DEVICE), end_point=bone1_end + torch.tensor([0,0.2,0], dtype=torch.float32, device=DEVICE), max_radius=0.1, activation=0.8)
+        muscle2 = mesh.create_muscle(id=self.idCounter(), start_point=bone1_start + torch.tensor([0.2,-0.2,0], dtype=torch.float32, device=DEVICE), end_point=bone2_end, max_radius=0.1, activation=0.2)
         
         # A floating node
-        node1 = threeDObj.create_node(id=self.idCounter(), center=torch.tensor([-2, 2, -1], dtype=torch.float32, device=DEVICE), radii=torch.tensor([0.5, 1.0, 0.5], dtype=torch.float32, device=DEVICE))
+        node1 = mesh.create_node(id=self.idCounter(), center=torch.tensor([-2, 2, -1], dtype=torch.float32, device=DEVICE), radii=torch.tensor([0.5, 1.0, 0.5], dtype=torch.float32, device=DEVICE))
 
         self.add_block(hip_joint)
         self.add_block(femur)
@@ -778,7 +778,7 @@ class BlockRenderer:
                     if collided:
                         self.resolve_collision(block_a, block_b, normal, penetration)
 
-    def resolve_collision(self, block_a: threeDObj, block_b:threeDObj, normal:torch.Tensor, penetration: torch.Tensor):
+    def resolve_collision(self, block_a: mesh, block_b:mesh, normal:torch.Tensor, penetration: torch.Tensor):
         inv_mass_a = 1.0 / block_a.mass if block_a.mass > 0.0 else 0.0
         inv_mass_b = 1.0 / block_b.mass if block_b.mass > 0.0 else 0.0
         total_inv_mass = inv_mass_a + inv_mass_b
