@@ -1,68 +1,107 @@
 from dataclasses import dataclass, field
+import numba
 import torch
 from holder.mesh import mesh, project_2d
 from globals import DEVICE
 from shapes.sphere import create_sphere_mesh
 import dearpygui.dearpygui as dpg
 import numpy as np
-from numba import njit, prange
+from numba import njit, prange, int64, float32
 from plate import Plate
 import math
 from util import time_function, print_timing_stats
 
 
-@njit
-def _numba_grow_plates(plate_ids, neighbor_array, vertex_positions, 
-                      plate_centers, growth_rates, num_vertices):
-    """
-    Numba-optimized plate growth algorithm.
-    """
-    while True:
-        # Find all assigned vertices
-        assigned_mask = plate_ids != -1
-        assigned_indices = np.where(assigned_mask)[0]
-        
-        if len(assigned_indices) == 0:
-            break
-            
-        # Find frontier vertices
-        frontier = set()
-        for i in prange(len(assigned_indices)):
-            idx = assigned_indices[i]
-            neighbors = neighbor_array[idx]
-            for n in neighbors:
-                if n != -1 and plate_ids[n] == -1:
-                    frontier.add(n)
-        
-        if not frontier:
-            break
-            
-        frontier_verts = np.array(list(frontier))
-        
-        # Process frontier vertices in parallel
-        for i in prange(len(frontier_verts)):
-            vert_idx = frontier_verts[i]
-            vert_pos = vertex_positions[vert_idx]
-            
-            # Calculate distances to all plate centers
-            min_dist = np.inf
-            best_plate = -1
-            best_score = -1
-            
-            for plate_idx in range(len(plate_centers)):
-                dist = np.linalg.norm(vert_pos - plate_centers[plate_idx])
-                score = growth_rates[plate_idx] / (dist + 1e-6)
-                
-                # Add some randomness
-                score *= (1.0 + (np.random.random() * 0.5))
-                
-                if score > best_score:
-                    best_score = score
-                    best_plate = plate_idx
-            
-            if best_plate != -1:
-                plate_ids[vert_idx] = best_plate
+@njit((int64[:], int64[:], float32[:,:],float32[:,:],float32[:,:],int64))
+def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
+                       plate_centers, growth_rates, num_vertices):
     
+    assigned_mask = plate_ids != -1
+    assigned_indices = np.where(assigned_mask)[0]
+
+    if len(assigned_indices) == 0:
+        return plate_ids
+        
+    # Find frontier vertices in batches
+    frontier_list = []
+    batch_size = 1024  # Adjust based on memory constraints
+    
+    # First pass to calculate total size needed
+    total_neighbors = 0
+    for i in range(0, len(assigned_indices), batch_size):
+        batch_indices = assigned_indices[i:i+batch_size]
+        for idx in batch_indices:
+            total_neighbors += len(neighbor_ndarrays[idx])
+    
+    # Pre-allocate array for all neighbors
+    all_neighbors = np.empty(total_neighbors, dtype=np.int64)
+    pos = 0
+    
+    for i in range(0, len(assigned_indices), batch_size):
+        batch_indices = assigned_indices[i:i+batch_size]
+        
+        # Fill pre-allocated array with neighbors
+        for idx in batch_indices:
+            neighbors = neighbor_ndarrays[idx]
+            all_neighbors[pos:pos+len(neighbors)] = neighbors
+            pos += len(neighbors)
+        
+        # Find unassigned neighbors in this segment
+        segment = all_neighbors[:pos]  # Only the filled portion
+        unassigned = segment[plate_ids[segment] == -1]
+        if len(unassigned) > 0:
+            frontier_list.append(unassigned)
+        
+    if len(frontier_list) == 0:
+        return plate_ids
+        
+    # Second pass to concatenate frontier vertices (now with known sizes)
+    frontier_total = 0
+    for arr in frontier_list:
+        frontier_total += len(arr)
+    
+    frontier_verts = np.empty(frontier_total, dtype=np.int64)
+    pos = 0
+    for arr in frontier_list:
+        frontier_verts[pos:pos+len(arr)] = arr
+        pos += len(arr)
+    
+    frontier_verts = np.unique(frontier_verts)
+
+    # For each frontier vertex, find all plates that could claim it
+    frontier_pos = vertex_positions[frontier_verts]
+    dists = np.empty((len(frontier_verts), len(plate_centers)), dtype=np.float64)
+    for i in range(len(frontier_verts)):
+        for j in range(len(plate_centers)):
+            dists[i,j] = np.sqrt(np.sum((frontier_pos[i] - plate_centers[j])**2))
+
+    # Calculate scores with randomness
+    rand_factors = 1.0 + (np.random.rand(len(frontier_verts)) * 0.5)
+    scores = (growth_rates / (dists + 1e-6)) * rand_factors.reshape(-1, 1)
+
+    # Get all possible claims (plate, vertex pairs)
+    potential_plates = np.argmax(scores, axis=1)
+    potential_claims = np.empty((len(frontier_verts), 2), dtype=np.int64)
+    for i in range(len(frontier_verts)):
+        potential_claims[i,0] = frontier_verts[i]
+        potential_claims[i,1] = potential_plates[i]
+
+    # Sort claims by score to maintain realistic growth priority
+    max_scores = np.empty(len(frontier_verts), dtype=np.float64)
+    for i in range(len(frontier_verts)):
+        max_scores[i] = scores[i, potential_plates[i]]
+    sorted_indices = np.argsort(max_scores)[::-1]
+    sorted_claims = potential_claims[sorted_indices]
+
+    # Process claims in order, tracking which vertices get claimed
+    claimed = np.zeros(num_vertices, dtype=np.bool_)
+    for i in range(len(sorted_claims)):
+        vert_idx = sorted_claims[i,0]
+        plate_id = sorted_claims[i,1]
+        if not claimed[vert_idx]:
+            plate_ids[vert_idx] = plate_id
+            claimed[vert_idx] = True
+
     return plate_ids
 
 @dataclass
@@ -146,99 +185,26 @@ class World:
         neighbor_tensors = [torch.tensor(neighbors, device=DEVICE) 
                             for neighbors in vertex_neighbors.values()]
         
-        while torch.any(self.plate_ids == -1):
-            # Find all assigned vertices
-            assigned_mask = self.plate_ids != -1
-            assigned_indices = torch.where(assigned_mask)[0]
-            
-            if len(assigned_indices) == 0:
-                break
-                
-            # Find frontier vertices in batches
-            frontier = []
-            batch_size = 1024  # Adjust based on memory constraints
-            for i in range(0, len(assigned_indices), batch_size):
-                batch_indices = assigned_indices[i:i+batch_size]
-                
-                # Get neighbors of all assigned vertices in batch
-                batch_neighbors = torch.cat([neighbor_tensors[idx] 
-                                            for idx in batch_indices])
-                
-                # Find unassigned neighbors
-                unassigned_neighbors = batch_neighbors[self.plate_ids[batch_neighbors] == -1]
-                frontier.append(unassigned_neighbors)
-                
-            if not frontier:
-                break
-                
-            frontier_verts = torch.cat(frontier).unique()
-            
-            # For each frontier vertex, find all plates that could claim it
-            frontier_pos = vertex_positions[frontier_verts]
-            dists = torch.cdist(frontier_pos, plate_centers)
-            
-            # Calculate scores with randomness
-            rand_factors = 1.0 + (torch.rand(len(frontier_verts), device=DEVICE) * 0.5)
-            scores = (growth_rates / (dists + 1e-6)) * rand_factors.unsqueeze(1)
-            
-            # Get all possible claims (plate, vertex pairs)
-            potential_plates = torch.argmax(scores, dim=1)
-            potential_claims = torch.stack((frontier_verts, potential_plates), dim=1)
-            
-            # Sort claims by score to maintain realistic growth priority
-            sorted_indices = torch.argsort(scores.gather(1, potential_plates.unsqueeze(1)), 
-                                        descending=True)
-            sorted_claims = potential_claims[sorted_indices.flatten()]
-            
-            # Process claims in order, tracking which vertices get claimed
-            claimed = torch.zeros(num_vertices, dtype=torch.bool, device=DEVICE)
-            for vert_idx, plate_id in sorted_claims:
-                if not claimed[vert_idx]:
-                    self.plate_ids[vert_idx] = plate_id
-                    claimed[vert_idx] = True
-        
+        pidsnp = self.plate_ids.cpu().numpy()
+        neinp = [neighbor_tensor.cpu().numpy() for neighbor_tensor in neighbor_tensors]
+        vertposnp = vertex_positions.cpu().numpy()
+        plaecennp = plate_centers.cpu().numpy()
+        grownp = growth_rates.cpu().numpy()
+
+        while np.any(pidsnp == -1):
+            print(numba.typeof(pidsnp))
+            print(numba.typeof(neinp))
+            print(numba.typeof(vertposnp))
+            print(numba.typeof(plaecennp))
+            print(numba.typeof(grownp))
+            print(numba.typeof(num_vertices))
+            pidsnp = _numba_grow_plates(pidsnp, neinp,
+                                                vertposnp, plaecennp,
+                                                  grownp, num_vertices)
+        self.plate_ids = torch.tensor(pidsnp)
         # Update Plate objects with their final vertex sets
         for i, plate in enumerate(self.plates):
             plate.vertex_ids = torch.where(self.plate_ids == i)[0]
-
-    
-    # @time_function
-    # def _grow_plates(self):
-    #     """Optimized plate growth using Numba for performance"""
-    #     # Convert necessary data to numpy arrays for Numba
-    #     vertex_neighbors = self.sphere_mesh._neighbor_map['vertex_to_vertices']
-    #     num_vertices = len(self.sphere_mesh.vertices)
-    #     vertex_positions = self.sphere_mesh.vertices.cpu().numpy()
-        
-    #     # Convert neighbor map to a format Numba can handle
-    #     max_neighbors = max(len(n) for n in vertex_neighbors.values())
-    #     neighbor_array = np.full((num_vertices, max_neighbors), -1, dtype=np.int32)
-    #     for i, neighbors in vertex_neighbors.items():
-    #         neighbor_array[i, :len(neighbors)] = neighbors
-        
-    #     # Prepare plate data
-    #     plate_centers = np.array([vertex_positions[plate.vertex_ids[0].item()] 
-    #                             for plate in self.plates])
-    #     growth_rates = np.array([plate.growth_rate for plate in self.plates])
-    #     plate_ids_np = self.plate_ids.cpu().numpy()
-        
-    #     # Run the Numba-optimized growth algorithm
-    #     plate_ids_np = _numba_grow_plates(
-    #         plate_ids_np,
-    #         neighbor_array,
-    #         vertex_positions,
-    #         plate_centers,
-    #         growth_rates,
-    #         num_vertices
-    #     )
-        
-    #     # Convert back to PyTorch
-    #     self.plate_ids = torch.from_numpy(plate_ids_np).to(DEVICE)
-        
-    #     # Update Plate objects with their final vertex sets
-    #     for i, plate in enumerate(self.plates):
-    #         plate.vertex_ids = torch.where(self.plate_ids == i)[0]
-
 
     @time_function
     def _validate_and_reindex_plates(self):
@@ -527,7 +493,7 @@ def render_world():
     dpg.set_primary_window("primary", True)
     
     while dpg.is_dearpygui_running():
-        print_timing_stats()
+        #print_timing_stats()
         world.simulate_erosion(steps=0) # Run simulation logic, but don't advance time yet
         #world.update_colors() # ensure colors are correct
 

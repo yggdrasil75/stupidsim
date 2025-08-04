@@ -276,20 +276,6 @@ def simplify_mesh(vertices: torch.Tensor,
     #TODO: please implement
     pass
 
-# def is_in_frustum(mesh_vertices, view_matrix, proj_matrix):
-#     # Transform all vertices to clip space
-#     homogenous_verts = torch.cat([mesh_vertices, torch.ones(len(mesh_vertices), 1, device=DEVICE)], dim=1)
-#     clip_verts = torch.matmul(homogenous_verts, (view_matrix @ proj_matrix).T)
-    
-#     # Normalize to NDC
-#     ndc_verts = clip_verts / clip_verts[:, 3].unsqueeze(1)
-    
-#     # Check if any vertex is within the frustum
-#     in_frustum = ((ndc_verts[:, 0].abs() <= 1.0) & (ndc_verts[:, 1].abs() <= 1.0) & 
-#                  (ndc_verts[:, 2] >= -1.0) & (ndc_verts[:, 2] <= 1.0))
-    
-#     return torch.any(in_frustum)
-
 @njit((float32[:](float32[:], float32[:])))
 def cross(a, b):
     return np.array([a[1]*b[2] - a[2]*b[1],
