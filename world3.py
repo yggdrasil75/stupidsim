@@ -5,9 +5,65 @@ from globals import DEVICE
 from shapes.sphere import create_sphere_mesh
 import dearpygui.dearpygui as dpg
 import numpy as np
+from numba import njit, prange
 from plate import Plate
 import math
 from util import time_function, print_timing_stats
+
+
+@njit
+def _numba_grow_plates(plate_ids, neighbor_array, vertex_positions, 
+                      plate_centers, growth_rates, num_vertices):
+    """
+    Numba-optimized plate growth algorithm.
+    """
+    while True:
+        # Find all assigned vertices
+        assigned_mask = plate_ids != -1
+        assigned_indices = np.where(assigned_mask)[0]
+        
+        if len(assigned_indices) == 0:
+            break
+            
+        # Find frontier vertices
+        frontier = set()
+        for i in prange(len(assigned_indices)):
+            idx = assigned_indices[i]
+            neighbors = neighbor_array[idx]
+            for n in neighbors:
+                if n != -1 and plate_ids[n] == -1:
+                    frontier.add(n)
+        
+        if not frontier:
+            break
+            
+        frontier_verts = np.array(list(frontier))
+        
+        # Process frontier vertices in parallel
+        for i in prange(len(frontier_verts)):
+            vert_idx = frontier_verts[i]
+            vert_pos = vertex_positions[vert_idx]
+            
+            # Calculate distances to all plate centers
+            min_dist = np.inf
+            best_plate = -1
+            best_score = -1
+            
+            for plate_idx in range(len(plate_centers)):
+                dist = np.linalg.norm(vert_pos - plate_centers[plate_idx])
+                score = growth_rates[plate_idx] / (dist + 1e-6)
+                
+                # Add some randomness
+                score *= (1.0 + (np.random.random() * 0.5))
+                
+                if score > best_score:
+                    best_score = score
+                    best_plate = plate_idx
+            
+            if best_plate != -1:
+                plate_ids[vert_idx] = best_plate
+    
+    return plate_ids
 
 @dataclass
 class World:
@@ -144,6 +200,45 @@ class World:
         # Update Plate objects with their final vertex sets
         for i, plate in enumerate(self.plates):
             plate.vertex_ids = torch.where(self.plate_ids == i)[0]
+
+    
+    # @time_function
+    # def _grow_plates(self):
+    #     """Optimized plate growth using Numba for performance"""
+    #     # Convert necessary data to numpy arrays for Numba
+    #     vertex_neighbors = self.sphere_mesh._neighbor_map['vertex_to_vertices']
+    #     num_vertices = len(self.sphere_mesh.vertices)
+    #     vertex_positions = self.sphere_mesh.vertices.cpu().numpy()
+        
+    #     # Convert neighbor map to a format Numba can handle
+    #     max_neighbors = max(len(n) for n in vertex_neighbors.values())
+    #     neighbor_array = np.full((num_vertices, max_neighbors), -1, dtype=np.int32)
+    #     for i, neighbors in vertex_neighbors.items():
+    #         neighbor_array[i, :len(neighbors)] = neighbors
+        
+    #     # Prepare plate data
+    #     plate_centers = np.array([vertex_positions[plate.vertex_ids[0].item()] 
+    #                             for plate in self.plates])
+    #     growth_rates = np.array([plate.growth_rate for plate in self.plates])
+    #     plate_ids_np = self.plate_ids.cpu().numpy()
+        
+    #     # Run the Numba-optimized growth algorithm
+    #     plate_ids_np = _numba_grow_plates(
+    #         plate_ids_np,
+    #         neighbor_array,
+    #         vertex_positions,
+    #         plate_centers,
+    #         growth_rates,
+    #         num_vertices
+    #     )
+        
+    #     # Convert back to PyTorch
+    #     self.plate_ids = torch.from_numpy(plate_ids_np).to(DEVICE)
+        
+    #     # Update Plate objects with their final vertex sets
+    #     for i, plate in enumerate(self.plates):
+    #         plate.vertex_ids = torch.where(self.plate_ids == i)[0]
+
 
     @time_function
     def _validate_and_reindex_plates(self):
@@ -413,8 +508,8 @@ def render_world():
             dpg.add_slider_float(
                 label="Elevation (degrees)", 
                 tag="camera_elevation",
-                min_value=-180, 
-                max_value=180, 
+                min_value=-90, 
+                max_value=90, 
                 default_value=math.degrees(elevation),
                 callback=camera_control_callback
             )
@@ -439,7 +534,7 @@ def render_world():
         dpg.delete_item("draw_area", children_only=True)
         
         screen_verts, visible_tris, _ = project_2d(
-            [world.sphere_mesh], eye, lookat, up, fov=60.0, res=(800, 600)
+            [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=(800, 600)
             )
         
         if screen_verts and visible_tris[0]:

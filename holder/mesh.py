@@ -351,7 +351,7 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
 
 @time_function
 #@torch.compile(mode="reduce-overhead")
-def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: torch.Tensor, fov: float = 90.0,
+def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: torch.Tensor, fovfl: float = 90.0,
                 res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
         -> tuple[list[torch.Tensor],list,list[torch.Tensor]]:
     global _mesh_cache
@@ -360,15 +360,16 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
         lookat = lookat.half()
         up = up.half()
 
-    viewMatrixnp, projMatrixnp = comped(fov, lookat.cpu().numpy(), eye.cpu().numpy(), up.cpu().numpy(), res[0], res[1], far, near)
+    viewMatrixnp, projMatrixnp = comped(fovfl, lookat.cpu().numpy(), eye.cpu().numpy(), up.cpu().numpy(), res[0], res[1], far, near)
     viewMatrix = torch.tensor(viewMatrixnp)
     projMatrix = torch.tensor(projMatrixnp)
+
     all_screen_verts = []
     all_visible_tris = []
     all_depths = []
 
     for obj in meshes:
-        cache_key = (id(obj))
+        cache_key = (id(obj), tuple(eye.cpu().numpy()), tuple(lookat.cpu().numpy()), tuple(up.cpu().numpy()))
         if cache_key in _mesh_cache and not obj._needs_neighbor_update:
             screen_verts, visible_tris, depths = _mesh_cache[cache_key]
         else:
@@ -380,23 +381,10 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
                 all_depths.append(torch.empty(0, device=DEVICE))
                 continue
 
-            # homogenous_verts = torch.cat([obj.vertices, torch.ones(obj.vertices.shape[0], 1, device=DEVICE), ], dim=1)
-
-            # # Transform to view space
-            # view_verts = torch.matmul(homogenous_verts, viewMatrix.T)
-            
-            # # Project to clip space
-            # proj_verts = torch.matmul(view_verts, projMatrix.T)
-            # proj_verts = proj_verts / proj_verts[:, 3].unsqueeze(1)
-
-            # # Convert to screen coordinates
-            # screen_verts = torch.empty_like(proj_verts[:, :2])
-            # screen_verts[:, 0] = (proj_verts[:, 0] + 1) * 0.5 * res[0]
-            # screen_verts[:, 1] = (1 - (proj_verts[:, 1] + 1) * 0.5) * res[1]
-
             screen_vertsnp, view_vertsnp = compedObj(obj.vertices.cpu().numpy(), viewMatrixnp, projMatrixnp, res[0], res[1])
             screen_verts = torch.tensor(screen_vertsnp)
             view_verts = torch.tensor(view_vertsnp)
+            
             # Get triangles (convert to triangles if needed)
             if obj._polys.shape[1] == 3:
                 triangles = obj._polys
