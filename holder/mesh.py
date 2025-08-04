@@ -319,11 +319,19 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     homogenous_verts[:, :3] = verts  # Assuming verts is n x 3
     homogenous_verts[:, 3] = 1.0
     
-    # Transform vertices (note we need to transpose the multiplication order)
-    # viewmatrix is 4x4, homogenous_verts is n x 4
-    # So we need to transpose homogenous_verts to 4 x n, multiply, then transpose back
-    view_verts = (viewmatrix @ homogenous_verts.T).T
-    proj_verts = (projMatrix @ view_verts.T).T
+
+    viewmatrix_contig = np.ascontiguousarray(viewmatrix)
+    homogenous_verts_contig = np.ascontiguousarray(homogenous_verts)
+
+    # Transform vertices
+    view_verts = (viewmatrix_contig @ homogenous_verts_contig.T).T
+    proj_verts = (np.ascontiguousarray(projMatrix) @ view_verts.T).T
+
+    # # Transform vertices (note we need to transpose the multiplication order)
+    # # viewmatrix is 4x4, homogenous_verts is n x 4
+    # # So we need to transpose homogenous_verts to 4 x n, multiply, then transpose back
+    # view_verts = (viewmatrix @ homogenous_verts.T).T
+    # proj_verts = (projMatrix @ view_verts.T).T
     
     # Perspective division
     proj_verts = proj_verts / proj_verts[:, 3:4]
