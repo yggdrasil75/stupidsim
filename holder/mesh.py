@@ -311,7 +311,7 @@ def comped(fov, lookat, eye, up, res0, res1, far, near):
 
     return viewMatrix, projMatrix
 
-@njit((float32[:,:], float32[:,:], float32[:,:], int64, int64))
+@njit((float32[:,:], float32[:,:], float32[:,:], int64, int64), fastmath=True)
 def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     n = verts.shape[0]
     # Create homogeneous coordinates (n x 4)
@@ -327,12 +327,6 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     view_verts = (viewmatrix_contig @ homogenous_verts_contig.T).T
     proj_verts = (np.ascontiguousarray(projMatrix) @ view_verts.T).T
 
-    # # Transform vertices (note we need to transpose the multiplication order)
-    # # viewmatrix is 4x4, homogenous_verts is n x 4
-    # # So we need to transpose homogenous_verts to 4 x n, multiply, then transpose back
-    # view_verts = (viewmatrix @ homogenous_verts.T).T
-    # proj_verts = (projMatrix @ view_verts.T).T
-    
     # Perspective division
     proj_verts = proj_verts / proj_verts[:, 3:4]
     
@@ -349,10 +343,10 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
                 res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
         -> tuple[list[torch.Tensor],list,list[torch.Tensor]]:
     global _mesh_cache
-    if torch.cuda.is_available():
-        eye = eye.half()
-        lookat = lookat.half()
-        up = up.half()
+    # if torch.cuda.is_available():
+    #     eye = eye.half()
+    #     lookat = lookat.half()
+    #     up = up.half()
 
     viewMatrixnp, projMatrixnp = comped(fovfl, lookat.cpu().numpy(), eye.cpu().numpy(), up.cpu().numpy(), res[0], res[1], far, near)
     viewMatrix = torch.tensor(viewMatrixnp)

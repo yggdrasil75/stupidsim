@@ -124,7 +124,7 @@ def _numba_check_containment(inner_verts, outer_verts_set,
 @dataclass
 class World:
     torch.set_default_device(DEVICE)
-    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=64, rings=64))
+    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
     sea_level: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0, dtype=torch.float32))
     min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
     max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
@@ -359,7 +359,7 @@ class World:
                 
                 # If fragment is large, create a new plate for it
                 if len(fragment_verts) > 50: # Threshold for a new plate
-                    new_fragment_plate = Plate.create_oceanic_plate(fragment_verts)
+                    new_fragment_plate = Plate.create_oceanic_plate(fragment_verts, vertex_ids=fragment_verts)
                     final_plates.append(new_fragment_plate)
                 else: # If fragment is small, merge it with the best neighbor
                     border_counts = {}
@@ -597,20 +597,25 @@ def render_world():
 
         dpg.delete_item("draw_area", children_only=True)
         
-        screen_verts, visible_tris, _ = project_2d(
+        screen_verts, visible_tris, depths = project_2d(
             [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=(800, 600)
             )
         
         if screen_verts and visible_tris[0]:
             points_np = screen_verts[0].cpu().numpy()
             colors_np = world.sphere_mesh.color.cpu().numpy()
-            for tri in visible_tris[0]:
+            depths_np = depths[0].cpu().numpy()
+            for i, tri in enumerate(visible_tris[0]):
+                #depth = depths_np[i]
                 p1 = points_np[tri[0]].tolist()
                 p2 = points_np[tri[1]].tolist()
                 p3 = points_np[tri[2]].tolist()
                 # Use color from the first vertex of the triangle
                 color = colors_np[tri[0]].tolist()
-                dpg.draw_triangle(p1, p2, p3, color=color, fill=color, parent="draw_area")
+                #print(f'depth issue: {type(depth)}, {depth}')
+                dpg.draw_triangle(p1, p2, p3, color=color, fill=color, 
+                                #depth=depth,
+                                parent="draw_area")
     
         dpg.render_dearpygui_frame()
     

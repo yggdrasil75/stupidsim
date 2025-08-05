@@ -838,7 +838,7 @@ class BlockRenderer:
                 v0 = screen_verts_np[tri[0]]
                 v1 = screen_verts_np[tri[1]]
                 v2 = screen_verts_np[tri[2]]
-                
+                print(f'depth issue: {type(depths_np[i])}, {depths_np[i]}')
                 triangle_data = {
                     'points': [(v0[0], v0[1]), (v1[0], v1[1]), (v2[0], v2[1])],
                     'color': color_np,
