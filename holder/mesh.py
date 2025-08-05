@@ -282,7 +282,7 @@ def cross(a, b):
                      a[2]*b[0] - a[0]*b[2],
                      a[0]*b[1] - a[1]*b[0]])
 
-@njit((float64, float32[:], float32[:], float32[:], int64, int64, int64, float64))
+@njit((float64, float32[:], float32[:], float32[:], int64, int64, int64, float64), cache=True)
 def comped(fov, lookat, eye, up, res0, res1, far, near):
     zAxis = lookat - eye
     zAxis = zAxis / np.linalg.norm(zAxis)
@@ -311,7 +311,7 @@ def comped(fov, lookat, eye, up, res0, res1, far, near):
 
     return viewMatrix, projMatrix
 
-@njit((float32[:,:], float32[:,:], float32[:,:], int64, int64), fastmath=True)
+@njit((float32[:,:], float32[:,:], float32[:,:], int64, int64), fastmath=True, cache=True)
 def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     n = verts.shape[0]
     # Create homogeneous coordinates (n x 4)

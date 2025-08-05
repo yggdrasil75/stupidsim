@@ -1,4 +1,6 @@
 matplotlib~=3.10.1
 numpy~=2.2.5
 torch~=2.7.0
+numba
+scipy
 

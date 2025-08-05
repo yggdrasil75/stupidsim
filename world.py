@@ -1,3 +1,4 @@
+import copy
 from dataclasses import dataclass, field
 import random
 import numba
@@ -7,13 +8,13 @@ from globals import DEVICE
 from shapes.sphere import create_sphere_mesh
 import dearpygui.dearpygui as dpg
 import numpy as np
-from numba import njit, prange, int64, float32
+from numba import njit, prange, int64, float32, float64
 from plate import Plate
 import math
 from util import time_function, print_timing_stats
 
 
-@njit
+@njit((int64[:], float64[:,:], float32[:,:], float32[:,:], float32[:], int64), cache=True)
 def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
                        plate_centers, growth_rates, num_vertices):    
     assigned_mask = plate_ids != -1
@@ -104,22 +105,29 @@ def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
 
     return plate_ids
 
-@njit
+@njit((int64[:], int64[:], float64[:,:]), cache=True)
 def _numba_check_containment(inner_verts, outer_verts_set, 
-                           plate_ids, neighbor_map) -> bool:
+                           neighbor_map) -> bool:
     """
     Numba-accelerated helper function to check plate containment.
-    """
-    if len(inner_verts) == 0:
-        return False  # Empty plate can't be contained
-    
-    outer_verts = outer_verts_set
+    """    
     for vert in inner_verts:
         for neighbor in neighbor_map[vert]:
-            neighbor_plate = plate_ids[neighbor]
-            if neighbor_plate not in outer_verts and neighbor_plate != plate_ids[vert]:
+            if neighbor not in outer_verts_set:
                 return False
     return True
+
+def make_2D_array(lis):
+    """Funciton to get 2D array from a list of lists
+    """
+    n = len(lis)
+    lengths = np.array([len(x) for x in lis])
+    max_len = np.max(lengths)
+    arr = np.zeros((n, max_len))
+
+    for i in range(n):
+        arr[i, :lengths[i]] = lis[i]
+    return arr, lengths
 
 @dataclass
 class World:
@@ -211,10 +219,19 @@ class World:
         
         pidsnp = self.plate_ids.cpu().numpy()
         neinp = [neighbor_tensor.cpu().numpy() for neighbor_tensor in neighbor_tensors]
+        neinp, lens = make_2D_array(neinp)
         vertposnp = vertex_positions.cpu().numpy()
         plaecennp = plate_centers.cpu().numpy()
         grownp = growth_rates.cpu().numpy()
 
+        # print("numba growth")
+        # print(numba.typeof(pidsnp))
+        # print(numba.typeof(neinp))
+        # print(numba.typeof(vertposnp))
+        # print(numba.typeof(plaecennp))
+        # print(numba.typeof(grownp))
+        # print(numba.typeof(num_vertices))
+        
         while np.any(pidsnp == -1):
             pidsnp = _numba_grow_plates(pidsnp, neinp,
                                                 vertposnp, plaecennp,
@@ -245,15 +262,21 @@ class World:
         
         # Convert to numpy arrays and sets for numba
         inner_verts_np = inner_plate.vertex_ids.cpu().numpy()
-        outer_verts_set = set(outer_plate.vertex_ids.cpu().numpy())
-        plate_ids_np = self.plate_ids.cpu().numpy()
+        outer_verts_set = outer_plate.vertex_ids.cpu().numpy()
         
         # Convert neighbor map to numba-compatible format
-        neighbor_tensors = [torch.tensor(neighbors, device=DEVICE) 
-                            for neighbors in self.sphere_mesh._neighbor_map['vertex_to_vertices'].values()]
-        neinp = [neighbor_tensor.cpu().numpy() for neighbor_tensor in neighbor_tensors]
+        neighbor_list = []
+        for nten in self.sphere_mesh._neighbor_map['vertex_to_vertices'].values():
+            #nten, _ = make_2D_array(nten)
+            neighbor_list.append(nten)
         
-        return _numba_check_containment(inner_verts_np, outer_verts_set, plate_ids_np, neinp)
+        neighbor_list, _ = make_2D_array(neighbor_list)
+        #outer_verts_list, _ = make_2D_array(outer_verts_set)
+        # print("numba containment check")
+        # print(numba.typeof(inner_verts_np))
+        # print(numba.typeof(outer_verts_set))
+        # print(numba.typeof(neighbor_list))
+        return _numba_check_containment(inner_verts_np, outer_verts_set, neighbor_list)
 
     @time_function
     def merge_plates(self, plate_a_id: int, plate_b_id: int):
