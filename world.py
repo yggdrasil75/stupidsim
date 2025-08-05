@@ -190,11 +190,39 @@ class World:
         for plate in self.plates:
             plate.update_continental_borders(self.sphere_mesh.vertices)
 
+        unassigned = torch.sum(self.plate_ids == -1).item()
+        if unassigned > 0:
+            print(f"Warning: {unassigned} vertices remain unassigned after plate validation")
+            # Assign remaining vertices to nearest plates
+            self._assign_remaining_vertices()
+
         print("Initial world generation complete")
         # Generate colors for the final set of plates
         self.plate_colors = torch.randint(0, 256, (len(self.plates), 4), dtype=torch.uint8, device=DEVICE)
         self.plate_colors[:, 3] = 255 # Full alpha
         print(f'total vertices: {len(self.sphere_mesh.vertices)}')
+
+    @time_function
+    def _assign_remaining_vertices(self):
+        """Assign any remaining unassigned vertices to the nearest plate"""
+        unassigned = torch.where(self.plate_ids == -1)[0]
+        if len(unassigned) == 0:
+            return
+            
+        # For each unassigned vertex, find the nearest plate center
+        vertex_positions = self.sphere_mesh.vertices
+        plate_centers = torch.stack([vertex_positions[plate.vertex_ids[0]] 
+                                    for plate in self.plates])
+        
+        for vert_idx in unassigned:
+            pos = vertex_positions[vert_idx]
+            distances = torch.norm(plate_centers - pos, dim=1)
+            nearest_plate = torch.argmin(distances).item()
+            self.plate_ids[vert_idx] = nearest_plate
+            self.plates[nearest_plate].vertex_ids = torch.cat([
+                self.plates[nearest_plate].vertex_ids,
+                torch.tensor([vert_idx], dtype=torch.long, device=DEVICE)
+            ])
 
     @time_function
     def _initialize_plates(self):
@@ -244,19 +272,15 @@ class World:
         vertposnp = vertex_positions.cpu().numpy()
         plaecennp = plate_centers.cpu().numpy()
         grownp = growth_rates.cpu().numpy()
-
-        # print("numba growth")
-        # print(numba.typeof(pidsnp))
-        # print(numba.typeof(neinp))
-        # print(numba.typeof(vertposnp))
-        # print(numba.typeof(plaecennp))
-        # print(numba.typeof(grownp))
-        # print(numba.typeof(num_vertices))
         
+        iteration = 0
         while np.any(pidsnp == -1):
+            unassigned_count = np.sum(pidsnp == -1)
+            print(f"Iteration {iteration}: {unassigned_count} unassigned vertices remaining")
             pidsnp = _numba_grow_plates(pidsnp, neinp,
                                                 vertposnp, plaecennp,
-                                                  grownp, num_vertices)
+                                                grownp, num_vertices)
+            iteration += 1
         self.plate_ids = torch.tensor(pidsnp)
         # Update Plate objects with their final vertex sets
         for i, plate in enumerate(self.plates):
@@ -356,6 +380,42 @@ class World:
         
         processed_plate_ids = set()
 
+        # First handle any completely unassigned vertices
+        unassigned_verts = torch.where(self.plate_ids == -1)[0].tolist()
+        if unassigned_verts:
+            print(f"Found {len(unassigned_verts)} unassigned vertices - assigning to random neighbors")
+            
+            changed = True
+            while changed and unassigned_verts:
+                changed = False
+                remaining_unassigned = []
+                
+                for vert_idx in unassigned_verts:
+                    # Find all neighboring plates
+                    neighbor_plates = set()
+                    for neighbor in vertex_neighbors.get(vert_idx, []):
+                        plate_id = self.plate_ids[neighbor].item()
+                        if plate_id != -1:
+                            neighbor_plates.add(plate_id)
+                    
+                    if neighbor_plates:
+                        # Assign to a random neighboring plate
+                        chosen_plate = random.choice(list(neighbor_plates))
+                        self.plate_ids[vert_idx] = chosen_plate
+                        self.plates[chosen_plate].vertex_ids = torch.cat([
+                            self.plates[chosen_plate].vertex_ids,
+                            torch.tensor([vert_idx], dtype=torch.long, device=DEVICE)
+                        ])
+                        changed = True
+                    else:
+                        remaining_unassigned.append(vert_idx)
+                
+                unassigned_verts = remaining_unassigned
+                print(f"Assigned some vertices, {len(unassigned_verts)} remaining unassigned")
+            
+            if unassigned_verts:
+                print(f"Warning: {len(unassigned_verts)} vertices could not be assigned (no plate neighbors)")
+
         while plates_to_process:
             plate = plates_to_process.pop(0)
             if len(plate.vertex_ids) == 0: continue
@@ -426,7 +486,12 @@ class World:
         
         self.plate_ids = new_plate_ids_tensor
         self.plate_count = torch.tensor(len(self.plates))
-
+        
+        # One final check for any remaining unassigned vertices
+        unassigned_verts = torch.where(self.plate_ids == -1)[0]
+        if len(unassigned_verts) > 0:
+            print(f"Warning: {len(unassigned_verts)} vertices remain unassigned after plate validation")
+            
     @time_function
     def calculate_plate_collisions(self):
         """Calculate collisions between plates and adjust elevations accordingly"""
@@ -523,10 +588,10 @@ class World:
                 continental_verts = plate.get_continental_vertices()
                 if len(continental_verts) > 0:
                     # Continental centers are higher
-                    self.heightmap[plate.continental_centers] += 2.0
+                    self.heightmap[plate.continental_centers] += 200.0
                     # Continental borders have moderate elevation
                     if len(plate.continental_border_vertices) > 0:
-                        self.heightmap[plate.continental_border_vertices] += 1.0
+                        self.heightmap[plate.continental_border_vertices] += 100.0
         
         # Calculate plate collisions
         self.calculate_plate_collisions()
@@ -537,12 +602,12 @@ class World:
                 # Add some noise based on movement
                 movement_factor = torch.norm(plate.linear_velocity) * 0.1
                 noise = (torch.rand(len(plate.vertex_ids)) * movement_factor)
-            self.heightmap[plate.vertex_ids] += noise
+                self.heightmap[plate.vertex_ids] += noise
             
-            # Apply collision forces
-            if torch.norm(plate.collision_force) > 0:
-                force_factor = torch.norm(plate.collision_force) * 0.05
-                self.heightmap[plate.vertex_ids] += torch.rand(len(plate.vertex_ids)) * force_factor
+                # Apply collision forces
+                if torch.norm(plate.collision_force) > 0:
+                    force_factor = torch.norm(plate.collision_force) * 0.05
+                    self.heightmap[plate.vertex_ids] += torch.rand(len(plate.vertex_ids)) * force_factor
     
         # Normalize heightmap
         self.heightmap = (self.heightmap - self.heightmap.min()) / \
@@ -552,9 +617,9 @@ class World:
     @time_function
     def update_vertices_based_on_heightmap(self):
         """Update the mesh vertices based on the current heightmap"""
-
+        pass
         ### THIS IS BROKEN! UPDATE HEIGHMAP AS COLOR INSTEAD OF USING THIS
-        vertices = self.sphere_mesh.vertices.clone()
+        #vertices = self.sphere_mesh.vertices.clone()
         #normals = torch.nn.functional.normalize(vertices, dim=1)
         #scaled_vertices = normals * (1.0 + self.heightmap.unsqueeze(1))
         #self.sphere_mesh.vertices = scaled_vertices
@@ -734,8 +799,9 @@ def render_world():
                     50: [50, 180, 50],     # Grass
                     75: [100, 150, 50],    # Forest
                     90: [80, 100, 40],     # Mountain
-                    99: [120, 120, 120],  # Rock
-                    100: [200, 200, 200],  # Snow
+                    #99: [120, 120, 120],  # Rock
+                    99: [200, 200, 200],  # Snow
+                    100: [255, 255, 255]
                     #(1.0, [255, 255, 255])   # Snow cap
                 }
                 
