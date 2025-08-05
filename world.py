@@ -8,12 +8,12 @@ from globals import DEVICE
 from shapes.sphere import create_sphere_mesh
 import dearpygui.dearpygui as dpg
 import numpy as np
-from numba import njit, prange, int64, float32, float64
+from numba import njit, prange, int64, float32
 from plate import Plate
 import math
 from util import time_function, print_timing_stats
 
-@njit((int64[:], float64[:,:], float32[:,:], float32[:,:], float32[:], int64), cache=True)
+@njit((int64[:], float32[:,:], float32[:,:], float32[:,:], float32[:], int64), cache=True)
 def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
                        plate_centers, growth_rates, num_vertices):    
     assigned_mask = plate_ids != -1
@@ -70,7 +70,7 @@ def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
 
     # For each frontier vertex, find all plates that could claim it
     frontier_pos = vertex_positions[frontier_verts]
-    dists = np.empty((len(frontier_verts), len(plate_centers)), dtype=np.float64)
+    dists = np.empty((len(frontier_verts), len(plate_centers)), dtype=np.float32)
     for i in range(len(frontier_verts)):
         for j in range(len(plate_centers)):
             # Add some noise to the distance calculation
@@ -90,7 +90,7 @@ def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
         potential_claims[i,1] = potential_plates[i]
 
     # Sort claims by score to maintain realistic growth priority
-    max_scores = np.empty(len(frontier_verts), dtype=np.float64)
+    max_scores = np.empty(len(frontier_verts), dtype=np.float32)
     for i in range(len(frontier_verts)):
         max_scores[i] = scores[i, potential_plates[i]]
     sorted_indices = np.argsort(max_scores)[::-1]
@@ -107,7 +107,7 @@ def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
 
     return plate_ids
 
-@njit((int64[:], int64[:], float64[:,:]), cache=True)
+@njit((int64[:], int64[:], float32[:,:]), cache=True)
 def _numba_check_containment(inner_verts, outer_verts_set, 
                            neighbor_map) -> bool:
     """
@@ -125,7 +125,7 @@ def make_2D_array(lis):
     n = len(lis)
     lengths = np.array([len(x) for x in lis])
     max_len = np.max(lengths)
-    arr = np.zeros((n, max_len))
+    arr = np.zeros((n, max_len), np.float32)
 
     for i in range(n):
         arr[i, :lengths[i]] = lis[i]
@@ -134,7 +134,7 @@ def make_2D_array(lis):
 @dataclass
 class World:
     torch.set_default_device(DEVICE)
-    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
+    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=512, rings=512))
     sea_level: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0, dtype=torch.float32))
     #min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
     #max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))

@@ -7,8 +7,8 @@ import dearpygui.dearpygui as dpg
 from globals import DEVICE
 from util import time_function
 import numpy as np
-from numba import njit, float32, float64, types, int64
-
+from numba import njit, float32, types, int64
+from scipy.sparse import csr_matrix
 
 _mesh_cache = {}
 
@@ -25,7 +25,9 @@ class mesh:
     restitution: torch.Tensor = field(default_factory=lambda: torch.tensor(0.3))
     linearVelocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
     angularVelocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
-    _neighbor_map: dict = field(default_factory=dict, init=False)  # Stores adjacency information
+    #_neighbor_map: dict = field(default_factory=dict, init=False)  # Stores adjacency information
+    _neighbor_map = field(init=False)
+
     _needs_neighbor_update: bool = field(default=True, init=False)  # Flag for when to rebuild neighbor map
     
 
@@ -95,7 +97,7 @@ class mesh:
         """Build or update the neighbor map data structure"""
         if not self._needs_neighbor_update:
             return
-            
+        
         self._neighbor_map = {
             'vertex_to_faces': {},  # Maps vertex indices to list of face indices
             'face_to_faces': {},    # Maps face indices to adjacent face indices
@@ -282,7 +284,7 @@ def cross(a, b):
                      a[2]*b[0] - a[0]*b[2],
                      a[0]*b[1] - a[1]*b[0]])
 
-@njit((float64, float32[:], float32[:], float32[:], int64, int64, int64, float64), cache=True)
+@njit((float32, float32[:], float32[:], float32[:], int64, int64, int64, float32), cache=True)
 def comped(fov, lookat, eye, up, res0, res1, far, near):
     zAxis = lookat - eye
     zAxis = zAxis / np.linalg.norm(zAxis)
