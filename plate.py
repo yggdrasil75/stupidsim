@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import torch
 from typing import List
 
@@ -14,7 +14,47 @@ class Plate:
     growth_rate: torch.Tensor  # Rate at which the plate grows at boundaries
     base_elevation: torch.Tensor  # Base elevation for this plate
     continental_centers: List[int]  # Vertex IDs of continental centers
+    continental_border_vertices: torch.Tensor = field(default_factory=lambda: torch.tensor([], dtype=torch.long))  # New field
+    mass: torch.Tensor = field(init=False)  # Will be calculated
+    collision_force: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32))  # Collision force vector
     
+    
+    def calculate_mass(self):
+        """Calculate plate mass based on vertex count, base elevation and growth rate"""
+        vertex_factor = len(self.vertex_ids) / 1000.0  # Normalize vertex count
+        elevation_factor = (self.base_elevation - 6367) / 5.0  # Normalize elevation
+        growth_factor = self.growth_rate * 10.0
+        
+        # Combine factors - continental plates are heavier
+        if self.plate_type == 'continental':
+            self.mass = torch.tensor(1.5 + vertex_factor + elevation_factor + growth_factor, dtype=torch.float32)
+        else:
+            self.mass = torch.tensor(1.0 + vertex_factor * 0.8 + elevation_factor * 0.5 + growth_factor * 0.7, dtype=torch.float32)
+    
+    def update_continental_borders(self, all_vertices: torch.Tensor, threshold: float = 0.2):
+        """
+        Identify continental border vertices - where continental crust meets oceanic.
+        Returns vertex IDs that are on continental borders.
+        """
+        if not self.continental_centers:
+            self.continental_border_vertices = torch.tensor([], dtype=torch.long)
+            return
+            
+        # Get positions of our continental vertices
+        continental_verts = self.get_continental_vertices()
+        if len(continental_verts) == 0:
+            self.continental_border_vertices = torch.tensor([], dtype=torch.long)
+            return
+            
+        # Find boundary vertices that are also continental
+        all_boundaries = self.get_boundary_vertices(all_vertices, threshold)
+        continental_boundaries = torch.tensor(
+            [v for v in all_boundaries if v in continental_verts],
+            dtype=torch.long
+        )
+        
+        self.continental_border_vertices = continental_boundaries
+
     @classmethod
     def create_oceanic_plate(cls, ID, vertex_ids: torch.Tensor, speed: float = 1.0):
         """Factory method for creating an oceanic plate."""

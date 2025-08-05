@@ -13,7 +13,6 @@ from plate import Plate
 import math
 from util import time_function, print_timing_stats
 
-
 @njit((int64[:], float64[:,:], float32[:,:], float32[:,:], float32[:], int64), cache=True)
 def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
                        plate_centers, growth_rates, num_vertices):    
@@ -74,11 +73,14 @@ def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
     dists = np.empty((len(frontier_verts), len(plate_centers)), dtype=np.float64)
     for i in range(len(frontier_verts)):
         for j in range(len(plate_centers)):
-            dists[i,j] = np.sqrt(np.sum((frontier_pos[i] - plate_centers[j])**2))
+            # Add some noise to the distance calculation
+            noise = 1.0 + (np.random.rand() * 0.2 - 0.1)  # ±10% noise
+            dists[i,j] = np.sqrt(np.sum((frontier_pos[i] - plate_centers[j])**2)) * noise
 
-    # Calculate scores with randomness
-    rand_factors = 1.0 + (np.random.rand(len(frontier_verts)) * 0.4)
-    scores = (growth_rates / (dists + 1e-6)) * rand_factors.reshape(-1, 1)
+    # Modified scoring - distance is less important, randomness more important
+    rand_factors = 0.8 + (np.random.rand(len(frontier_verts)) * 0.4)  # 0.8-1.2 range
+    distance_weight = 0.3  # Reduced from implicit 1.0 in original
+    scores = (growth_rates * rand_factors.reshape(-1, 1)) / (dists**distance_weight + 1e-6)
 
     # Get all possible claims (plate, vertex pairs)
     potential_plates = np.argmax(scores, axis=1)
@@ -113,7 +115,7 @@ def _numba_check_containment(inner_verts, outer_verts_set,
     """    
     for vert in inner_verts:
         for neighbor in neighbor_map[vert]:
-            if neighbor not in outer_verts_set:
+            if (neighbor not in outer_verts_set) and (neighbor not in inner_verts):
                 return False
     return True
 
@@ -134,9 +136,9 @@ class World:
     torch.set_default_device(DEVICE)
     sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
     sea_level: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0, dtype=torch.float32))
-    min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
-    max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
-    plate_count: torch.Tensor = field(default_factory=lambda: torch.tensor(17, dtype=torch.int32))
+    #min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
+    #max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
+    plate_count: torch.Tensor = field(default_factory=lambda: torch.tensor(20, dtype=torch.int32))
     rainfall_rate: torch.Tensor = field(default_factory=lambda: torch.tensor(0.1, dtype=torch.float32))
     evaporation_rate: torch.Tensor = field(default_factory=lambda: torch.tensor(0.05, dtype=torch.float32))
     water_flow_max: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
@@ -150,6 +152,17 @@ class World:
     plate_colors: torch.Tensor = field(init=False)
     colormap_mode: str = field(default="null")  # Changed default to show new feature
     
+    @property
+    def min_height(self) -> torch.Tensor:
+        """Returns the minimum height from the heightmap"""
+        return torch.min(self.heightmap) if len(self.heightmap) > 0 else torch.tensor(-1.0)
+    
+    @property
+    def max_height(self) -> torch.Tensor:
+        """Returns the maximum height from the heightmap"""
+        return torch.max(self.heightmap) if len(self.heightmap) > 0 else torch.tensor(1.0)
+
+
     @time_function
     def __post_init__(self):
         # Initialize simulation state arrays based on the sphere mesh vertices
@@ -169,7 +182,15 @@ class World:
         print("Validating plates...")
         self._validate_and_reindex_plates()
         print(f"Final plate count: {len(self.plates)}")
+        for plate in self.plates:
+            plate.calculate_mass()
+        #     plate.update_continental_borders(self.sphere_mesh.vertices, 0.2)
+        print("Calculating plate elevations...")
+        self.update_elevations()
+        for plate in self.plates:
+            plate.update_continental_borders(self.sphere_mesh.vertices)
 
+        print("Initial world generation complete")
         # Generate colors for the final set of plates
         self.plate_colors = torch.randint(0, 256, (len(self.plates), 4), dtype=torch.uint8, device=DEVICE)
         self.plate_colors[:, 3] = 255 # Full alpha
@@ -407,6 +428,128 @@ class World:
         self.plate_count = torch.tensor(len(self.plates))
 
     @time_function
+    def calculate_plate_collisions(self):
+        """Calculate collisions between plates and adjust elevations accordingly"""
+        vertex_positions = self.sphere_mesh.vertices
+        vertex_normals = torch.nn.functional.normalize(vertex_positions, dim=1)
+        
+        # First reset collision forces
+        for plate in self.plates:
+            plate.collision_force = torch.zeros(3, dtype=torch.float32)
+        
+        # Check all plate pairs for collisions
+        for i, plate1 in enumerate(self.plates):
+            for j, plate2 in enumerate(self.plates[i+1:], i+1):
+                if len(plate1.vertex_ids) == 0 or len(plate2.vertex_ids) == 0:
+                    continue
+                    
+                # Find boundary vertices that are close to each other
+                bound1 = plate1.get_boundary_vertices(vertex_positions)
+                bound2 = plate2.get_boundary_vertices(vertex_positions)
+                
+                if len(bound1) == 0 or len(bound2) == 0:
+                    continue
+                    
+                # Get positions of boundary vertices
+                pos1 = vertex_positions[bound1]
+                pos2 = vertex_positions[bound2]
+                
+                # Calculate distances between boundaries
+                distances = torch.cdist(pos1, pos2)
+                close_pairs = torch.where(distances < 0.15)  # Collision threshold
+                
+                if len(close_pairs[0]) == 0:
+                    continue
+                    
+                # Calculate collision force based on mass and velocity difference
+                velocity_diff = plate1.linear_velocity - plate2.linear_velocity
+                force_magnitude = torch.norm(velocity_diff) * (plate1.mass + plate2.mass) * 0.1
+                force_direction = torch.mean(vertex_normals[bound1[close_pairs[0]]] - 
+                                        vertex_normals[bound2[close_pairs[1]]], dim=0)
+                force_direction = torch.nn.functional.normalize(force_direction, dim=0)
+                
+                collision_force = force_direction * force_magnitude
+                
+                # Apply forces to plates (opposite directions)
+                plate1.collision_force += collision_force
+                plate2.collision_force -= collision_force
+                
+                # Adjust elevations at collision points
+                self._adjust_elevation_at_collision(
+                    bound1[close_pairs[0]], 
+                    bound2[close_pairs[1]], 
+                    plate1, 
+                    plate2,
+                    force_magnitude
+                )
+
+    @time_function
+    def _adjust_elevation_at_collision(self, verts1, verts2, plate1, plate2, force):
+        """Adjust elevation for colliding vertices based on plate types and force"""
+        # Determine which plate is subducting (oceanic plates subduct under continental)
+        if plate1.plate_type == 'oceanic' and plate2.plate_type == 'continental':
+            subducting, overriding = plate1, plate2
+            subduct_verts, override_verts = verts1, verts2
+        elif plate1.plate_type == 'continental' and plate2.plate_type == 'oceanic':
+            subducting, overriding = plate2, plate1
+            subduct_verts, override_verts = verts2, verts1
+        else:
+            # Continental-continental collision or oceanic-oceanic
+            subducting, overriding = None, None
+            
+        if subducting:
+            # Oceanic plate subducts - create trench and mountains
+            self.heightmap[subduct_verts] -= 0.1 * force  # Trench
+            self.heightmap[override_verts] += 0.15 * force  # Mountain range
+        else:
+            # Continental collision or oceanic-oceanic - both get uplifted
+            uplift = 0.08 * force
+            self.heightmap[verts1] += uplift
+            self.heightmap[verts2] += uplift
+
+    @time_function
+    def update_elevations(self):
+        """Update elevations based on plate properties and collisions"""
+        vertex_positions = self.sphere_mesh.vertices
+        
+        # Reset heightmap to base elevations
+        for plate in self.plates:
+            if len(plate.vertex_ids) > 0:
+                self.heightmap[plate.vertex_ids] = plate.base_elevation
+                
+        # Apply continental effects
+        for plate in self.plates:
+            if plate.plate_type == 'continental' and len(plate.continental_centers) > 0:
+                continental_verts = plate.get_continental_vertices()
+                if len(continental_verts) > 0:
+                    # Continental centers are higher
+                    self.heightmap[plate.continental_centers] += 2.0
+                    # Continental borders have moderate elevation
+                    if len(plate.continental_border_vertices) > 0:
+                        self.heightmap[plate.continental_border_vertices] += 1.0
+        
+        # Calculate plate collisions
+        self.calculate_plate_collisions()
+        
+        # Apply plate movement effects
+        for plate in self.plates:
+            if len(plate.vertex_ids) > 0:
+                # Add some noise based on movement
+                movement_factor = torch.norm(plate.linear_velocity) * 0.1
+                noise = (torch.rand(len(plate.vertex_ids)) * movement_factor)
+            self.heightmap[plate.vertex_ids] += noise
+            
+            # Apply collision forces
+            if torch.norm(plate.collision_force) > 0:
+                force_factor = torch.norm(plate.collision_force) * 0.05
+                self.heightmap[plate.vertex_ids] += torch.rand(len(plate.vertex_ids)) * force_factor
+    
+        # Normalize heightmap
+        self.heightmap = (self.heightmap - self.heightmap.min()) / \
+                        (self.heightmap.max() - self.heightmap.min() + 1e-6) * \
+                        (self.max_height - self.min_height) + self.min_height
+
+    @time_function
     def update_vertices_based_on_heightmap(self):
         """Update the mesh vertices based on the current heightmap"""
 
@@ -422,7 +565,7 @@ class World:
         num_vertices = len(self.sphere_mesh.vertices)
         if self.colormap_mode == "water":
             water_normalized = (self.water_content - self.water_content.min()) / \
-                             (self.water_content.max() - self.water_content.min() + 1e-6)
+                            (self.water_content.max() - self.water_content.min() + 1e-6)
             blue = torch.clamp(water_normalized * 255, 0, 255)
             colors = torch.stack([
                 torch.zeros_like(blue), torch.zeros_like(blue), blue, torch.full_like(blue, 255)
@@ -442,8 +585,76 @@ class World:
             self.sphere_mesh.color = full_colors
 
         elif self.colormap_mode == "terrain":
-            # TODO: Implement terrain colormap
-            self.sphere_mesh.color = torch.full((num_vertices, 4), 128, dtype=torch.uint8, device=DEVICE)
+            # Normalize heightmap to 0-1 range
+            normalized_height = (self.heightmap - self.min_height) / \
+                            (self.max_height - self.min_height + 1e-6)
+            
+            # Create terrain color gradient
+            colors = torch.zeros((num_vertices, 4), dtype=torch.uint8, device=DEVICE)
+            
+            # Convert color values to float for lerp
+            deep_ocean = torch.tensor([5, 10, 80, 255], dtype=torch.float32, device=DEVICE)
+            shallow_water = torch.tensor([50, 150, 255, 255], dtype=torch.float32, device=DEVICE)
+            beach = torch.tensor([240, 240, 180, 255], dtype=torch.float32, device=DEVICE)
+            grass = torch.tensor([50, 180, 50, 255], dtype=torch.float32, device=DEVICE)
+            forest = torch.tensor([100, 150, 50, 255], dtype=torch.float32, device=DEVICE)
+            mountain = torch.tensor([80, 100, 40, 255], dtype=torch.float32, device=DEVICE)
+            rock = torch.tensor([120, 120, 120, 255], dtype=torch.float32, device=DEVICE)
+            snow = torch.tensor([200, 200, 200, 255], dtype=torch.float32, device=DEVICE)
+            snow_cap = torch.tensor([255, 255, 255, 255], dtype=torch.float32, device=DEVICE)
+            
+            # Deep ocean (below sea level)
+            deep_ocean_mask = normalized_height < self.sea_level * 0.3
+            colors[deep_ocean_mask] = deep_ocean.to(torch.uint8)
+            
+            # Shallow water
+            shallow_mask = (normalized_height >= self.sea_level * 0.3) & (normalized_height < self.sea_level)
+            shallow_factor = ((normalized_height[shallow_mask] - self.sea_level * 0.3) / (self.sea_level * 0.7)).unsqueeze(1)
+            colors[shallow_mask] = torch.lerp(
+                deep_ocean, 
+                shallow_water, 
+                shallow_factor
+            ).to(torch.uint8)
+            
+            # Beach/sand (just above sea level)
+            beach_mask = (normalized_height >= self.sea_level) & (normalized_height < self.sea_level + 0.05)
+            colors[beach_mask] = beach.to(torch.uint8)
+            
+            # Lowlands/grass
+            lowland_mask = (normalized_height >= self.sea_level + 0.05) & (normalized_height < self.sea_level + 0.3)
+            lowland_factor = ((normalized_height[lowland_mask] - (self.sea_level + 0.05)) / 0.25)
+            lowland_factor = lowland_factor.unsqueeze(1)
+            colors[lowland_mask] = torch.lerp(
+                grass,
+                forest,
+                lowland_factor
+            ).to(torch.uint8)
+            
+            # Highlands/forest
+            highland_mask = (normalized_height >= self.sea_level + 0.3) & (normalized_height < self.sea_level + 0.6)
+            highland_factor = ((normalized_height[highland_mask] - (self.sea_level + 0.3)) / 0.3)
+            highland_factor = highland_factor.unsqueeze(1)
+            colors[highland_mask] = torch.lerp(
+                forest,
+                mountain,
+                highland_factor
+            ).to(torch.uint8)
+            
+            # Mountains
+            mountain_mask = (normalized_height >= self.sea_level + 0.6) & (normalized_height < self.sea_level + 0.9)
+            mountain_factor = ((normalized_height[mountain_mask] - (self.sea_level + 0.6)) / 0.3)
+            mountain_factor = mountain_factor.unsqueeze(1)
+            colors[mountain_mask] = torch.lerp(
+                rock,
+                snow,
+                mountain_factor
+            ).to(torch.uint8)
+            
+            # Snow caps
+            snow_mask = normalized_height >= self.sea_level + 0.9
+            colors[snow_mask] = snow_cap.to(torch.uint8)
+            
+            self.sphere_mesh.color = colors
         elif self.colormap_mode == "temperature":
             # TODO: Implement temperature colormap
             self.sphere_mesh.color = torch.full((num_vertices, 4), 128, dtype=torch.uint8, device=DEVICE)
@@ -491,7 +702,7 @@ def render_world():
         oldmap = world.colormap_mode
         world.colormap_mode = app_data
         if world.colormap_mode != oldmap:
-            dpg.configure_item("legend_window", show=(app_data == "plates"))
+            #dpg.configure_item("legend_window", show=(app_data == "plates"))
             if app_data == "plates":
                 # Rebuild legend
                 dpg.delete_item("legend_window", children_only=True)
@@ -504,6 +715,51 @@ def render_world():
                                 with dpg.drawlist(width=20, height=20):
                                     dpg.draw_rectangle((0, 0), (20, 20), color=color, fill=color)
                                 dpg.add_text(f"Plate {i} ({plate.plate_type[:4]})")
+            
+            elif app_data == "terrain":
+                dpg.delete_item("legend_window", children_only=True)
+                # Calculate height percentiles
+                heightmap_np = world.heightmap.cpu().numpy()
+                percentiles = [0, 1, 10, 25, 50, 75, 90, 99, 100]
+                percentile_values = np.percentile(heightmap_np, percentiles)
+                # Get terrain colors for each percentile
+                normalized_heights = (percentile_values - world.min_height.cpu().numpy()) / \
+                                (world.max_height.cpu().numpy() - world.min_height.cpu().numpy() + 1e-6)
+                # Define terrain color stops (same as in terrain colormap)
+                color_stops = {
+                    0: [0, 0, 0],       # Deep ocean
+                    1: [5, 10, 80],       # Deep ocean
+                    10: [50, 150, 255],    # Shallow water
+                    25: [240, 240, 180],   # Beach
+                    50: [50, 180, 50],     # Grass
+                    75: [100, 150, 50],    # Forest
+                    90: [80, 100, 40],     # Mountain
+                    99: [120, 120, 120],  # Rock
+                    100: [200, 200, 200],  # Snow
+                    #(1.0, [255, 255, 255])   # Snow cap
+                }
+                
+                # Create legend
+                with dpg.group(parent="legend_window"):
+                    dpg.add_text("Terrain Height Percentiles:")
+                    for pct, height in zip(percentiles, percentile_values):
+                        # Find color for this height
+                        color = color_stops[pct]
+                        # for i in range(1, len(color_stops)):
+                        #     if normalized_heights[i-1] <= color_stops[i][0]:
+                        #         # t = (normalized_heights[i-1] - color_stops[i-1][0]) / \
+                        #         #     (color_stops[i][0] - color_stops[i-1][0])
+                        #         # color = [
+                        #         #     int(color_stops[i-1][1][0] + t * (color_stops[i][1][0] - color_stops[i-1][1][0])),
+                        #         #     int(color_stops[i-1][1][1] + t * (color_stops[i][1][1] - color_stops[i-1][1][1])),
+                        #         #     int(color_stops[i-1][1][2] + t * (color_stops[i][1][2] - color_stops[i-1][1][2]))
+                        #         # ]
+                        #         break
+                        
+                        with dpg.group(horizontal=True):
+                            with dpg.drawlist(width=20, height=20):
+                                dpg.draw_rectangle((0, 0), (20, 20), color=color, fill=color)
+                            dpg.add_text(f"{pct}%: {height:.3f}")
             world.update_colors()
 
     @time_function
@@ -614,7 +870,7 @@ def render_world():
     dpg.set_primary_window("primary", True)
     
     while dpg.is_dearpygui_running():
-        print_timing_stats()
+        #print_timing_stats()
         world.simulate_erosion(steps=0) # Run simulation logic, but don't advance time yet
         #world.update_colors() # ensure colors are correct
 
