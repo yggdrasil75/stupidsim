@@ -2,12 +2,55 @@ from dataclasses import dataclass, field
 import heapq
 import numba
 import numpy as np
-#from globals import DEVICE  # Assuming this is now a string like "cpu"
+#from globals import DEVICE
 from util import cross_2d, time_function, cross
 from numba import njit, float32, types, int64, jit
 from scipy.sparse import csr_matrix
 
 _mesh_cache = {}
+
+@njit(cache=True)
+def triangulate(polys):
+    new_tris = []
+    
+    # If polys is already a 2D array where each row represents a polygon
+    if polys.ndim == 2:
+        for poly in polys:
+            # Remove any padding values (like -1) if present
+            valid_verts = poly[poly >= 0]
+            n = len(valid_verts)
+            
+            if n < 3:
+                continue  # skip degenerate polygons
+            elif n == 3:
+                new_tris.append(valid_verts)
+            else:
+                # Fan triangulation
+                v0 = valid_verts[0]
+                for i in range(1, n-1):
+                    new_tris.append(np.array([v0, valid_verts[i], valid_verts[i+1]]))
+    else:
+        # Handle case where polys is a flat array with separators
+        current_poly = []
+        
+        for idx in polys:
+            if idx == -1:
+                if len(current_poly) >= 3:
+                    n = len(current_poly)
+                    v0 = current_poly[0]
+                    for i in range(1, n-1):
+                        new_tris.append([v0, current_poly[i], current_poly[i+1]])
+                current_poly = []
+            else:
+                current_poly.append(idx)
+        
+        if len(current_poly) >= 3:
+            n = len(current_poly)
+            v0 = current_poly[0]
+            for i in range(1, n-1):
+                new_tris.append([v0, current_poly[i], current_poly[i+1]])
+
+    return new_tris
 
 @dataclass
 class mesh:
@@ -15,6 +58,7 @@ class mesh:
     _vertices: np.ndarray
     _polys: np.ndarray
     _color: np.ndarray
+    _tris: np.ndarray = field(default=None, init=False)  # Stores triangulated version
     interactive: bool = True  # can stuff collide
     physics: bool = True  # does it fall from gravity
     mass: np.ndarray = field(default_factory=lambda: np.array(1.0, dtype=np.float32))
@@ -23,6 +67,7 @@ class mesh:
     angularVelocity: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
     _neighbor_map: dict = field(default_factory=dict, init=False)  # Stores adjacency information
     _needs_neighbor_update: bool = field(default=True, init=False)  # Flag for when to rebuild neighbor map
+    _needs_triangulation: bool = field(default=True, init=False)  # Flag for when to rebuild triangles
 
     @property
     def vertices(self):
@@ -65,6 +110,16 @@ class mesh:
         
         self._polys = value
         self._needs_neighbor_update = True  # Mark for update when polygons change
+        self._needs_triangulation = True  # Need to update triangles when polygons change
+        #self._tris = None  # Invalidate existing triangles
+
+    @property
+    def tris(self):
+        """Returns the triangulated version of the mesh. If not already triangulated,
+        will perform triangulation and cache the result."""
+        if self._needs_triangulation or self._tris is None:
+            self._triangulate()
+        return self._tris
 
     @property
     def color(self):
@@ -85,12 +140,8 @@ class mesh:
         self._color = value
 
     @property
-    def tris(self):
-        return _tris
-
-    @property
     def is_triangulated(self):
-        return getattr(self, '_is_triangulated', False)
+        return not self._needs_triangulation
 
     def __post_init__(self):
         self._update_neighbor_map()
@@ -191,62 +242,33 @@ class mesh:
     def toTri(self):
         """
         Convert all polygons to triangles using a simple fan triangulation.
-        For each polygon with more than 3 vertices, creates a triangle fan.
-        Modifies the mesh in-place and sets a flag to prevent repeated triangulation.
+        Modifies the mesh in-place by replacing the polys with triangles.
         Returns self for method chaining.
         """
-        # Check if already triangulated
-        if hasattr(self, '_is_triangulated') and self._is_triangulated:
+        if not self._needs_triangulation:
             return self
             
+        # Ensure we have triangles computed
+        if self._tris is None or self._needs_triangulation:
+            self._triangulate()
+            
+        # Replace polys with triangles
+        self._polys = self._tris
+        self._needs_neighbor_update = True
+        self._needs_triangulation = False
+        return self
+    
+    def _triangulate(self):
+        """Internal method to triangulate the polygons and cache the result"""
         if len(self._polys) == 0:
-            self._is_triangulated = True
-            return self
-        
-        new_tris = []
-        
-        # If polys is already a 2D array where each row represents a polygon
-        if self._polys.ndim == 2:
-            for poly in self._polys:
-                # Remove any padding values (like -1) if present
-                valid_verts = poly[poly >= 0]
-                n = len(valid_verts)
-                
-                if n < 3:
-                    continue  # skip degenerate polygons
-                elif n == 3:
-                    new_tris.append(valid_verts)
-                else:
-                    # Fan triangulation
-                    v0 = valid_verts[0]
-                    for i in range(1, n-1):
-                        new_tris.append(np.array([v0, valid_verts[i], valid_verts[i+1]]))
+            self._tris = np.zeros((0, 3), dtype=np.int64)
+            self._needs_triangulation = False
+            return
         else:
-            # Handle case where polys is a flat array with separators
-            current_poly = []
-            
-            for idx in self._polys:
-                if idx == -1:
-                    if len(current_poly) >= 3:
-                        n = len(current_poly)
-                        v0 = current_poly[0]
-                        for i in range(1, n-1):
-                            new_tris.append([v0, current_poly[i], current_poly[i+1]])
-                    current_poly = []
-                else:
-                    current_poly.append(idx)
-            
-            if len(current_poly) >= 3:
-                n = len(current_poly)
-                v0 = current_poly[0]
-                for i in range(1, n-1):
-                    new_tris.append([v0, current_poly[i], current_poly[i+1]])
+            new_tris = triangulate(self.polys)
         
-        if len(new_tris) > 0:
-            self._polys = np.stack(new_tris) if self._polys.ndim == 2 else np.array(new_tris, dtype=np.int64)
-        
-        # Set flag to indicate mesh is now triangulated
-        self._is_triangulated = True
+        self._tris = np.stack(new_tris) if len(new_tris) > 0 else np.zeros((0, 3), dtype=np.int64)
+        self._needs_triangulation = False
         return self
 
 @time_function
@@ -342,12 +364,6 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
 
             screen_verts, view_verts = compedObj(obj.vertices, viewMatrix, projMatrix, res[0], res[1])
             
-            # Get triangles (convert to triangles if needed)
-            # if obj._polys.shape[1] == 3:
-            #     triangles = obj._polys
-            # else:
-            #     triangulated = obj.toTri()
-            #     triangles = triangulated._polys
             triangles = obj.tris
 
             # Backface culling
@@ -355,7 +371,6 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             v0 = tri_verts_view[:, 0]
             v1 = tri_verts_view[:, 1]
             v2 = tri_verts_view[:, 2]
-            #normals = np.cross(v1 - v0, v2 - v0)
             normals = cross_2d(v1 - v0, v2 - v0)
             view_dir = -tri_verts_view.mean(axis=1)  # Direction from triangle to camera
             dot_prods = np.sum(normals * view_dir, axis=1)

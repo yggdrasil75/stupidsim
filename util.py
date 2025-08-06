@@ -143,6 +143,6 @@ def print_timing_stats(mode: Literal['basic', 'enhanced'] = 'enhanced'):
             p = data.get('percentiles', {})
             print(f"{func_name:<25} {data['call_count']:<8} {data['total_time']:<10.6f} {data['avg_time']:<10.6f} "
                   f"{p.get('min', 0):<10.6f} {p.get('median', 0):<10.6f} "
-                  f"{p.get('p99.9', 0):<10.6f} {p.get('p99', 0):<10.6f} {p.get('max', 0):<10.6f}")
+                  f"{p.get('p99', 0):<10.6f} {p.get('p99.9', 0):<10.6f} {p.get('max', 0):<10.6f}")
         
         print("-" * 110)
