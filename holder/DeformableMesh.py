@@ -1,28 +1,27 @@
-import torch
-from holder.mesh import mesh
+import numpy as np
 from dataclasses import field, dataclass
-from globals import DEVICE
+from holder.mesh import mesh
 
 @dataclass
 class DeformableMesh(mesh):
-    original_vertices: torch.Tensor = field(default_factory=lambda: torch.tensor([]))
-    original_polys: torch.Tensor = field(default_factory=lambda: torch.tensor([]))
-    deformation_resistance: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0))
+    original_vertices: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float32))
+    original_polys: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))
+    deformation_resistance: np.ndarray = field(default_factory=lambda: np.array(1.0, dtype=np.float32))
     max_subdivisions: int = 3  # Maximum number of times a triangle can be subdivided
     subdivision_threshold: float = 0.5  # Deformation strength needed to trigger subdivision
     subdivided: dict = field(default_factory=dict)  # Track which polys have been subdivided
 
     def __post_init__(self):
         super().__post_init__()
-        self.original_vertices = self._vertices.clone()
-        self.original_polys = self._polys.clone()
+        self.original_vertices = self._vertices.copy()
+        self.original_polys = self._polys.copy()
         # Initialize subdivision tracking
         self.subdivided = {i: 0 for i in range(len(self._polys))}
 
     def reset_deformation(self):
         """Reset the terrain to its original shape and detail level"""
-        self._vertices = self.original_vertices.clone()
-        self._polys = self.original_polys.clone()
+        self._vertices = self.original_vertices.copy()
+        self._polys = self.original_polys.copy()
         self.subdivided = {i: 0 for i in range(len(self._polys))}
         self._color = self._color[:len(self._vertices)]  # Adjust colors if needed
 
@@ -47,19 +46,19 @@ class DeformableMesh(mesh):
         new_vertex_indices = []
         for new_v in [new_v0, new_v1, new_v2]:
             # Check if this midpoint already exists (to prevent duplicate vertices)
-            distances = torch.norm(self._vertices - new_v, dim=1)
-            existing = torch.argmin(distances)
+            distances = np.linalg.norm(self._vertices - new_v, axis=1)
+            existing = np.argmin(distances)
             if distances[existing] < 1e-5:  # Threshold for considering it the same vertex
                 new_vertex_indices.append(existing)
             else:
                 new_vertex_indices.append(len(self._vertices))
-                self._vertices = torch.cat([self._vertices, new_v.unsqueeze(0)], dim=0)
+                self._vertices = np.vstack([self._vertices, new_v], dtype=np.float32)
                 # Add color for new vertex (average of parent vertices)
                 if len(self._color) > 1:
-                    parent_colors = torch.stack([self._color[poly[0]], self._color[poly[1]], 
-                                              self._color[poly[2]]])
-                    new_color = parent_colors.mean(dim=0)
-                    self._color = torch.cat([self._color, new_color.unsqueeze(0)], dim=0)
+                    parent_colors = np.stack([self._color[poly[0]], self._color[poly[1]], 
+                                           self._color[poly[2]]], dtype=np.float32)
+                    new_color = parent_colors.mean(axis=0, dtype=np.float32)
+                    self._color = np.vstack([self._color, new_color], dtype=np.float32)
                 else:
                     # If single color, no need to add more
                     pass
@@ -73,11 +72,11 @@ class DeformableMesh(mesh):
         ]
 
         # Replace the original polygon with new ones
-        self._polys = torch.cat([
+        self._polys = np.vstack([
             self._polys[:poly_index],
-            torch.tensor(new_polys, dtype=torch.long, device=DEVICE),
+            np.array(new_polys, dtype=np.int64),
             self._polys[poly_index+1:]
-        ], dim=0)
+        ], dtype=np.int64)
 
         # Update subdivision tracking
         del self.subdivided[poly_index]
@@ -90,16 +89,16 @@ class DeformableMesh(mesh):
         """
         Deform the terrain with adaptive detail refinement
         Args:
-            position: 3D position where deformation occurs (tensor)
+            position: 3D position where deformation occurs (array)
             radius: radius of deformation effect
             strength: how much to deform (positive for digging, negative for adding material)
         """
         # First pass: identify polygons that need subdivision
         if abs(strength) > self.subdivision_threshold:
             # Find polygons within deformation radius
-            poly_centers = torch.mean(self._vertices[self._polys], dim=1)
-            distances = torch.norm(poly_centers - position, dim=1)
-            nearby_poly_indices = torch.where(distances < radius)[0]
+            poly_centers = np.mean(self._vertices[self._polys], axis=1, dtype=np.float32)
+            distances = np.linalg.norm(poly_centers - position, axis=1)
+            nearby_poly_indices = np.where(distances < radius)[0]
 
             # Subdivide polygons that are close enough and not already max subdivided
             for poly_idx in nearby_poly_indices:
@@ -107,16 +106,15 @@ class DeformableMesh(mesh):
                     self.subdivide_poly(poly_idx.item())
 
         # Second pass: apply deformation
-        distances = torch.norm(self._vertices - position, dim=1)
+        distances = np.linalg.norm(self._vertices - position, axis=1)
         
         # Spherical deformation
-        influence = torch.clamp(1 - (distances / radius)**2, 0, 1)
+        influence = np.clip(1 - (distances / radius)**2, 0, 1)
         deformation = strength * influence
         
         # Only deform vertices within radius
         mask = distances < radius
         deformation_vector = (self._vertices[mask] - position)
-        deformation_vector = deformation_vector / (torch.norm(deformation_vector, dim=1, keepdim=True) + 1e-6)
+        deformation_vector = deformation_vector / (np.linalg.norm(deformation_vector, axis=1, keepdims=True) + 1e-6)
         
-        self._vertices[mask] += deformation_vector * deformation[mask].unsqueeze(1)
-
+        self._vertices[mask] += deformation_vector * deformation[mask][:, np.newaxis]

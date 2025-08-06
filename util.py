@@ -3,7 +3,10 @@ import random
 import numpy as np
 import time
 from functools import wraps
-
+from numba import njit, float32, types, int64
+from numba.extending import overload
+from numpy._typing._array_like import NDArray
+import numpy.typing
 
 _timing_stats = defaultdict(lambda: {'total_time': 0.0, 'call_count': 0})
 
@@ -55,7 +58,34 @@ def batch_calculate_areas(faces, vertex_list, device='cuda'):
     facearea = []
     for face in faces:
         facearea.append(face.calculate_area(vertex_list))
-        
+
+
+@njit((float32[:](float32[:], float32[:])))
+def cross(a, b) -> NDArray:
+    return np.array([a[1]*b[2] - a[2]*b[1],
+                     a[2]*b[0] - a[0]*b[2],
+                     a[0]*b[1] - a[1]*b[0]], dtype=np.float32)
+
+@njit((float32[:,:](float32[:,:], float32[:,:])))
+def cross_2d(a, b):
+    result = np.empty_like(a)
+    for i in range(a.shape[0]):
+        result[i, 0] = a[i, 1]*b[i, 2] - a[i, 2]*b[i, 1]
+        result[i, 1] = a[i, 2]*b[i, 0] - a[i, 0]*b[i, 2]
+        result[i, 2] = a[i, 0]*b[i, 1] - a[i, 1]*b[i, 0]
+    return result
+
+def make_2D_array(lis):
+    """Function to get 2D array from a list of lists
+    """
+    n = len(lis)
+    lengths = np.array([len(x) for x in lis])
+    max_len = np.max(lengths)
+    arr = np.zeros((n, max_len), np.float32)
+
+    for i in range(n):
+        arr[i, :lengths[i]] = lis[i]
+    return arr, lengths
 
 def time_function(func):
     """

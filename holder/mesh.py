@@ -1,12 +1,9 @@
 from dataclasses import dataclass, field
 import heapq
-import math
 import numba
-import torch
-import dearpygui.dearpygui as dpg
-from globals import DEVICE
-from util import time_function
 import numpy as np
+#from globals import DEVICE  # Assuming this is now a string like "cpu"
+from util import cross_2d, time_function, cross
 from numba import njit, float32, types, int64
 from scipy.sparse import csr_matrix
 
@@ -14,22 +11,18 @@ _mesh_cache = {}
 
 @dataclass
 class mesh:
-    torch.set_default_device(DEVICE)
     id: int
-    _vertices: torch.Tensor
-    _polys: torch.Tensor
-    _color: torch.Tensor
-    interactive: bool = True # can stuff collide
-    physics: bool = True #does it fall from gravity
-    mass: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0))
-    restitution: torch.Tensor = field(default_factory=lambda: torch.tensor(0.3))
-    linearVelocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
-    angularVelocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
+    _vertices: np.ndarray
+    _polys: np.ndarray
+    _color: np.ndarray
+    interactive: bool = True  # can stuff collide
+    physics: bool = True  # does it fall from gravity
+    mass: np.ndarray = field(default_factory=lambda: np.array(1.0, dtype=np.float32))
+    restitution: np.ndarray = field(default_factory=lambda: np.array(0.3, dtype=np.float32))
+    linearVelocity: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
+    angularVelocity: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
     _neighbor_map: dict = field(default_factory=dict, init=False)  # Stores adjacency information
-    #_neighbor_map = field(init=False)
-
     _needs_neighbor_update: bool = field(default=True, init=False)  # Flag for when to rebuild neighbor map
-    
 
     @property
     def vertices(self):
@@ -37,8 +30,10 @@ class mesh:
     
     @vertices.setter
     def vertices(self, value):
-        if not isinstance(value, torch.Tensor):
-            value = torch.tensor(value, dtype=torch.float32, device=DEVICE)
+        if not isinstance(value, np.ndarray):
+            value = np.array(value, dtype=np.float32)
+        if not value.dtype == np.float32:
+            value = value.astype(np.float32)
         
         # Maintain color consistency when vertices change
         if len(value) != len(self._vertices):
@@ -46,10 +41,10 @@ class mesh:
             if len(self._color) == len(self._vertices):
                 # If we had one color per vertex, we can't maintain that anymore
                 # So we'll just keep the first color for all vertices
-                self._color = self._color[0].unsqueeze(0).expand(len(value), -1)
+                self._color = np.tile(self._color[0], (len(value), 1))
             elif len(self._color) == 1:
                 # If we had a single color for all vertices, keep it
-                self._color = self._color.expand(len(value), -1)
+                self._color = np.tile(self._color, (len(value), 1))
         
         self._vertices = value
         self._needs_neighbor_update = True  # Mark for update when vertices change
@@ -60,12 +55,12 @@ class mesh:
 
     @polys.setter
     def polys(self, value):
-        if not isinstance(value, torch.Tensor):
-            value = torch.tensor(value, dtype=torch.long, device=DEVICE)
+        if not isinstance(value, np.ndarray):
+            value = np.array(value, dtype=np.int64)
         
         # Check if polygon indices are within vertex bounds
-        if len(self._vertices) > 0 and value.numel() > 0:
-            if torch.any(value >= len(self._vertices)):
+        if len(self._vertices) > 0 and value.size > 0:
+            if np.any(value >= len(self._vertices)):
                 raise ValueError("Polygon indices exceed vertex array bounds")
         
         self._polys = value
@@ -77,21 +72,20 @@ class mesh:
 
     @color.setter
     def color(self, value):
-        if not isinstance(value, torch.Tensor):
-            value = torch.tensor(value, dtype=torch.uint8, device=DEVICE)
+        if not isinstance(value, np.ndarray):
+            value = np.array(value, dtype=np.uint8)
         
         # Ensure color has correct shape
         if value.ndim == 1:
-            value = value.unsqueeze(0)
+            value = value[np.newaxis, :]
         
         if value.shape[0] != 1 and value.shape[0] != len(self._vertices):
-             raise ValueError(f"Color tensor must have 1 or {len(self._vertices)} rows, but got {value.shape[0]}")
+             raise ValueError(f"Color array must have 1 or {len(self._vertices)} rows, but got {value.shape[0]}")
         
         self._color = value
 
     def __post_init__(self):
         self._update_neighbor_map()
-        pass
 
     def _update_neighbor_map(self):
         """Build or update the neighbor map data structure"""
@@ -110,7 +104,7 @@ class mesh:
             self._neighbor_map['vertex_to_vertices'][v_idx] = set()
         
         # Process each face
-        for face_idx, face in enumerate(self._polys.cpu().numpy()):
+        for face_idx, face in enumerate(self._polys):
             # Remove any padding values (like -1) if present
             verts = [v for v in face if v >= 0]
             n_verts = len(verts)
@@ -139,7 +133,7 @@ class mesh:
         # Now build face-to-face adjacency
         edge_to_faces = {}  # Maps edges (as sorted tuples) to list of face indices
         
-        for face_idx, face in enumerate(self._polys.cpu().numpy()):
+        for face_idx, face in enumerate(self._polys):
             verts = [v for v in face if v >= 0]
             n_verts = len(verts)
             
@@ -196,11 +190,7 @@ class mesh:
         if len(self._polys) == 0:
             return self
         
-        # First, determine the polygon sizes
-        # Assuming _polys is a flat list of vertex indices with -1 as separator
-        # or some other way to indicate polygon boundaries
-        
-        # If polys is already a 2D tensor where each row represents a polygon
+        # If polys is already a 2D array where each row represents a polygon
         if self._polys.ndim == 2:
             new_tris = []
             for poly in self._polys:
@@ -216,12 +206,12 @@ class mesh:
                     # Fan triangulation: create triangles from first vertex to each subsequent pair
                     v0 = valid_verts[0]
                     for i in range(1, n-1):
-                        new_tris.append(torch.stack([v0, valid_verts[i], valid_verts[i+1]]))
+                        new_tris.append(np.array([v0, valid_verts[i], valid_verts[i+1]]))
             
             if len(new_tris) == 0:
                 return self
                 
-            new_polys = torch.stack(new_tris)
+            new_polys = np.stack(new_tris)
             
         else:
             # Handle case where polys is a flat array with separators
@@ -250,45 +240,39 @@ class mesh:
             if len(new_tris) == 0:
                 return self
                 
-            new_polys = torch.tensor(new_tris, dtype=torch.long, device=DEVICE)
+            new_polys = np.array(new_tris, dtype=np.int64)
         
         # Create a new mesh with the triangulated polygons
         return mesh(
             id=self.id,
-            _vertices=self._vertices.clone(),
+            _vertices=self._vertices.copy(),
             _polys=new_polys,
-            _color=self._color.clone(),
+            _color=self._color.copy(),
             interactive=self.interactive,
             physics=self.physics,
-            mass=self.mass.clone(),
-            restitution=self.restitution.clone(),
-            linearVelocity=self.linearVelocity.clone(),
-            angularVelocity=self.angularVelocity.clone()
+            mass=self.mass.copy(),
+            restitution=self.restitution.copy(),
+            linearVelocity=self.linearVelocity.copy(),
+            angularVelocity=self.angularVelocity.copy()
         )
 
 @time_function
-def get_lod_level(view_verts: torch.Tensor, triangles: torch.Tensor):
+def get_lod_level(view_verts: np.ndarray, triangles: np.ndarray):
     #TODO: Please implement
     pass
 
 @time_function
-def simplify_mesh(vertices: torch.Tensor, 
-                 triangles: torch.Tensor, 
+def simplify_mesh(vertices: np.ndarray, 
+                 triangles: np.ndarray, 
                  lod_level: float):
     #TODO: please implement
     pass
-
-@njit((float32[:](float32[:], float32[:])))
-def cross(a, b):
-    return np.array([a[1]*b[2] - a[2]*b[1],
-                     a[2]*b[0] - a[0]*b[2],
-                     a[0]*b[1] - a[1]*b[0]])
 
 @njit((float32, float32[:], float32[:], float32[:], int64, int64, int64, float32), cache=True)
 def comped(fov, lookat, eye, up, res0, res1, far, near):
     zAxis = lookat - eye
     zAxis = zAxis / np.linalg.norm(zAxis)
-    xAxis= cross(up, zAxis)
+    xAxis = cross(up, zAxis)
     xAxis = xAxis / np.linalg.norm(xAxis)
     yAxis = cross(zAxis, xAxis)
 
@@ -320,7 +304,6 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     homogenous_verts = np.empty((n, 4), dtype=verts.dtype)
     homogenous_verts[:, :3] = verts  # Assuming verts is n x 3
     homogenous_verts[:, 3] = 1.0
-    
 
     viewmatrix_contig = np.ascontiguousarray(viewmatrix)
     homogenous_verts_contig = np.ascontiguousarray(homogenous_verts)
@@ -340,40 +323,32 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     return screen_verts, view_verts
 
 @time_function
-#@torch.compile(mode="reduce-overhead")
-def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: torch.Tensor, fovfl: float = 90.0,
+#@njit
+def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.ndarray, fovfl: float = 90.0,
                 res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
-        -> tuple[list[torch.Tensor],list,list[torch.Tensor]]:
+        -> tuple[list[np.ndarray], list, list[np.ndarray]]:
     global _mesh_cache
-    # if torch.cuda.is_available():
-    #     eye = eye.half()
-    #     lookat = lookat.half()
-    #     up = up.half()
-
-    viewMatrixnp, projMatrixnp = comped(fovfl, lookat.cpu().numpy(), eye.cpu().numpy(), up.cpu().numpy(), res[0], res[1], far, near)
-    viewMatrix = torch.tensor(viewMatrixnp)
-    projMatrix = torch.tensor(projMatrixnp)
+    
+    viewMatrix, projMatrix = comped(fovfl, lookat, eye, up, res[0], res[1], far, near)
 
     all_screen_verts = []
     all_visible_tris = []
     all_depths = []
 
     for obj in meshes:
-        cache_key = (id(obj), tuple(eye.cpu().numpy()), tuple(lookat.cpu().numpy()), tuple(up.cpu().numpy()))
+        cache_key = (id(obj), tuple(eye), tuple(lookat), tuple(up))
         if cache_key in _mesh_cache and not obj._needs_neighbor_update:
             screen_verts, visible_tris, depths = _mesh_cache[cache_key]
         else:
-            mesh_center = torch.mean(obj.vertices, dim=0)
-            view_center = torch.matmul(torch.cat([mesh_center, torch.ones(1, device=DEVICE)]), viewMatrix.T)[:3]
-            if torch.dot(view_center, view_center) < 0:  # Entire mesh is backfacing
-                all_screen_verts.append(torch.empty(0, 2, device=DEVICE))
+            mesh_center = np.mean(obj.vertices, axis=0)
+            view_center = np.dot(np.append(mesh_center, 1), viewMatrix.T)[:3]
+            if np.dot(view_center, view_center) < 0:  # Entire mesh is backfacing
+                all_screen_verts.append(np.empty((0, 2), dtype=np.float32))
                 all_visible_tris.append([])
-                all_depths.append(torch.empty(0, device=DEVICE))
+                all_depths.append(np.empty(0, dtype=np.float32))
                 continue
 
-            screen_vertsnp, view_vertsnp = compedObj(obj.vertices.cpu().numpy(), viewMatrixnp, projMatrixnp, res[0], res[1])
-            screen_verts = torch.tensor(screen_vertsnp)
-            view_verts = torch.tensor(view_vertsnp)
+            screen_verts, view_verts = compedObj(obj.vertices, viewMatrix, projMatrix, res[0], res[1])
             
             # Get triangles (convert to triangles if needed)
             if obj._polys.shape[1] == 3:
@@ -383,16 +358,18 @@ def project_2d(meshes: list[mesh], eye: torch.Tensor, lookat: torch.Tensor, up: 
                 triangles = triangulated._polys
 
             # Backface culling
-            with torch.no_grad():
-                tri_verts_view = view_verts[triangles][:, :, :3]  # Get view space coordinates
-                v0, v1, v2 = tri_verts_view[:, 0], tri_verts_view[:, 1], tri_verts_view[:, 2]
-                normals = torch.linalg.cross(v1 - v0, v2 - v0)
-                view_dir = -tri_verts_view.mean(dim=1)  # Direction from triangle to camera
-                dot_prods = torch.sum(normals * view_dir, dim=1)
-                visible_mask = dot_prods > 0  # Normal facing towards camera
+            tri_verts_view = view_verts[triangles][:, :, :3]  # Get view space coordinates
+            v0 = tri_verts_view[:, 0]
+            v1 = tri_verts_view[:, 1]
+            v2 = tri_verts_view[:, 2]
+            #normals = np.cross(v1 - v0, v2 - v0)
+            normals = cross_2d(v1 - v0, v2 - v0)
+            view_dir = -tri_verts_view.mean(axis=1)  # Direction from triangle to camera
+            dot_prods = np.sum(normals * view_dir, axis=1)
+            visible_mask = dot_prods > 0  # Normal facing towards camera
 
-                visible_tris = triangles[visible_mask].tolist()
-                depths = torch.mean(tri_verts_view[visible_mask][:, :, 2], dim=1)
+            visible_tris = triangles[visible_mask].tolist()
+            depths = np.mean(tri_verts_view[visible_mask][:, :, 2], axis=1)
 
             _mesh_cache[cache_key] = (screen_verts, visible_tris, depths)
 
