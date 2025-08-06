@@ -134,7 +134,7 @@ def make_2D_array(lis):
 @dataclass
 class World:
     torch.set_default_device(DEVICE)
-    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=512, rings=512))
+    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=256, rings=256))
     sea_level: torch.Tensor = field(default_factory=lambda: torch.tensor(0.0, dtype=torch.float32))
     #min_height: torch.Tensor = field(default_factory=lambda: torch.tensor(-1.0, dtype=torch.float32))
     #max_height: torch.Tensor = field(default_factory=lambda: torch.tensor(1.0, dtype=torch.float32))
@@ -936,7 +936,7 @@ def render_world():
     dpg.set_primary_window("primary", True)
     
     while dpg.is_dearpygui_running():
-        #print_timing_stats()
+        print_timing_stats()
         world.simulate_erosion(steps=0) # Run simulation logic, but don't advance time yet
         #world.update_colors() # ensure colors are correct
 
