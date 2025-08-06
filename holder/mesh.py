@@ -4,7 +4,7 @@ import numba
 import numpy as np
 #from globals import DEVICE  # Assuming this is now a string like "cpu"
 from util import cross_2d, time_function, cross
-from numba import njit, float32, types, int64
+from numba import njit, float32, types, int64, jit
 from scipy.sparse import csr_matrix
 
 _mesh_cache = {}
@@ -83,6 +83,14 @@ class mesh:
              raise ValueError(f"Color array must have 1 or {len(self._vertices)} rows, but got {value.shape[0]}")
         
         self._color = value
+
+    @property
+    def tris(self):
+        return _tris
+
+    @property
+    def is_triangulated(self):
+        return getattr(self, '_is_triangulated', False)
 
     def __post_init__(self):
         self._update_neighbor_map()
@@ -180,19 +188,25 @@ class mesh:
         self._update_neighbor_map()
         return self._neighbor_map['vertex_to_vertices'].get(vertex_idx, [])
 
-    @classmethod
-    def toTri(cls, self):
+    def toTri(self):
         """
         Convert all polygons to triangles using a simple fan triangulation.
         For each polygon with more than 3 vertices, creates a triangle fan.
-        Returns a new mesh with only triangular faces.
+        Modifies the mesh in-place and sets a flag to prevent repeated triangulation.
+        Returns self for method chaining.
         """
-        if len(self._polys) == 0:
+        # Check if already triangulated
+        if hasattr(self, '_is_triangulated') and self._is_triangulated:
             return self
+            
+        if len(self._polys) == 0:
+            self._is_triangulated = True
+            return self
+        
+        new_tris = []
         
         # If polys is already a 2D array where each row represents a polygon
         if self._polys.ndim == 2:
-            new_tris = []
             for poly in self._polys:
                 # Remove any padding values (like -1) if present
                 valid_verts = poly[poly >= 0]
@@ -203,58 +217,37 @@ class mesh:
                 elif n == 3:
                     new_tris.append(valid_verts)
                 else:
-                    # Fan triangulation: create triangles from first vertex to each subsequent pair
+                    # Fan triangulation
                     v0 = valid_verts[0]
                     for i in range(1, n-1):
                         new_tris.append(np.array([v0, valid_verts[i], valid_verts[i+1]]))
-            
-            if len(new_tris) == 0:
-                return self
-                
-            new_polys = np.stack(new_tris)
-            
         else:
             # Handle case where polys is a flat array with separators
-            # This implementation assumes -1 is used as a separator
-            polys_list = []
             current_poly = []
             
             for idx in self._polys:
                 if idx == -1:
                     if len(current_poly) >= 3:
-                        polys_list.append(current_poly)
+                        n = len(current_poly)
+                        v0 = current_poly[0]
+                        for i in range(1, n-1):
+                            new_tris.append([v0, current_poly[i], current_poly[i+1]])
                     current_poly = []
                 else:
                     current_poly.append(idx)
             
             if len(current_poly) >= 3:
-                polys_list.append(current_poly)
-            
-            new_tris = []
-            for poly in polys_list:
-                n = len(poly)
-                v0 = poly[0]
+                n = len(current_poly)
+                v0 = current_poly[0]
                 for i in range(1, n-1):
-                    new_tris.append([v0, poly[i], poly[i+1]])
-            
-            if len(new_tris) == 0:
-                return self
-                
-            new_polys = np.array(new_tris, dtype=np.int64)
+                    new_tris.append([v0, current_poly[i], current_poly[i+1]])
         
-        # Create a new mesh with the triangulated polygons
-        return mesh(
-            id=self.id,
-            _vertices=self._vertices.copy(),
-            _polys=new_polys,
-            _color=self._color.copy(),
-            interactive=self.interactive,
-            physics=self.physics,
-            mass=self.mass.copy(),
-            restitution=self.restitution.copy(),
-            linearVelocity=self.linearVelocity.copy(),
-            angularVelocity=self.angularVelocity.copy()
-        )
+        if len(new_tris) > 0:
+            self._polys = np.stack(new_tris) if self._polys.ndim == 2 else np.array(new_tris, dtype=np.int64)
+        
+        # Set flag to indicate mesh is now triangulated
+        self._is_triangulated = True
+        return self
 
 @time_function
 def get_lod_level(view_verts: np.ndarray, triangles: np.ndarray):
@@ -323,11 +316,10 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     return screen_verts, view_verts
 
 @time_function
-#@njit
 def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.ndarray, fovfl: float = 90.0,
                 res: tuple[int,int] = (800,600), near: float = 1.0, far: float = 1000) \
         -> tuple[list[np.ndarray], list, list[np.ndarray]]:
-    global _mesh_cache
+    #global _mesh_cache
     
     viewMatrix, projMatrix = comped(fovfl, lookat, eye, up, res[0], res[1], far, near)
 
@@ -351,11 +343,12 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             screen_verts, view_verts = compedObj(obj.vertices, viewMatrix, projMatrix, res[0], res[1])
             
             # Get triangles (convert to triangles if needed)
-            if obj._polys.shape[1] == 3:
-                triangles = obj._polys
-            else:
-                triangulated = obj.toTri(obj)
-                triangles = triangulated._polys
+            # if obj._polys.shape[1] == 3:
+            #     triangles = obj._polys
+            # else:
+            #     triangulated = obj.toTri()
+            #     triangles = triangulated._polys
+            triangles = obj.tris
 
             # Backface culling
             tri_verts_view = view_verts[triangles][:, :, :3]  # Get view space coordinates
