@@ -118,6 +118,44 @@ def _numba_check_containment(inner_verts, outer_verts_set,
                 return False
     return True
 
+@njit(cache=True)
+def _update_elevations_a(plates, _heightmap):
+    # Reset heightmap to base elevations
+    for plate in plates:
+        if len(plate.vertex_ids) > 0:
+            _heightmap[plate.vertex_ids] = plate.base_elevation
+            
+    # Apply continental effects
+    for plate in plates:
+        if plate.plate_type == 'continental' and len(plate.continental_centers) > 0:
+            continental_verts = plate.get_continental_vertices()
+            if len(continental_verts) > 0:
+                _heightmap[plate.continental_centers] += 200.0
+                if len(plate.continental_border_vertices) > 0:
+                    _heightmap[plate.continental_border_vertices] += 100.0
+    
+    return _heightmap
+    
+@njit(cache=True)
+def _update_elevations_b(plates, _heightmap, max_height, min_height):
+    # Apply plate movement effects
+    for plate in plates:
+        if len(plate.vertex_ids) > 0:
+            movement_factor = np.linalg.norm(plate.linear_velocity) * 0.1
+            noise = (np.random.rand(len(plate.vertex_ids)) * movement_factor)
+            _heightmap[plate.vertex_ids] += noise
+        
+            if np.linalg.norm(plate.collision_force) > 0:
+                force_factor = np.linalg.norm(plate.collision_force) * 0.05
+                _heightmap[plate.vertex_ids] += np.random.rand(len(plate.vertex_ids)) * force_factor
+
+    # Normalize heightmap
+    _heightmap = (_heightmap - _heightmap.min()) / \
+                    (_heightmap.max() - _heightmap.min() + 1e-6) * \
+                    (max_height - min_height) + min_height
+
+    return _heightmap
+
 @dataclass
 class World:
     sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
@@ -515,40 +553,15 @@ class World:
     @time_function
     def update_elevations(self):
         """Update elevations based on plate properties and collisions"""
-        vertex_positions = self.sphere_mesh.vertices
-        
-        # Reset heightmap to base elevations
-        for plate in self.plates:
-            if len(plate.vertex_ids) > 0:
-                self.heightmap[plate.vertex_ids] = plate.base_elevation
-                
-        # Apply continental effects
-        for plate in self.plates:
-            if plate.plate_type == 'continental' and len(plate.continental_centers) > 0:
-                continental_verts = plate.get_continental_vertices()
-                if len(continental_verts) > 0:
-                    self.heightmap[plate.continental_centers] += 200.0
-                    if len(plate.continental_border_vertices) > 0:
-                        self.heightmap[plate.continental_border_vertices] += 100.0
-        
+        _heightmap = _update_elevations_a(self.plates, self.heightmap)
+        self.heightmap = _heightmap
         # Calculate plate collisions
         self.calculate_plate_collisions()
-        
-        # Apply plate movement effects
-        for plate in self.plates:
-            if len(plate.vertex_ids) > 0:
-                movement_factor = np.linalg.norm(plate.linear_velocity) * 0.1
-                noise = (np.random.rand(len(plate.vertex_ids)) * movement_factor)
-                self.heightmap[plate.vertex_ids] += noise
-            
-                if np.linalg.norm(plate.collision_force) > 0:
-                    force_factor = np.linalg.norm(plate.collision_force) * 0.05
-                    self.heightmap[plate.vertex_ids] += np.random.rand(len(plate.vertex_ids)) * force_factor
-    
+
+        _heightmap = _update_elevations_b(self.plates, _heightmap, self.max_height, self.min_height)
+
         # Normalize heightmap
-        self.heightmap = (self.heightmap - self.heightmap.min()) / \
-                        (self.heightmap.max() - self.heightmap.min() + 1e-6) * \
-                        (self.max_height - self.min_height) + self.min_height
+        self.heightmap = _heightmap
 
     @time_function
     def update_vertices_based_on_heightmap(self):
