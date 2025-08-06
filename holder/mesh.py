@@ -25,8 +25,8 @@ class mesh:
     restitution: torch.Tensor = field(default_factory=lambda: torch.tensor(0.3))
     linearVelocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
     angularVelocity: torch.Tensor = field(default_factory=lambda: torch.zeros(3, dtype=torch.float32, device=DEVICE))
-    #_neighbor_map: dict = field(default_factory=dict, init=False)  # Stores adjacency information
-    _neighbor_map = field(init=False)
+    _neighbor_map: dict = field(default_factory=dict, init=False)  # Stores adjacency information
+    #_neighbor_map = field(init=False)
 
     _needs_neighbor_update: bool = field(default=True, init=False)  # Flag for when to rebuild neighbor map
     
