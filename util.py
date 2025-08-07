@@ -4,7 +4,7 @@ import random
 import numpy as np
 import time
 from functools import wraps
-from numba import njit, float32, types, int64
+from numba import njit, float32, types, int64, int32
 from numba.extending import overload
 from numpy._typing._array_like import NDArray
 import numpy.typing

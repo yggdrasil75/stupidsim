@@ -10,7 +10,7 @@ import dearpygui.dearpygui as dpg
 from numba import njit, prange, int64, float32
 from plate import Plate
 import math
-from util import time_function, print_timing_stats, make_2D_array
+from util import norm, time_function, print_timing_stats, make_2D_array
 
 @njit((int64[:], float32[:,:], float32[:,:], float32[:,:], float32[:], int64), cache=True)
 def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
@@ -141,12 +141,12 @@ def _update_elevations_b(plates, _heightmap, max_height, min_height):
     # Apply plate movement effects
     for plate in plates:
         if len(plate.vertex_ids) > 0:
-            movement_factor = np.linalg.norm(plate.linear_velocity) * 0.1
+            movement_factor = norm(plate.linear_velocity) * 0.1
             noise = (np.random.rand(len(plate.vertex_ids)) * movement_factor)
             _heightmap[plate.vertex_ids] += noise
         
-            if np.linalg.norm(plate.collision_force) > 0:
-                force_factor = np.linalg.norm(plate.collision_force) * 0.05
+            if norm(plate.collision_force) > 0:
+                force_factor = norm(plate.collision_force) * 0.05
                 _heightmap[plate.vertex_ids] += np.random.rand(len(plate.vertex_ids)) * force_factor
 
     # Normalize heightmap
