@@ -52,6 +52,94 @@ def triangulate(polys):
 
     return new_tris
 
+@njit(cache=True)
+def partition_directional_faces_numba(vertices, polys):
+    """Numba-optimized version of directional face partitioning"""
+    # Initialize 26 directional groups (3x3x3 cube minus center)
+    directional_faces = [[] for _ in range(26)]
+    
+    # Predefined directions for all 26 groups
+    directions = []
+    for x in (-1, 0, 1):
+        for y in (-1, 0, 1):
+            for z in (-1, 0, 1):
+                if x == 0 and y == 0 and z == 0:
+                    continue
+                directions.append(np.array([x, y, z], dtype=np.float32))
+    
+    # Normalize all directions
+    directions = [d / np.linalg.norm(d) for d in directions]
+    
+    failed_faces = 0
+    
+    # Calculate face normals and group them
+    for face_idx in range(len(polys)):
+        face = polys[face_idx]
+        verts = [v for v in face if v >= 0]
+        if len(verts) < 3:
+            continue  # Skip degenerate faces
+            
+        # Get face normal
+        v0 = vertices[verts[0]]
+        v1 = vertices[verts[1]]
+        v2 = vertices[verts[2]]
+        normal = np.cross(v1 - v0, v2 - v0)
+        
+        # Check for zero-length normal before normalizing
+        norm_length = np.linalg.norm(normal)
+        if norm_length < 1e-10:  # Small threshold for numerical stability
+            failed_faces += 1
+            continue  # Skip degenerate faces
+            
+        normal = normal / norm_length
+        
+        # Find the closest matching direction
+        threshold = 0.5  # Lower threshold
+        matched = False
+        
+        for i in range(len(directions)):
+            dir_vec = directions[i]
+            dot = np.dot(normal, dir_vec)
+            if dot > threshold:
+                directional_faces[i].append(face_idx)
+                matched = True
+                
+        # If no matches, add to all groups with positive dot product
+        if not matched:
+            for i in range(len(directions)):
+                dir_vec = directions[i]
+                if np.dot(normal, dir_vec) > 0:
+                    directional_faces[i].append(face_idx)
+    
+    return directional_faces, failed_faces
+
+@njit(cache=True)
+def get_potentially_visible_faces_numba(directional_faces, view_dir):
+    """Numba-optimized version of potentially visible faces calculation"""
+    # Normalize view direction
+    view_dir = -view_dir / np.linalg.norm(-view_dir)
+    
+    # Generate all 26 directions (6 faces, 8 corners, 12 edges)
+    directions = np.zeros((26, 3), dtype=np.float32)
+    idx = 0
+    for x in (-1, 0, 1):
+        for y in (-1, 0, 1):
+            for z in (-1, 0, 1):
+                if x == 0 and y == 0 and z == 0:
+                    continue
+                directions[idx] = np.array([x, y, z], dtype=np.float32)
+                directions[idx] /= np.linalg.norm(directions[idx])
+                idx += 1
+    
+    # Compute dot products and find visible groups
+    visible_faces = []
+    for i in range(26):
+        if np.dot(directions[i], view_dir) < 0.3:
+            visible_faces.extend(directional_faces[i])
+    
+    return np.array(visible_faces, dtype=np.int64)
+
+
 @dataclass
 class mesh:
     id: int
@@ -207,38 +295,27 @@ class mesh:
         print(f'{failedfaces} failed to be assigned')
                 
         self._needs_directional_partition = False
-        
+
     def get_potentially_visible_faces(self, view_dir):
         """Return face indices that are potentially visible given a view direction"""
         if self._needs_directional_partition:
             self._partition_directional_faces()
         
+        # Normalize view direction
         view_dir = -view_dir / np.linalg.norm(-view_dir)
-        visible_faces = []
         
-        # Predefined directions (same as in _partition_directional_faces)
-        directions = [
-            # Cardinal
-            [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
-            # Corners
-            [1, 1, 1], [1, 1, -1], [1, -1, 1], [1, -1, -1],
-            [-1, 1, 1], [-1, 1, -1], [-1, -1, 1], [-1, -1, -1],
-            # Edges
-            [1, 1, 0], [1, -1, 0], [-1, 1, 0], [-1, -1, 0],
-            [1, 0, 1], [1, 0, -1], [-1, 0, 1], [-1, 0, -1],
-            [0, 1, 1], [0, 1, -1], [0, -1, 1], [0, -1, -1]
-        ]
-        directions = [np.array(d) / np.linalg.norm(d) for d in directions]
+        # Generate all 26 directions (6 faces, 8 corners, 12 edges) in one line
+        directions = np.array([(x,y,z) for x in (-1,0,1) for y in (-1,0,1) for z in (-1,0,1) if (x,y,z) != (0,0,0)])
         
-        # Check each group's visibility
-        for group_idx in range(22):
-            group_dir = directions[group_idx]
-            # If view direction is facing opposite to group direction, it's potentially visible
-            if np.dot(view_dir, group_dir) < 0.3:  # Slightly more generous threshold
-                visible_faces.extend(self._directional_faces[group_idx])
-                
-        return visible_faces
-    
+        # Normalize all directions
+        directions = directions / np.linalg.norm(directions, axis=1, keepdims=True)
+        
+        # Compute dot products and find visible groups
+        visible_groups = np.where(np.dot(directions, view_dir) < 0.3)[0]
+        
+        # Collect all faces from visible groups
+        return np.concatenate([self._directional_faces[i] for i in visible_groups]).astype(np.int64)
+
     def _update_neighbor_map(self):
         """Build or update the neighbor map data structure"""
         if not self._needs_neighbor_update:
@@ -435,30 +512,41 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
 
     return screen_verts, view_verts
 
-#@njit#((int32[:,:], int64[:]),cache=True)
+@njit((int32[:,:], int64[:]), fastmath=True, cache=True)
 def triface(polys, visible_face_indices):
-    all_faces = np.array([polys[i] for i in visible_face_indices])
-
-    # Filter out negative indices and create a mask of valid faces
-    valid_faces = [face[face >= 0] for face in all_faces]
-    valid_lengths = np.array([len(f) for f in valid_faces])
-
-    # Split into triangles and non-triangles
-    tri_mask = valid_lengths == 3
-    tris = np.array([f for f, m in zip(valid_faces, tri_mask) if m])
-    non_tris = [f for f, m in zip(valid_faces, tri_mask) if not m]
-
-    # Triangulate non-triangle faces using fan method
-    triangulated = np.concatenate([
-        tris,
-        *[np.column_stack([
-            face[0]*np.ones(len(face)-2, dtype=int),
-            face[1:-1],
-            face[2:]
-        ]) for face in non_tris]
-    ])
+    # Pre-allocate arrays for better performance
+    total_tris = 0
+    for i in visible_face_indices:
+        face = polys[i]
+        valid_verts = face[face >= 0]
+        if len(valid_verts) >= 3:
+            total_tris += len(valid_verts) - 2
     
-    return triangulated
+    if total_tris == 0:
+        return np.empty((0, 3), dtype=np.int32)
+    
+    result = np.empty((total_tris, 3), dtype=np.int32)
+    idx = 0
+    
+    for face_idx in visible_face_indices:
+        face = polys[face_idx]
+        valid_verts = face[face >= 0]
+        n = len(valid_verts)
+        
+        if n < 3:
+            continue
+            
+        if n == 3:
+            result[idx] = valid_verts
+            idx += 1
+        else:
+            # Fan triangulation
+            v0 = valid_verts[0]
+            for i in range(1, n-1):
+                result[idx] = np.array([v0, valid_verts[i], valid_verts[i+1]])
+                idx += 1
+                
+    return result
 
 @time_function
 def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.ndarray, 
@@ -481,17 +569,11 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             
             # Skip if entire mesh is backfacing
             if np.dot(view_center, view_center) < 0:
-                # all_screen_verts.append(np.empty((0, 2), dtype=np.float32))
-                # all_visible_tris.append([])
-                # all_depths.append(np.empty(0, dtype=np.float32))
                 continue
 
             # Get potentially visible faces
             visible_face_indices = obj.get_potentially_visible_faces(view_dir)
-            if not visible_face_indices:
-                # all_screen_verts.append(np.empty((0, 2), dtype=np.float32))
-                # all_visible_tris.append([])
-                # all_depths.append(np.empty(0, dtype=np.float32))
+            if len(visible_face_indices) == 0:
                 continue
 
             # Process only the potentially visible faces
@@ -502,10 +584,7 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             print(numba.typeof(visible_face_indices))
             triangles = triface(obj.polys, visible_face_indices)
             
-            if not triangles:
-                all_screen_verts.append(screen_verts)
-                all_visible_tris.append([])
-                all_depths.append(np.empty(0, dtype=np.float32))
+            if len(triangles) == 0:
                 continue
 
             triangles = np.array(triangles)
