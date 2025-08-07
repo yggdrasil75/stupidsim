@@ -3,7 +3,7 @@ import heapq
 import numba
 import numpy as np
 #from globals import DEVICE
-from util import cross_2d, time_function, cross
+from util import cross_2d, time_function, cross, normalize, norm
 from numba import njit, float32, types, int64, jit, int32
 from scipy.sparse import csr_matrix
 
@@ -52,93 +52,54 @@ def triangulate(polys):
 
     return new_tris
 
-@njit(cache=True)
-def partition_directional_faces_numba(vertices, polys):
-    """Numba-optimized version of directional face partitioning"""
-    # Initialize 26 directional groups (3x3x3 cube minus center)
-    directional_faces = [[] for _ in range(26)]
-    
-    # Predefined directions for all 26 groups
+@njit
+def _partition_faces(_vertices, polys):            
+    # Calculate face normals if we have valid geometry
+    # Initialize 22 directional groups
+    _directional_faces = [[] for _ in range(26)]
+        
+    # Predefined directions for all 22 groups
     directions = []
-    for x in (-1, 0, 1):
-        for y in (-1, 0, 1):
-            for z in (-1, 0, 1):
+    for x in [-1.0, 0.0, 1.0]:
+        for y in [-1.0, 0.0, 1.0]:
+            for z in [-1.0, 0.0, 1.0]:
                 if x == 0 and y == 0 and z == 0:
                     continue
-                directions.append(np.array([x, y, z], dtype=np.float32))
-    
+                directions.append([x, y, z])
+    directions = np.array(directions, dtype=np.float32)
+        
     # Normalize all directions
-    directions = [d / np.linalg.norm(d) for d in directions]
-    
-    failed_faces = 0
-    
+    directions = [d / norm(d) for d in directions]
+
     # Calculate face normals and group them
-    for face_idx in range(len(polys)):
-        face = polys[face_idx]
+    for face_idx, face in enumerate(polys):
         verts = [v for v in face if v >= 0]
         if len(verts) < 3:
             continue  # Skip degenerate faces
-            
+                
         # Get face normal
-        v0 = vertices[verts[0]]
-        v1 = vertices[verts[1]]
-        v2 = vertices[verts[2]]
-        normal = np.cross(v1 - v0, v2 - v0)
+        v0, v1, v2 = _vertices[verts[0]], _vertices[verts[1]], _vertices[verts[2]]
+        normal = cross(v1 - v0, v2 - v0)
         
         # Check for zero-length normal before normalizing
-        norm_length = np.linalg.norm(normal)
-        if norm_length < 1e-10:  # Small threshold for numerical stability
-            failed_faces += 1
-            continue  # Skip degenerate faces
+        normal = normalize(normal)
             
-        normal = normal / norm_length
-        
         # Find the closest matching direction
         threshold = 0.5  # Lower threshold
         matched = False
-        
-        for i in range(len(directions)):
-            dir_vec = directions[i]
+        for i, dir_vec in enumerate(directions):
             dot = np.dot(normal, dir_vec)
             if dot > threshold:
-                directional_faces[i].append(face_idx)
+                _directional_faces[i].append(face_idx)
                 matched = True
                 
         # If no matches, add to all groups with positive dot product
         if not matched:
-            for i in range(len(directions)):
-                dir_vec = directions[i]
+            for i, dir_vec in enumerate(directions):
                 if np.dot(normal, dir_vec) > 0:
-                    directional_faces[i].append(face_idx)
-    
-    return directional_faces, failed_faces
-
-@njit(cache=True)
-def get_potentially_visible_faces_numba(directional_faces, view_dir):
-    """Numba-optimized version of potentially visible faces calculation"""
-    # Normalize view direction
-    view_dir = -view_dir / np.linalg.norm(-view_dir)
-    
-    # Generate all 26 directions (6 faces, 8 corners, 12 edges)
-    directions = np.zeros((26, 3), dtype=np.float32)
-    idx = 0
-    for x in (-1, 0, 1):
-        for y in (-1, 0, 1):
-            for z in (-1, 0, 1):
-                if x == 0 and y == 0 and z == 0:
-                    continue
-                directions[idx] = np.array([x, y, z], dtype=np.float32)
-                directions[idx] /= np.linalg.norm(directions[idx])
-                idx += 1
-    
-    # Compute dot products and find visible groups
-    visible_faces = []
-    for i in range(26):
-        if np.dot(directions[i], view_dir) < 0.3:
-            visible_faces.extend(directional_faces[i])
-    
-    return np.array(visible_faces, dtype=np.int64)
-
+                    _directional_faces[i].append(face_idx)
+            
+    return _directional_faces
 
 @dataclass
 class mesh:
@@ -234,67 +195,73 @@ class mesh:
     @property
     def is_triangulated(self):
         return not self._needs_triangulation
+    
     def __post_init__(self):
         self._update_neighbor_map()
         self._partition_directional_faces()
 
     def _partition_directional_faces(self):
-        """Partition faces into 22 potential directional groups based on their normals"""
         if not self._needs_directional_partition:
             return
-                
-        # Calculate face normals if we have valid geometry
-        if len(self._vertices) > 0 and len(self._polys) > 0:
-            # Initialize 22 directional groups
-            self._directional_faces = [[] for _ in range(26)]
-                
-            # Predefined directions for all 22 groups
-            directions = []
-            for x in [-1, 0, 1]:
-                for y in [-1, 0, 1]:
-                    for z in [-1, 0, 1]:
-                        if x == 0 and y == 0 and z == 0:
-                            continue
-                        directions.append([x, y, z])
-                
-            # Normalize all directions
-            directions = [np.array(d) / np.linalg.norm(d) for d in directions]
-            failedfaces = 0
-            # Calculate face normals and group them
-            for face_idx, face in enumerate(self._polys):
-                verts = [v for v in face if v >= 0]
-                if len(verts) < 3:
-                    continue  # Skip degenerate faces
-                        
-                # Get face normal
-                v0, v1, v2 = self._vertices[verts[0]], self._vertices[verts[1]], self._vertices[verts[2]]
-                normal = np.cross(v1 - v0, v2 - v0)
-                
-                # Check for zero-length normal before normalizing
-                norm_length = np.linalg.norm(normal)
-                if norm_length < 1e-10:  # Small threshold for numerical stability
-                    continue  # Skip degenerate faces
-                    
-                normal = normal / norm_length
-                    
-                # Find the closest matching direction
-                threshold = 0.5  # Lower threshold
-                for i, dir_vec in enumerate(directions):
-                    dot = np.dot(normal, dir_vec)
-                    if dot > threshold:
-                        self._directional_faces[i].append(face_idx)
-                        
-                # If no matches, add to all groups with positive dot product
-                if not any(len(group) > 0 and group[-1] == face_idx 
-                        for group in self._directional_faces):
-                    for i, dir_vec in enumerate(directions):
-                        if np.dot(normal, dir_vec) > 0:
-                            self._directional_faces[i].append(face_idx)
-        else:
-            self._directional_faces = [[] for _ in range(26)]
-        print(f'{failedfaces} failed to be assigned')
-                
+        
+        _directional_faces = _partition_faces(self._vertices, self._polys)
+        self._directional_faces = _directional_faces
+        
         self._needs_directional_partition = False
+        # """Partition faces into 22 potential directional groups based on their normals"""
+        # if not self._needs_directional_partition:
+        #     return
+                
+        # # Calculate face normals if we have valid geometry
+        # if len(self._vertices) > 0 and len(self._polys) > 0:
+        #     # Initialize 22 directional groups
+        #     self._directional_faces = [[] for _ in range(26)]
+                
+        #     # Predefined directions for all 22 groups
+        #     directions = []
+        #     for x in [-1, 0, 1]:
+        #         for y in [-1, 0, 1]:
+        #             for z in [-1, 0, 1]:
+        #                 if x == 0 and y == 0 and z == 0:
+        #                     continue
+        #                 directions.append([x, y, z])
+                
+        #     # Normalize all directions
+        #     directions = [np.array(d, dtype=np.float32) / np.linalg.norm(d) for d in directions]
+        #     # Calculate face normals and group them
+        #     for face_idx, face in enumerate(self._polys):
+        #         verts = [v for v in face if v >= 0]
+        #         if len(verts) < 3:
+        #             continue  # Skip degenerate faces
+                        
+        #         # Get face normal
+        #         v0, v1, v2 = self._vertices[verts[0]], self._vertices[verts[1]], self._vertices[verts[2]]
+        #         normal = np.cross(v1 - v0, v2 - v0)
+                
+        #         # Check for zero-length normal before normalizing
+        #         norm_length = np.linalg.norm(normal)
+        #         if norm_length < 1e-10:  # Small threshold for numerical stability
+        #             continue  # Skip degenerate faces
+                    
+        #         normal = normal / norm_length
+                    
+        #         # Find the closest matching direction
+        #         threshold = 0.5  # Lower threshold
+        #         for i, dir_vec in enumerate(directions):
+        #             dot = np.dot(normal, dir_vec)
+        #             if dot > threshold:
+        #                 self._directional_faces[i].append(face_idx)
+                        
+        #         # If no matches, add to all groups with positive dot product
+        #         if not any(len(group) > 0 and group[-1] == face_idx 
+        #                 for group in self._directional_faces):
+        #             for i, dir_vec in enumerate(directions):
+        #                 if np.dot(normal, dir_vec) > 0:
+        #                     self._directional_faces[i].append(face_idx)
+        # else:
+        #     self._directional_faces = [[] for _ in range(26)]
+                
+        # self._needs_directional_partition = False
 
     def get_potentially_visible_faces(self, view_dir):
         """Return face indices that are potentially visible given a view direction"""

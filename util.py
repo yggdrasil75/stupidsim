@@ -31,6 +31,20 @@ def cross_2d(a, b):
         result[i, 2] = a[i, 0]*b[i, 1] - a[i, 1]*b[i, 0]
     return result
 
+@njit(float32(float32[:]), cache=True)
+def norm(vec):
+    sum_sq = np.float32(0.0)
+    for x in vec:
+        sum_sq += x * x
+    return np.sqrt(sum_sq)
+
+@njit(float32[:](float32[:]), cache=True)
+def normalize(vec):
+    n = norm(vec)
+    if n < 1e-10:
+        return vec
+    return vec / n
+
 def make_2D_array(lis):
     """Function to get 2D array from a list of lists
     """
