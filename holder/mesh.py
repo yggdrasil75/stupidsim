@@ -5,6 +5,7 @@ import numpy as np
 #from globals import DEVICE
 from util import cross_2d, time_function, cross, normalize, norm
 from numba import njit, float32, types, int64, jit, int32
+from numba.typed import typedlist
 from scipy.sparse import csr_matrix
 
 _mesh_cache = {}
@@ -52,12 +53,10 @@ def triangulate(polys):
 
     return new_tris
 
-@njit
-def _partition_faces(_vertices, polys):            
-    # Calculate face normals if we have valid geometry
-    # Initialize 22 directional groups
+#@njit#((float32[:,:], int32[:,:]))
+def _partition_faces(_vertices, polys):
     _directional_faces = [[] for _ in range(26)]
-        
+
     # Predefined directions for all 22 groups
     directions = []
     for x in [-1.0, 0.0, 1.0]:
@@ -69,7 +68,7 @@ def _partition_faces(_vertices, polys):
     directions = np.array(directions, dtype=np.float32)
         
     # Normalize all directions
-    directions = [d / norm(d) for d in directions]
+    directions = [normalize(d) for d in directions]
 
     # Calculate face normals and group them
     for face_idx, face in enumerate(polys):
@@ -85,19 +84,21 @@ def _partition_faces(_vertices, polys):
         normal = normalize(normal)
             
         # Find the closest matching direction
-        threshold = 0.5  # Lower threshold
+        threshold = np.float32(0.5)  # Lower threshold
         matched = False
         for i, dir_vec in enumerate(directions):
             dot = np.dot(normal, dir_vec)
             if dot > threshold:
-                _directional_faces[i].append(face_idx)
+                np.append(_directional_faces[i], np.int32(face_idx))
+                #_directional_faces[i].append(np.int32(face_idx))
                 matched = True
                 
         # If no matches, add to all groups with positive dot product
         if not matched:
             for i, dir_vec in enumerate(directions):
                 if np.dot(normal, dir_vec) > 0:
-                    _directional_faces[i].append(face_idx)
+                    np.append(_directional_faces[i], np.int32(face_idx))
+                    #_directional_faces[i].append(np.int32(face_idx))
             
     return _directional_faces
 
@@ -204,6 +205,9 @@ class mesh:
         if not self._needs_directional_partition:
             return
         
+        print(numba.typeof(self._vertices))
+        print(numba.typeof(self._polys))
+
         _directional_faces = _partition_faces(self._vertices, self._polys)
         self._directional_faces = _directional_faces
         
