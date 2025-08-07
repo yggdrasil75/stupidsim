@@ -4,7 +4,7 @@ import numba
 import numpy as np
 #from globals import DEVICE
 from util import cross_2d, time_function, cross
-from numba import njit, float32, types, int64, jit
+from numba import njit, float32, types, int64, jit, int32
 from scipy.sparse import csr_matrix
 
 _mesh_cache = {}
@@ -403,10 +403,14 @@ def comped(fov, lookat, eye, up, res0, res1, far, near):
     projMatrix[2,3] = (-2 * far * near) / (near - far)
     projMatrix[3,2] = -1.0
 
-    return viewMatrix, projMatrix
+    view_dir = (lookat - eye)
+    view_dir = view_dir / np.linalg.norm(view_dir)
+
+    return viewMatrix, projMatrix, view_dir
 
 @njit((float32[:,:], float32[:,:], float32[:,:], int64, int64), fastmath=True, cache=True)
 def compedObj(verts, viewmatrix, projMatrix, res0, res1):
+    
     n = verts.shape[0]
     # Create homogeneous coordinates (n x 4)
     homogenous_verts = np.empty((n, 4), dtype=verts.dtype)
@@ -428,19 +432,41 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     screen_verts[:, 0] = (proj_verts[:, 0] + 1) * 0.5 * res0
     screen_verts[:, 1] = (1 - (proj_verts[:, 1] + 1) * 0.5) * res1
     
+
     return screen_verts, view_verts
+
+#@njit#((int32[:,:], int64[:]),cache=True)
+def triface(polys, visible_face_indices):
+    all_faces = np.array([polys[i] for i in visible_face_indices])
+
+    # Filter out negative indices and create a mask of valid faces
+    valid_faces = [face[face >= 0] for face in all_faces]
+    valid_lengths = np.array([len(f) for f in valid_faces])
+
+    # Split into triangles and non-triangles
+    tri_mask = valid_lengths == 3
+    tris = np.array([f for f, m in zip(valid_faces, tri_mask) if m])
+    non_tris = [f for f, m in zip(valid_faces, tri_mask) if not m]
+
+    # Triangulate non-triangle faces using fan method
+    triangulated = np.concatenate([
+        tris,
+        *[np.column_stack([
+            face[0]*np.ones(len(face)-2, dtype=int),
+            face[1:-1],
+            face[2:]
+        ]) for face in non_tris]
+    ])
+    
+    return triangulated
 
 @time_function
 def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.ndarray, 
                fovfl: float = 90.0, res: tuple[int,int] = (800,600), 
                near: float = 1.0, far: float = 1000) -> tuple[list[np.ndarray], list, list[np.ndarray]]:
     
-    viewMatrix, projMatrix = comped(fovfl, lookat, eye, up, res[0], res[1], far, near)
-    
-    # Calculate view direction for visibility testing
-    view_dir = (lookat - eye)
-    view_dir = view_dir / np.linalg.norm(view_dir)
-    
+    viewMatrix, projMatrix, view_dir = comped(fovfl, lookat, eye, up, res[0], res[1], far, near)
+        
     all_screen_verts = []
     all_visible_tris = []
     all_depths = []
@@ -455,34 +481,26 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             
             # Skip if entire mesh is backfacing
             if np.dot(view_center, view_center) < 0:
-                all_screen_verts.append(np.empty((0, 2), dtype=np.float32))
-                all_visible_tris.append([])
-                all_depths.append(np.empty(0, dtype=np.float32))
+                # all_screen_verts.append(np.empty((0, 2), dtype=np.float32))
+                # all_visible_tris.append([])
+                # all_depths.append(np.empty(0, dtype=np.float32))
                 continue
 
             # Get potentially visible faces
             visible_face_indices = obj.get_potentially_visible_faces(view_dir)
             if not visible_face_indices:
-                all_screen_verts.append(np.empty((0, 2), dtype=np.float32))
-                all_visible_tris.append([])
-                all_depths.append(np.empty(0, dtype=np.float32))
+                # all_screen_verts.append(np.empty((0, 2), dtype=np.float32))
+                # all_visible_tris.append([])
+                # all_depths.append(np.empty(0, dtype=np.float32))
                 continue
 
             # Process only the potentially visible faces
             screen_verts, view_verts = compedObj(obj.vertices, viewMatrix, projMatrix, res[0], res[1])
             
             # Get triangles from visible faces
-            triangles = []
-            for face_idx in visible_face_indices:
-                face = obj.polys[face_idx]
-                valid_verts = face[face >= 0]
-                if len(valid_verts) == 3:
-                    triangles.append(valid_verts)
-                else:
-                    # Simple fan triangulation for non-triangle faces
-                    v0 = valid_verts[0]
-                    for i in range(1, len(valid_verts)-1):
-                        triangles.append([v0, valid_verts[i], valid_verts[i+1]])
+            print(numba.typeof(obj.polys))
+            print(numba.typeof(visible_face_indices))
+            triangles = triface(obj.polys, visible_face_indices)
             
             if not triangles:
                 all_screen_verts.append(screen_verts)
