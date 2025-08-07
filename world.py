@@ -118,7 +118,7 @@ def _numba_check_containment(inner_verts, outer_verts_set,
                 return False
     return True
 
-@njit(cache=True)
+#@njit(cache=True)
 def _update_elevations_a(plates, _heightmap):
     # Reset heightmap to base elevations
     for plate in plates:
@@ -136,7 +136,7 @@ def _update_elevations_a(plates, _heightmap):
     
     return _heightmap
     
-@njit(cache=True)
+#@njit(cache=True)
 def _update_elevations_b(plates, _heightmap, max_height, min_height):
     # Apply plate movement effects
     for plate in plates:
@@ -158,7 +158,7 @@ def _update_elevations_b(plates, _heightmap, max_height, min_height):
 
 @dataclass
 class World:
-    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=128, rings=128))
+    sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=64, rings=64))
     sea_level: np.ndarray = field(default_factory=lambda: np.array(0.0, dtype=np.float32))
     plate_count: np.ndarray = field(default_factory=lambda: np.array(20, dtype=np.int32))
     rainfall_rate: np.ndarray = field(default_factory=lambda: np.array(0.1, dtype=np.float32))

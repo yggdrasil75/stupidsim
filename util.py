@@ -135,7 +135,7 @@ def print_timing_stats(mode: Literal['basic', 'enhanced'] = 'enhanced'):
         print("\nEnhanced Function Timing Statistics:")
         print("-" * 110)
         header = (f"{'Function':<25} {'Calls':<8} {'Total (s)':<10} {'Avg (s)':<10} "
-                  f"{'Min (s)':<10} {'Median (s)':<10} {'P99.9 (s)':<10} {'P99 (s)':<10} {'Max (s)':<10}")
+                  f"{'Min (s)':<10} {'Median (s)':<10} {'P99 (s)':<10} {'P99.9 (s)':<10} {'Max (s)':<10}")
         print(header)
         print("-" * 110)
         
