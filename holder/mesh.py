@@ -504,18 +504,18 @@ def triface(polys, visible_face_indices):
 @time_function
 def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.ndarray, 
                fovfl: float = 90.0, res: tuple[int,int] = (800,600), 
-               near: float = 1.0, far: float = 1000) -> tuple[list[np.ndarray], list, list[np.ndarray]]:
+               near: float = 1.0, far: float = 1000): # -> tuple[list[np.ndarray], list, list[np.ndarray]]:
     
     viewMatrix, projMatrix, view_dir = getMats(fovfl, lookat, eye, up, res[0], res[1], far, near)
         
     all_screen_verts = []
     all_visible_tris = []
-    all_depths = []
+    #all_depths = []
 
     for obj in meshes:
         cache_key = (id(obj), tuple(eye), tuple(lookat), tuple(up))
         if cache_key in _mesh_cache:
-            screen_verts, visible_tris, depths = _mesh_cache[cache_key]
+            screen_verts, visible_tris = _mesh_cache[cache_key]
         else:
             mesh_center = obj.center #np.mean(obj.vertices, axis=0)
             view_center = np.dot(np.append(mesh_center, 1), viewMatrix.T)[:3]
@@ -538,25 +538,24 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             if len(triangles) == 0:
                 continue
 
-            triangles = np.array(triangles)
+            #triangles = np.array(triangles)
             
             # Backface culling on the potentially visible subset
-            tri_verts_view = view_verts[triangles][:, :, :3]
-            v0 = tri_verts_view[:, 0]
-            v1 = tri_verts_view[:, 1]
-            v2 = tri_verts_view[:, 2]
-            normals = cross_2d(v1 - v0, v2 - v0)
-            view_dir_tri = -tri_verts_view.mean(axis=1)
-            dot_prods = np.sum(normals * view_dir_tri, axis=1)
-            visible_mask = dot_prods > 0
+            #tri_verts_view = view_verts[triangles][:, :, :3]
+            #v0 = tri_verts_view[:, 0]
+            #v1 = tri_verts_view[:, 1]
+            #v2 = tri_verts_view[:, 2]
+            #normals = cross_2d(v1 - v0, v2 - v0)
+            #view_dir_tri = -tri_verts_view.mean(axis=1)
+            #dot_prods = np.sum(normals * view_dir_tri, axis=1)
+            #visible_mask = dot_prods > 0
 
-            visible_tris = triangles[visible_mask].tolist()
-            depths = np.mean(tri_verts_view[visible_mask][:, :, 2], axis=1)
+            visible_tris = triangles.tolist() #[visible_mask].tolist()
+            
 
-            _mesh_cache[cache_key] = (screen_verts, visible_tris, depths)
+            _mesh_cache[cache_key] = (screen_verts, visible_tris)
 
         all_screen_verts.append(screen_verts)
         all_visible_tris.append(visible_tris)
-        all_depths.append(depths)
 
-    return all_screen_verts, all_visible_tris, all_depths
+    return all_screen_verts, all_visible_tris
