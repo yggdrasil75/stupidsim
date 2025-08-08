@@ -9,6 +9,9 @@ from numba.typed import typedlist
 from scipy.sparse import csr_matrix
 
 _mesh_cache = {}
+_DIRECTIONS = np.array([(x,y,z) for x in (-1,0,1) for y in (-1,0,1) for z in (-1,0,1) 
+                       if (x,y,z) != (0,0,0)], dtype=np.float32)
+_DIRECTIONS_NORMALIZED = _DIRECTIONS / np.linalg.norm(_DIRECTIONS, axis=1, keepdims=True)
 
 @njit(cache=True)
 def triangulate(polys):
@@ -53,7 +56,8 @@ def triangulate(polys):
 
     return new_tris
 
-def _partition_faces(_vertices, polys):
+#@time_function
+def _partition_faces(_vertices, polys, norms):
     _directional_faces = [[] for _ in range(26)]
 
     # Predefined directions for all 22 groups
@@ -76,12 +80,13 @@ def _partition_faces(_vertices, polys):
             continue  # Skip degenerate faces
                 
         # Get face normal
-        v0, v1, v2 = _vertices[verts[0]], _vertices[verts[1]], _vertices[verts[2]]
-        normal = cross(v1 - v0, v2 - v0)
+        # v0, v1, v2 = _vertices[verts[0]], _vertices[verts[1]], _vertices[verts[2]]
+        # normal = cross(v1 - v0, v2 - v0)
         
-        # Check for zero-length normal before normalizing
-        normal = normalize(normal)
-            
+        # # Check for zero-length normal before normalizing
+        # normal = normalize(normal)
+        normal = norms[face_idx]
+
         # Find the closest matching direction
         threshold = np.float32(0.5)  # Lower threshold
         matched = False
@@ -100,19 +105,12 @@ def _partition_faces(_vertices, polys):
     return _directional_faces
 
 #@njit
+#@time_function
 def _getfaces(view_dir):
     # Normalize view direction
     view_dir = normalize(-view_dir)
     
-    # Generate all 26 directions (6 faces, 8 corners, 12 edges) in one line
-    directions = np.array([(x,y,z) for x in (-1,0,1) for y in (-1,0,1) for z in (-1,0,1) if (x,y,z) != (0,0,0)], dtype=np.float32)
-    
-    # Normalize all directions
-    directions = directions / np.linalg.norm(directions, axis=1, keepdims=True)
-    #directions = [normalize(d) for d in directions]
-    
-    # Compute dot products and find visible groups
-    visible_groups = np.where(np.dot(directions, view_dir) < 0.3)[0]
+    visible_groups = np.where(np.dot(_DIRECTIONS_NORMALIZED, view_dir) < 0.3)[0]
     
     # Collect all faces from visible groups
     return visible_groups
@@ -124,6 +122,7 @@ class mesh:
     _polys: np.ndarray
     _color: np.ndarray
     _tris: np.ndarray = field(default=None, init=False)  # Stores triangulated version
+    _norms: np.ndarray = field(default=None, init=False)
     interactive: bool = True  # can stuff collide
     physics: bool = True  # does it fall from gravity
     mass: np.ndarray = field(default_factory=lambda: np.array(1.0, dtype=np.float32))
@@ -136,7 +135,8 @@ class mesh:
 
     _directional_faces: list = field(default_factory=list, init=False)  # Stores partitioned faces by direction
     _needs_directional_partition: bool = field(default=True, init=False)  # Flag for when to repartition
-    
+
+    _center: np.ndarray = field(default=None, init=False)
 
     @property
     def vertices(self):
@@ -188,6 +188,7 @@ class mesh:
         will perform triangulation and cache the result."""
         if self._needs_triangulation or self._tris is None:
             self._triangulate()
+            self._calnorms()
         return self._tris
 
     @property
@@ -212,10 +213,24 @@ class mesh:
     def is_triangulated(self):
         return not self._needs_triangulation
     
+    @property
+    def norms(self):
+        if self._needs_triangulation or self._norms is None:
+            self._triangulate()
+            self._calnorms()
+        return self._norms
+
+    @property
+    def center(self):
+        if self._center is None:
+            self._center = np.mean(self.vertices, axis=0)
+        return self._center
+
     def __post_init__(self):
         self._update_neighbor_map()
         self._partition_directional_faces()
 
+    #@time_function
     def _partition_directional_faces(self):
         if not self._needs_directional_partition:
             return
@@ -223,31 +238,20 @@ class mesh:
         print(numba.typeof(self._vertices))
         print(numba.typeof(self._polys))
 
-        _directional_faces = _partition_faces(self._vertices, self._polys)
+        _directional_faces = _partition_faces(self._vertices, self._polys, self.norms)
         self._directional_faces = _directional_faces
         
         self._needs_directional_partition = False
 
+    #@time_function
     def get_potentially_visible_faces(self, view_dir):
         """Return face indices that are potentially visible given a view direction"""
         if self._needs_directional_partition:
             self._partition_directional_faces()
         visible_groups = _getfaces(view_dir)
-        # # Normalize view direction
-        # view_dir = -view_dir / np.linalg.norm(-view_dir)
-        
-        # # Generate all 26 directions (6 faces, 8 corners, 12 edges) in one line
-        # directions = np.array([(x,y,z) for x in (-1,0,1) for y in (-1,0,1) for z in (-1,0,1) if (x,y,z) != (0,0,0)])
-        
-        # # Normalize all directions
-        # directions = directions / np.linalg.norm(directions, axis=1, keepdims=True)
-        
-        # # Compute dot products and find visible groups
-        # visible_groups = np.where(np.dot(directions, view_dir) < 0.3)[0]
-        
-        # # Collect all faces from visible groups
         return np.concatenate([self._directional_faces[i] for i in visible_groups]).astype(np.int64)
 
+    #@time_function
     def _update_neighbor_map(self):
         """Build or update the neighbor map data structure"""
         if not self._needs_neighbor_update:
@@ -326,21 +330,25 @@ class mesh:
         
         self._needs_neighbor_update = False
 
+    #@time_function
     def get_adjacent_faces(self, face_idx):
         """Get list of face indices adjacent to the given face"""
         self._update_neighbor_map()
         return self._neighbor_map['face_to_faces'].get(face_idx, [])
 
+    #@time_function
     def get_faces_for_vertex(self, vertex_idx):
         """Get list of face indices that contain the given vertex"""
         self._update_neighbor_map()
         return self._neighbor_map['vertex_to_faces'].get(vertex_idx, [])
 
+    #@time_function
     def get_adjacent_vertices(self, vertex_idx):
         """Get list of vertex indices adjacent to the given vertex"""
         self._update_neighbor_map()
         return self._neighbor_map['vertex_to_vertices'].get(vertex_idx, [])
 
+    #@time_function
     def toTri(self):
         """
         Convert all polygons to triangles using a simple fan triangulation.
@@ -360,6 +368,7 @@ class mesh:
         self._needs_triangulation = False
         return self
     
+    #@time_function
     def _triangulate(self):
         """Internal method to triangulate the polygons and cache the result"""
         if len(self._polys) == 0:
@@ -372,6 +381,17 @@ class mesh:
         self._tris = np.stack(new_tris) if len(new_tris) > 0 else np.zeros((0, 3), dtype=np.int64)
         self._needs_triangulation = False
         return self
+    
+    #@time_function
+    def _calnorms(self):
+        tempnorms = []
+        for idx, tri in enumerate(self._tris):
+            v0 = self._vertices[tri[0]]
+            v1 = self._vertices[tri[1]]
+            v2 = self._vertices[tri[2]]
+            normal = cross(v1 - v0, v2 - v0)
+            tempnorms.append(normalize(normal))
+        self._norms = np.array(tempnorms)
 
 @time_function
 def get_lod_level(view_verts: np.ndarray, triangles: np.ndarray):
@@ -386,7 +406,7 @@ def simplify_mesh(vertices: np.ndarray,
     pass
 
 @njit((float32, float32[:], float32[:], float32[:], int64, int64, int64, float32), cache=True)
-def comped(fov, lookat, eye, up, res0, res1, far, near):
+def getMats(fov, lookat, eye, up, res0, res1, far, near):
     zAxis = lookat - eye
     zAxis = zAxis / np.linalg.norm(zAxis)
     xAxis = cross(up, zAxis)
@@ -444,6 +464,7 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
 
     return screen_verts, view_verts
 
+@time_function
 @njit((int32[:,:], int64[:]), fastmath=True, cache=True)
 def triface(polys, visible_face_indices):
     # Pre-allocate arrays for better performance
@@ -485,7 +506,7 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
                fovfl: float = 90.0, res: tuple[int,int] = (800,600), 
                near: float = 1.0, far: float = 1000) -> tuple[list[np.ndarray], list, list[np.ndarray]]:
     
-    viewMatrix, projMatrix, view_dir = comped(fovfl, lookat, eye, up, res[0], res[1], far, near)
+    viewMatrix, projMatrix, view_dir = getMats(fovfl, lookat, eye, up, res[0], res[1], far, near)
         
     all_screen_verts = []
     all_visible_tris = []
@@ -493,10 +514,10 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
 
     for obj in meshes:
         cache_key = (id(obj), tuple(eye), tuple(lookat), tuple(up))
-        if cache_key in _mesh_cache and not obj._needs_neighbor_update:
+        if cache_key in _mesh_cache:
             screen_verts, visible_tris, depths = _mesh_cache[cache_key]
         else:
-            mesh_center = np.mean(obj.vertices, axis=0)
+            mesh_center = obj.center #np.mean(obj.vertices, axis=0)
             view_center = np.dot(np.append(mesh_center, 1), viewMatrix.T)[:3]
             
             # Skip if entire mesh is backfacing
@@ -512,8 +533,6 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             screen_verts, view_verts = compedObj(obj.vertices, viewMatrix, projMatrix, res[0], res[1])
             
             # Get triangles from visible faces
-            print(numba.typeof(obj.polys))
-            print(numba.typeof(visible_face_indices))
             triangles = triface(obj.polys, visible_face_indices)
             
             if len(triangles) == 0:

@@ -828,8 +828,8 @@ def render_world():
         if screen_verts and visible_tris[0]:
             points_np = screen_verts[0]
             colors_np = world.sphere_mesh.color
-            depths_np = depths[0]
-            for i, tri in enumerate(visible_tris[0]):
+            #depths_np = depths[0]
+            for tri in visible_tris[0]:
                 p1 = points_np[tri[0]].tolist()
                 p2 = points_np[tri[1]].tolist()
                 p3 = points_np[tri[2]].tolist()
