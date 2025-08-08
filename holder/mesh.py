@@ -467,38 +467,34 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
 @time_function
 @njit((int32[:,:], int64[:]), fastmath=True, cache=True)
 def triface(polys, visible_face_indices):
-    # Pre-allocate arrays for better performance
-    total_tris = 0
-    for i in visible_face_indices:
-        face = polys[i]
-        valid_verts = face[face >= 0]
-        if len(valid_verts) >= 3:
-            total_tris += len(valid_verts) - 2
+    visible_faces = polys[visible_face_indices]
+    
+    valid_verts_masks = visible_faces >= 0
+    valid_verts_counts = np.sum(valid_verts_masks, axis=1)
+    
+    # Calculate number of triangles per face (max(0, n-2))
+    tris_per_face = np.maximum(valid_verts_counts - 2, 0)
+    total_tris = np.sum(tris_per_face)
     
     if total_tris == 0:
         return np.empty((0, 3), dtype=np.int32)
     
+    # Create output array
     result = np.empty((total_tris, 3), dtype=np.int32)
-    idx = 0
     
-    for face_idx in visible_face_indices:
-        face = polys[face_idx]
-        valid_verts = face[face >= 0]
-        n = len(valid_verts)
+    # Initialize indices
+    start_idx = 0
+    
+    for i in range(len(visible_faces)):
+        n = valid_verts_counts[i]
+
+        face = visible_faces[i]
+        valid_verts = face[valid_verts_masks[i]]
         
-        if n < 3:
-            continue
-            
-        if n == 3:
-            result[idx] = valid_verts
-            idx += 1
-        else:
-            # Fan triangulation
-            v0 = valid_verts[0]
-            for i in range(1, n-1):
-                result[idx] = np.array([v0, valid_verts[i], valid_verts[i+1]])
-                idx += 1
-                
+        result[start_idx] = valid_verts
+        start_idx += 1
+
+    
     return result
 
 @time_function
