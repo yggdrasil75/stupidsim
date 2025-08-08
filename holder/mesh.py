@@ -27,44 +27,40 @@ def triangulate(polys):
 
 #@njit(cache=True)
 def _partition_faces(polys, norms):
+    # Generate all 26 directions (3^3 - 1)
+    directions = _DIRECTIONS_NORMALIZED
+    
+    # Calculate dot products between all normals and all directions
+    dots = np.dot(norms, directions.T)  # shape: (num_faces, 26)
+    
+    # Threshold for matching
+    threshold = np.float32(0.5)
+    
+    # Find best matches (above threshold)
+    above_threshold = dots > threshold
+    
+    # For faces with at least one match above threshold
+    has_match = np.any(above_threshold, axis=1)
+    matched_groups = [np.where(above_threshold[i])[0] for i in range(len(norms)) if has_match[i]]
+    
+    # For faces with no match above threshold, use all positive dot products
+    unmatched_groups = [np.where(dots[i] > 0)[0] for i in range(len(norms)) if not has_match[i]]
+    
+    # Initialize directional faces
     _directional_faces = [[] for _ in range(26)]
-
-    # Predefined directions for all 22 groups
-    directions = []
-    for x in [-1.0, 0.0, 1.0]:
-        for y in [-1.0, 0.0, 1.0]:
-            for z in [-1.0, 0.0, 1.0]:
-                if x == 0 and y == 0 and z == 0:
-                    continue
-                directions.append([x, y, z])
-    directions = np.array(directions, dtype=np.float32)
-        
-    # Normalize all directions
-    directions = [d / norm(d) for d in directions]
-
-    # Calculate face normals and group them
-    for face_idx, face in enumerate(polys):
-        verts = [v for v in face if v >= 0]
-        if len(verts) < 3:
-            continue  # Skip degenerate faces
-                
-        normal = norms[face_idx]
-
-        # Find the closest matching direction
-        threshold = np.float32(0.5)  # Lower threshold
-        matched = False
-        for i, dir_vec in enumerate(directions):
-            dot = np.dot(normal, dir_vec)
-            if dot > threshold:
-                _directional_faces[i].append(face_idx)
-                matched = True
-                
-        # If no matches, add to all groups with positive dot product
-        if not matched:
-            for i, dir_vec in enumerate(directions):
-                if np.dot(normal, dir_vec) > 0:
-                    _directional_faces[i].append(face_idx)
-            
+    
+    # Process matched faces
+    matched_indices = np.where(has_match)[0]
+    for i, groups in zip(matched_indices, matched_groups):
+        for group in groups:
+            _directional_faces[group].append(i)
+    
+    # Process unmatched faces
+    unmatched_indices = np.where(~has_match)[0]
+    for i, groups in zip(unmatched_indices, unmatched_groups):
+        for group in groups:
+            _directional_faces[group].append(i)
+    
     return _directional_faces
 
 @njit(cache=True)
