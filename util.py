@@ -45,6 +45,11 @@ def normalize(vec):
         return vec
     return vec / n
 
+@njit(fastmath=True)
+def clip_value(value, min_val, max_val):
+    """Clip a value between min and max."""
+    return min(max(value, min_val), max_val)
+
 def make_2D_array(lis):
     """Function to get 2D array from a list of lists
     """

@@ -821,7 +821,7 @@ def render_world():
 
         dpg.delete_item("draw_area", children_only=True)
         
-        screen_verts, visible_tris = project_2d(
+        screen_verts, visible_tris, depths = project_2d(
             [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=(800, 600)
             )
         
