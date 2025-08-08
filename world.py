@@ -816,7 +816,7 @@ def render_world():
     dpg.set_primary_window("primary", True)
     
     while dpg.is_dearpygui_running():
-        print_timing_stats()
+        #print_timing_stats()
         world.simulate_erosion(steps=0)
 
         dpg.delete_item("draw_area", children_only=True)

@@ -11,53 +11,22 @@ from scipy.sparse import csr_matrix
 _mesh_cache = {}
 _DIRECTIONS = np.array([(x,y,z) for x in (-1,0,1) for y in (-1,0,1) for z in (-1,0,1) 
                        if (x,y,z) != (0,0,0)], dtype=np.float32)
-_DIRECTIONS_NORMALIZED = _DIRECTIONS / np.linalg.norm(_DIRECTIONS, axis=1, keepdims=True)
+_DIRECTIONS_NORMALIZED = np.ascontiguousarray(_DIRECTIONS / np.linalg.norm(_DIRECTIONS, axis=1, keepdims=True))
 
 @njit(cache=True)
 def triangulate(polys):
-    new_tris = []
-    
-    # If polys is already a 2D array where each row represents a polygon
-    if polys.ndim == 2:
-        for poly in polys:
-            # Remove any padding values (like -1) if present
-            valid_verts = poly[poly >= 0]
-            n = len(valid_verts)
-            
-            if n < 3:
-                continue  # skip degenerate polygons
-            elif n == 3:
-                new_tris.append(valid_verts)
-            else:
-                # Fan triangulation
-                v0 = valid_verts[0]
-                for i in range(1, n-1):
-                    new_tris.append(np.array([v0, valid_verts[i], valid_verts[i+1]]))
-    else:
-        # Handle case where polys is a flat array with separators
-        current_poly = []
-        
-        for idx in polys:
-            if idx == -1:
-                if len(current_poly) >= 3:
-                    n = len(current_poly)
-                    v0 = current_poly[0]
-                    for i in range(1, n-1):
-                        new_tris.append([v0, current_poly[i], current_poly[i+1]])
-                current_poly = []
-            else:
-                current_poly.append(idx)
-        
-        if len(current_poly) >= 3:
-            n = len(current_poly)
-            v0 = current_poly[0]
-            for i in range(1, n-1):
-                new_tris.append([v0, current_poly[i], current_poly[i+1]])
+    valid_polys = [poly[poly >= 0] for poly in polys]
+    valid_polys = [p for p in valid_polys if len(p) >= 3]
+    triangles = [p for p in valid_polys if len(p) == 3]
+    for p in valid_polys:
+        if len(p) > 3:
+            v0 = p[0]
+            triangles.extend([np.array([v0, p[i], p[i+1]]) for i in range(1, len(p)-1)])
 
-    return new_tris
+    return triangles
 
-#@time_function
-def _partition_faces(_vertices, polys, norms):
+#@njit(cache=True)
+def _partition_faces(polys, norms):
     _directional_faces = [[] for _ in range(26)]
 
     # Predefined directions for all 22 groups
@@ -79,12 +48,6 @@ def _partition_faces(_vertices, polys, norms):
         if len(verts) < 3:
             continue  # Skip degenerate faces
                 
-        # Get face normal
-        # v0, v1, v2 = _vertices[verts[0]], _vertices[verts[1]], _vertices[verts[2]]
-        # normal = cross(v1 - v0, v2 - v0)
-        
-        # # Check for zero-length normal before normalizing
-        # normal = normalize(normal)
         normal = norms[face_idx]
 
         # Find the closest matching direction
@@ -104,8 +67,7 @@ def _partition_faces(_vertices, polys, norms):
             
     return _directional_faces
 
-#@njit
-#@time_function
+@njit(cache=True)
 def _getfaces(view_dir):
     # Normalize view direction
     view_dir = normalize(-view_dir)
@@ -235,10 +197,8 @@ class mesh:
         if not self._needs_directional_partition:
             return
         
-        print(numba.typeof(self._vertices))
-        print(numba.typeof(self._polys))
 
-        _directional_faces = _partition_faces(self._vertices, self._polys, self.norms)
+        _directional_faces = _partition_faces(self._polys, self.norms)
         self._directional_faces = _directional_faces
         
         self._needs_directional_partition = False
@@ -385,7 +345,7 @@ class mesh:
     #@time_function
     def _calnorms(self):
         tempnorms = []
-        for idx, tri in enumerate(self._tris):
+        for tri in self._tris:
             v0 = self._vertices[tri[0]]
             v1 = self._vertices[tri[1]]
             v2 = self._vertices[tri[2]]
@@ -462,9 +422,9 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     screen_verts[:, 1] = (1 - (proj_verts[:, 1] + 1) * 0.5) * res1
     
 
-    return screen_verts, view_verts
+    return screen_verts
 
-@time_function
+#@time_function
 @njit((int32[:,:], int64[:]), fastmath=True, cache=True)
 def triface(polys, visible_face_indices):
     visible_faces = polys[visible_face_indices]
@@ -486,7 +446,7 @@ def triface(polys, visible_face_indices):
     start_idx = 0
     
     for i in range(len(visible_faces)):
-        n = valid_verts_counts[i]
+        #n = valid_verts_counts[i]
 
         face = visible_faces[i]
         valid_verts = face[valid_verts_masks[i]]
@@ -494,7 +454,6 @@ def triface(polys, visible_face_indices):
         result[start_idx] = valid_verts
         start_idx += 1
 
-    
     return result
 
 @time_function
@@ -502,6 +461,7 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
                fovfl: float = 90.0, res: tuple[int,int] = (800,600), 
                near: float = 1.0, far: float = 1000): # -> tuple[list[np.ndarray], list, list[np.ndarray]]:
     
+    # 0.000146 seconds per slowest call when logging.
     viewMatrix, projMatrix, view_dir = getMats(fovfl, lookat, eye, up, res[0], res[1], far, near)
         
     all_screen_verts = []
@@ -513,40 +473,17 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
         if cache_key in _mesh_cache:
             screen_verts, visible_tris = _mesh_cache[cache_key]
         else:
-            mesh_center = obj.center #np.mean(obj.vertices, axis=0)
-            view_center = np.dot(np.append(mesh_center, 1), viewMatrix.T)[:3]
-            
-            # Skip if entire mesh is backfacing
-            if np.dot(view_center, view_center) < 0:
-                continue
 
             # Get potentially visible faces
             visible_face_indices = obj.get_potentially_visible_faces(view_dir)
-            if len(visible_face_indices) == 0:
-                continue
 
-            # Process only the potentially visible faces
-            screen_verts, view_verts = compedObj(obj.vertices, viewMatrix, projMatrix, res[0], res[1])
+            #  0.000360 per slowest call when logging
+            screen_verts = compedObj(obj.vertices, viewMatrix, projMatrix, res[0], res[1])
             
             # Get triangles from visible faces
+            # 0.005 per slowest call when logging
             triangles = triface(obj.polys, visible_face_indices)
-            
-            if len(triangles) == 0:
-                continue
-
-            #triangles = np.array(triangles)
-            
-            # Backface culling on the potentially visible subset
-            #tri_verts_view = view_verts[triangles][:, :, :3]
-            #v0 = tri_verts_view[:, 0]
-            #v1 = tri_verts_view[:, 1]
-            #v2 = tri_verts_view[:, 2]
-            #normals = cross_2d(v1 - v0, v2 - v0)
-            #view_dir_tri = -tri_verts_view.mean(axis=1)
-            #dot_prods = np.sum(normals * view_dir_tri, axis=1)
-            #visible_mask = dot_prods > 0
-
-            visible_tris = triangles.tolist() #[visible_mask].tolist()
+            visible_tris = triangles.tolist()
             
 
             _mesh_cache[cache_key] = (screen_verts, visible_tris)
