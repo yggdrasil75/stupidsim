@@ -173,6 +173,8 @@ class World:
     plates: list[Plate] = field(default_factory=list, init=False)
     plate_colors: np.ndarray = field(init=False)
     colormap_mode: str = field(default="null")
+    min_height_value: float = field(default=6357.0)
+    max_height_value: float = field(default=6378.0)
     
     @property
     def min_height(self) -> np.ndarray:
@@ -660,8 +662,13 @@ class World:
             self.update_vertices_based_on_heightmap()
             self.update_colors()
 
-def render_world():
-    world = World()
+def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20):
+    world = World(
+        sphere_mesh=create_sphere_mesh(segments=resolution, rings=resolution),
+        plate_count=np.array(plate_count, dtype=np.int32),
+        min_height_value=min_height,
+        max_height_value=max_height
+    )
     
     eye = np.array([3.0, 2.0, 3.0], dtype=np.float32)
     lookat = np.array([0.0, 0.0, 0.0], dtype=np.float32)

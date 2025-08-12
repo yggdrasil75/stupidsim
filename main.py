@@ -1,101 +1,112 @@
-from dataclasses import field
 import dearpygui.dearpygui as dpg
-from shapes.sphere import create_sphere_mesh
-from world import World, render_world
-import torch
+from world import render_world
 
-# Default simulation settings
-settings = {
-    "segments": 64,
-    "rings": 64,
-    "plate_count": 15,
-    "sea_level": 0.0,
-    "min_height": -1.0,
-    "max_height": 1.0,
-    "rainfall_rate": 0.1,
-    "evaporation_rate": 0.05,
-    "water_flow_max": 1.0,
-    "water_flow_min": 0.01
-}
-
-def start_simulation():
-    """Callback for the start button - launches the simulation with current settings"""
-    # Update the World class defaults with our settings
-    World.sphere_mesh = field(default_factory=lambda: create_sphere_mesh(
-        segments=settings["segments"], 
-        rings=settings["rings"]
-    ))
-    World.sea_level = torch.tensor(settings["sea_level"], dtype=torch.float32)
-    World.min_height = torch.tensor(settings["min_height"], dtype=torch.float32)
-    World.max_height = torch.tensor(settings["max_height"], dtype=torch.float32)
-    World.plate_count = torch.tensor(settings["plate_count"], dtype=torch.int32)
-    World.rainfall_rate = torch.tensor(settings["rainfall_rate"], dtype=torch.float32)
-    World.evaporation_rate = torch.tensor(settings["evaporation_rate"], dtype=torch.float32)
-    World.water_flow_max = torch.tensor(settings["water_flow_max"], dtype=torch.float32)
-    World.water_flow_min = torch.tensor(settings["water_flow_min"], dtype=torch.float32)
+def update_slider_limits():
+    # Ensure mountains are always higher than depths
+    depths = dpg.get_value("depths_value")
+    dpg.configure_item("hills_value", min_value=depths)
     
-    # Close the menu window and start the simulation
-    dpg.delete_item("main_window")
-    render_world()
+    # Ensure depths are always lower than mountains
+    hills = dpg.get_value("hills_value")
+    dpg.configure_item("depths_value", max_value=hills)
 
-def show_main_menu():
-    """Creates and shows the main menu interface"""
+def show_configure_window():
+    with dpg.window(label="Configure Simulation", width=400, height=300):
+        # World Resolution Slider
+        dpg.add_slider_int(
+            label="World Resolution",
+            min_value=64,
+            max_value=512,
+            default_value=64,
+            clamped=True,
+            format="%d",
+            callback=lambda s, a, u: None,
+            width=200,
+            tag="resolution_value"
+        )
+        dpg.add_text("Higher will be slower but better", color=[150, 150, 150])
+        
+        # Depths Slider
+        dpg.add_slider_int(
+            label="Depths",
+            min_value=3000,  # Reasonable minimum
+            max_value=7000,  # Will be updated when mountains changes
+            default_value=6357,
+            clamped=True,
+            format="%d km",
+            callback=update_slider_limits,
+            width=200,
+            tag="depths_value"
+        )
+        dpg.add_text("Depths are at 6357 km on Earth", color=[150, 150, 150])
+        
+        # Mountains Slider
+        dpg.add_slider_int(
+            label="Mountains",
+            min_value=6357,  # Will be updated when depths changes
+            max_value=9000,  # Reasonable maximum
+            default_value=6378,
+            clamped=True,
+            format="%d km",
+            callback=update_slider_limits,
+            width=200,
+            tag="hills_value"
+        )
+        dpg.add_text("The tallest mounts on Earth are at 6378 km", color=[150, 150, 150])
+        
+        dpg.add_slider_int(
+            label="Plates",
+            min_value=10,
+            max_value=25,
+            default_value=20,
+            clamped=True,
+            tag="plate_count_value"
+        )
+        dpg.add_text("Earth has 15 plates, please set this above your goal though as randomization may drop a few plates.")
+
+        # Start Simulation Button
+        dpg.add_button(
+            label="Start Simulation",
+            callback=lambda: render_world(
+                resolution=dpg.get_value("resolution_value"),
+                min_height=dpg.get_value("depths_value"),
+                max_height=dpg.get_value("hills_value"),
+                plate_count=dpg.get_value("plate_count_value")
+                ),
+            width=100,
+            height=30
+        )
+
+def main():
     dpg.create_context()
-    dpg.create_viewport(title='Procedural World Generator', width=600, height=500)
+    dpg.create_viewport(title='Simulation Menu', width=600, height=400)
     
-    with dpg.window(label="Main Menu", tag="main_window", width=600, height=500):
-        dpg.add_text("Procedural World Generator", color=(0, 200, 255))
-        dpg.add_separator()
+    with dpg.window(label="Main Menu", tag="main", width=600, height=400):
+        dpg.add_text("Simulation Main Menu", pos=[200, 50])
         
-        with dpg.collapsing_header(label="World Settings", default_open=True):
-            with dpg.group(horizontal=True):
-                dpg.add_text("Mesh Resolution:")
-                dpg.add_input_int(label="Segments", min_value=8, max_value=256, 
-                                 default_value=settings["segments"], 
-                                 callback=lambda s, a: settings.__setitem__("segments", a))
-                dpg.add_input_int(label="Rings", min_value=8, max_value=256, 
-                                default_value=settings["rings"], 
-                                callback=lambda s, a: settings.__setitem__("rings", a))
-            
-            dpg.add_slider_int(label="Plate Count", min_value=1, max_value=50, 
-                             default_value=settings["plate_count"], 
-                             callback=lambda s, a: settings.__setitem__("plate_count", a))
-            
-            with dpg.group(horizontal=True):
-                dpg.add_text("Height Range:")
-                dpg.add_input_float(label="Min", default_value=settings["min_height"], 
-                                   callback=lambda s, a: settings.__setitem__("min_height", a))
-                dpg.add_input_float(label="Max", default_value=settings["max_height"], 
-                                   callback=lambda s, a: settings.__setitem__("max_height", a))
-                dpg.add_input_float(label="Sea Level", default_value=settings["sea_level"], 
-                                   callback=lambda s, a: settings.__setitem__("sea_level", a))
+        # Play Button
+        dpg.add_button(
+            label="Play",
+            callback=show_configure_window,
+            pos=[250, 150],
+            width=100,
+            height=50
+        )
         
-        with dpg.collapsing_header(label="Water Simulation"):
-            dpg.add_input_float(label="Rainfall Rate", default_value=settings["rainfall_rate"], 
-                              callback=lambda s, a: settings.__setitem__("rainfall_rate", a))
-            dpg.add_input_float(label="Evaporation Rate", default_value=settings["evaporation_rate"], 
-                               callback=lambda s, a: settings.__setitem__("evaporation_rate", a))
-            
-            with dpg.group(horizontal=True):
-                dpg.add_text("Water Flow:")
-                dpg.add_input_float(label="Min", default_value=settings["water_flow_min"], 
-                                   callback=lambda s, a: settings.__setitem__("water_flow_min", a))
-                dpg.add_input_float(label="Max", default_value=settings["water_flow_max"], 
-                                   callback=lambda s, a: settings.__setitem__("water_flow_max", a))
-        
-        dpg.add_separator()
-        dpg.add_button(label="Start Simulation", width=200, height=40, callback=start_simulation)
-        dpg.add_text("Note: Higher resolution settings will require more memory\nand may impact performance.", 
-                    color=(200, 200, 0))
-
+        # Quit Button
+        dpg.add_button(
+            label="Quit",
+            callback=lambda: dpg.stop_dearpygui(),
+            pos=[250, 220],
+            width=100,
+            height=50
+        )
+    
     dpg.setup_dearpygui()
     dpg.show_viewport()
-    dpg.set_primary_window("main_window", True)
-    
-    while dpg.is_dearpygui_running():
-        dpg.render_dearpygui_frame()
-    
+    #dpg.set_primary_window("primary", True)
+    dpg.start_dearpygui()
     dpg.destroy_context()
 
 if __name__ == "__main__":
-    show_main_menu()
+    main()
