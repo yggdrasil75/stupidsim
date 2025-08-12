@@ -11,7 +11,10 @@ def update_slider_limits():
     dpg.configure_item("depths_value", max_value=hills)
 
 def show_configure_window():
-    with dpg.window(label="Configure Simulation", width=400, height=300):
+    # Remove the main menu window
+    dpg.delete_item("main")
+    
+    with dpg.window(label="Configure Simulation", width=400, height=300, tag="config"):
         # World Resolution Slider
         dpg.add_slider_int(
             label="World Resolution",
@@ -67,15 +70,26 @@ def show_configure_window():
         # Start Simulation Button
         dpg.add_button(
             label="Start Simulation",
-            callback=lambda: render_world(
-                resolution=dpg.get_value("resolution_value"),
-                min_height=dpg.get_value("depths_value"),
-                max_height=dpg.get_value("hills_value"),
-                plate_count=dpg.get_value("plate_count_value")
-                ),
+            callback=start_simulation,
             width=100,
             height=30
         )
+
+def start_simulation():
+    # Remove the config window
+    resolution=dpg.get_value("resolution_value")
+    min_height=dpg.get_value("depths_value")
+    max_height=dpg.get_value("hills_value")
+    plate_count=dpg.get_value("plate_count_value")
+    dpg.delete_item("config")
+    # Start the simulation with the configured parameters
+    print(f"Creating world with the following: res of {resolution}, depths are at {min_height}, mountain peaks are at {max_height}, plates have a max of {plate_count}")
+    render_world(
+        resolution=resolution,
+        min_height=min_height,
+        max_height=max_height,
+        plate_count=plate_count
+    )
 
 def main():
     dpg.create_context()
@@ -104,7 +118,6 @@ def main():
     
     dpg.setup_dearpygui()
     dpg.show_viewport()
-    #dpg.set_primary_window("primary", True)
     dpg.start_dearpygui()
     dpg.destroy_context()
 

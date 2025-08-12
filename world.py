@@ -664,7 +664,7 @@ class World:
 
 def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20):
     world = World(
-        sphere_mesh=create_sphere_mesh(segments=resolution, rings=resolution),
+        sphere_mesh=create_sphere_mesh(radius=(min_height+max_height) / 2, segments=resolution, rings=resolution, deformable=False),
         plate_count=np.array(plate_count, dtype=np.int32),
         min_height_value=min_height,
         max_height_value=max_height
