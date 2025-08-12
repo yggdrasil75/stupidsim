@@ -678,9 +678,6 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
     azimuth = np.arctan2(eye[2], eye[0])
     elevation = np.arcsin(eye[1] / camera_distance)
     
-    dpg.create_context()
-    dpg.create_viewport(title='Procedural World', width=1000, height=700)
-
     def update_colormap_callback(sender, app_data):
         oldmap = world.colormap_mode
         world.colormap_mode = app_data
@@ -727,9 +724,9 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
 
     def update_camera_position():
         nonlocal eye
-        x = camera_distance * np.cos(elevation) * np.cos(azimuth)
-        y = camera_distance * np.sin(elevation)
-        z = camera_distance * np.cos(elevation) * np.sin(azimuth)
+        x = (camera_distance * np.cos(elevation) * np.cos(azimuth)) * min_height
+        y = (camera_distance * np.sin(elevation)) * min_height
+        z = (camera_distance * np.cos(elevation) * np.sin(azimuth)) * min_height
         eye = np.array([x, y, z], dtype=np.float32)
         
         dpg.set_value("camera_info", 
@@ -818,8 +815,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
 
     update_colormap_callback(None, "plates")
     update_camera_position()
-    dpg.setup_dearpygui()
-    dpg.show_viewport()
+    
     dpg.set_primary_window("primary", True)
     
     while dpg.is_dearpygui_running():
@@ -845,8 +841,8 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
                                 parent="draw_area")
     
         dpg.render_dearpygui_frame()
-    
-    dpg.destroy_context()
+    #
+    # dpg.destroy_context()
 
 if __name__ == "__main__":
     render_world()
