@@ -467,7 +467,6 @@ def triface(polys, visible_face_indices):
         
         if n < 3:
             continue
-            
         if n == 3:
             result[idx] = valid_verts
             idx += 1
@@ -486,7 +485,7 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
                near: float = 1.0, far: float = 1000) -> tuple[list[np.ndarray], list, list[np.ndarray]]:
     
     viewMatrix, projMatrix, view_dir = comped(fovfl, lookat, eye, up, res[0], res[1], far, near)
-        
+
     all_screen_verts = []
     all_visible_tris = []
     all_depths = []

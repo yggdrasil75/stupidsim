@@ -662,9 +662,15 @@ class World:
             self.update_vertices_based_on_heightmap()
             self.update_colors()
 
-def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20):
+def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20, viewport = None, context = None):
+
     world = World(
-        sphere_mesh=create_sphere_mesh(radius=(min_height+max_height) / 2, segments=resolution, rings=resolution, deformable=False),
+        sphere_mesh=create_sphere_mesh(
+            #radius=(min_height+max_height) / 2, 
+            radius=1,
+            segments=resolution, 
+            rings=resolution, 
+            deformable=False),
         plate_count=np.array(plate_count, dtype=np.int32),
         min_height_value=min_height,
         max_height_value=max_height
@@ -678,6 +684,12 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
     azimuth = np.arctan2(eye[2], eye[0])
     elevation = np.arcsin(eye[1] / camera_distance)
     
+    
+    if viewport is not None: viewport = dpg.create_viewport(title='Procedural World', width=1000, height=700)
+    if context is not None: dpgContext = dpg.create_context()
+    else: dpgContext = context
+    
+
     def update_colormap_callback(sender, app_data):
         oldmap = world.colormap_mode
         world.colormap_mode = app_data
@@ -724,9 +736,9 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
 
     def update_camera_position():
         nonlocal eye
-        x = (camera_distance * np.cos(elevation) * np.cos(azimuth)) * min_height
-        y = (camera_distance * np.sin(elevation)) * min_height
-        z = (camera_distance * np.cos(elevation) * np.sin(azimuth)) * min_height
+        x = (camera_distance * np.cos(elevation) * np.cos(azimuth)) #* min_height
+        y = (camera_distance * np.sin(elevation)) #* min_height
+        z = (camera_distance * np.cos(elevation) * np.sin(azimuth)) #* min_height
         eye = np.array([x, y, z], dtype=np.float32)
         
         dpg.set_value("camera_info", 
@@ -815,11 +827,12 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
 
     update_colormap_callback(None, "plates")
     update_camera_position()
-    
+    dpg.setup_dearpygui(viewport=viewport)
+    dpg.show_viewport()
     dpg.set_primary_window("primary", True)
     
     while dpg.is_dearpygui_running():
-        print_timing_stats()
+        #print_timing_stats()
         world.simulate_erosion(steps=0)
 
         dpg.delete_item("draw_area", children_only=True)
@@ -839,10 +852,10 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
                 color = colors_np[tri[0]].tolist()
                 dpg.draw_triangle(p1, p2, p3, color=color, fill=color, 
                                 parent="draw_area")
-    
+        print("Still running")
         dpg.render_dearpygui_frame()
-    #
-    # dpg.destroy_context()
+    
+    dpg.destroy_context()
 
 if __name__ == "__main__":
     render_world()

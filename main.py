@@ -1,6 +1,9 @@
 import dearpygui.dearpygui as dpg
 from world import render_world
 
+viewport = None
+dpgcontext = None
+
 def update_slider_limits():
     # Ensure mountains are always higher than depths
     depths = dpg.get_value("depths_value")
@@ -76,6 +79,7 @@ def show_configure_window():
         )
 
 def start_simulation():
+    global viewport, dpgcontext
     # Remove the config window
     resolution=dpg.get_value("resolution_value")
     min_height=dpg.get_value("depths_value")
@@ -88,12 +92,15 @@ def start_simulation():
         resolution=resolution,
         min_height=min_height,
         max_height=max_height,
-        plate_count=plate_count
+        plate_count=plate_count,
+        viewport = viewport,
+        context = dpgcontext
     )
 
 def main():
-    dpg.create_context()
-    dpg.create_viewport(title='Simulation Menu', width=600, height=400)
+    global viewport, dpgcontext
+    dpgcontext = dpg.create_context()
+    viewport = dpg.create_viewport(title='Simulation Menu', width=600, height=400)
     
     with dpg.window(label="Main Menu", tag="main", width=600, height=400):
         dpg.add_text("Simulation Main Menu", pos=[200, 50])
@@ -119,7 +126,7 @@ def main():
     dpg.setup_dearpygui()
     dpg.show_viewport()
     dpg.start_dearpygui()
-    dpg.destroy_context()
+    #dpg.destroy_context()
 
 if __name__ == "__main__":
     main()
