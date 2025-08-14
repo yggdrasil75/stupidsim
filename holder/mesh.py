@@ -1,5 +1,7 @@
+from collections import OrderedDict
 from dataclasses import dataclass, field
 import heapq
+from weakref import WeakKeyDictionary
 import numba
 import numpy as np
 #from globals import DEVICE
@@ -8,7 +10,7 @@ from numba import njit, float32, types, int64, jit, int32
 from numba.typed import typedlist
 from scipy.sparse import csr_matrix
 
-_mesh_cache = {}
+_mesh_cache = OrderedDict()
 
 @njit(cache=True)
 def triangulate(polys):
@@ -490,8 +492,12 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
     all_visible_tris = []
     all_depths = []
 
+    eyet = tuple(eye)
+    lot = tuple(lookat)
+    tup = tuple(up)
+    rest = tuple(res)
     for obj in meshes:
-        cache_key = (id(obj), tuple(eye), tuple(lookat), tuple(up))
+        cache_key = (id(obj), eyet, lot, tup, rest)
         if cache_key in _mesh_cache and not obj._needs_neighbor_update:
             screen_verts, visible_tris, depths = _mesh_cache[cache_key]
         else:
@@ -511,8 +517,8 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             screen_verts, view_verts = compedObj(obj.vertices, viewMatrix, projMatrix, res[0], res[1])
             
             # Get triangles from visible faces
-            print(numba.typeof(obj.polys))
-            print(numba.typeof(visible_face_indices))
+            #print(numba.typeof(obj.polys))
+            #print(numba.typeof(visible_face_indices))
             triangles = triface(obj.polys, visible_face_indices)
             
             if len(triangles) == 0:
@@ -534,32 +540,11 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             depths = np.mean(tri_verts_view[visible_mask][:, :, 2], axis=1)
 
             _mesh_cache[cache_key] = (screen_verts, visible_tris, depths)
+            if len(_mesh_cache) > 100:
+                _mesh_cache.popitem(last=False)
 
         all_screen_verts.append(screen_verts)
         all_visible_tris.append(visible_tris)
         all_depths.append(depths)
 
     return all_screen_verts, all_visible_tris, all_depths
-
-
-@time_function
-def project_to_image(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.ndarray, 
-               fovfl: float = 90.0, res: tuple[int,int] = (800,600), 
-               near: float = 1.0, far: float = 1000) -> np.ndarray:
-    """
-    Rasterize the projected vertices and triangles into an image.
-    
-    Args:
-        screen_verts_list: List of screen-space vertices for each mesh
-        visible_tris_list: List of visible triangles for each mesh
-        colors_list: List of color arrays for each mesh
-        res: Resolution of the output image (width, height)
-    
-    Returns:
-        np.ndarray: Rasterized image as a uint8 array (H, W, 3)
-    """
-    # Initialize image buffer
-    project_2d(meshes, eye, lookat, up, fovfl, res, near, far)
-    
-    
-    return image
