@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 import random
 import numba
 import numpy as np
-from holder.mesh import mesh, project_2d
+from holder.mesh import mesh, project_2d, project_to_image
 from globals import DEVICE
 from shapes.sphere import create_sphere_mesh
 import dearpygui.dearpygui as dpg
@@ -685,9 +685,9 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
     elevation = np.arcsin(eye[1] / camera_distance)
     
     
-    if viewport is not None: viewport = dpg.create_viewport(title='Procedural World', width=1000, height=700)
-    if context is not None: dpgContext = dpg.create_context()
+    if context is None: dpgContext = dpg.create_context()
     else: dpgContext = context
+    if viewport is None: viewport = dpg.create_viewport(title='Procedural World', width=1000, height=700)
     
 
     def update_colormap_callback(sender, app_data):
@@ -830,7 +830,31 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
     dpg.setup_dearpygui(viewport=viewport)
     dpg.show_viewport()
     dpg.set_primary_window("primary", True)
-    
+
+    # while dpg.is_dearpygui_running():
+    #     print("DPG IS RUNNING")
+    #     world.simulate_erosion(steps=0)
+
+    #     dpg.delete_item("draw_area", children_only=True)
+        
+    #     # Project the mesh and get the raster image
+    #     screen_verts, visible_tris, depths = project_2d(
+    #         [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=(800, 600)
+    #     )
+        
+    #     if screen_verts and visible_tris[0]:
+    #         # Create the raster image
+    #         colors_list = [world.sphere_mesh.color]
+    #         image = project_to_image(screen_verts, visible_tris, colors_list, res=(800, 600))
+    #         dpg.add_raw_texture("texture_tag", image)
+    #         # Simply draw the image as a pixel array
+    #         dpg.add_image(
+    #             "texture_tag"  # The numpy array
+    #         )
+        
+    #     print("Still running")
+    #     dpg.render_dearpygui_frame()
+
     while dpg.is_dearpygui_running():
         #print_timing_stats()
         world.simulate_erosion(steps=0)
