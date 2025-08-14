@@ -58,7 +58,7 @@ def triangulate(polys):
 def _partition_faces(_vertices, polys):
     _directional_faces = [[] for _ in range(26)]
 
-    # Predefined directions for all 22 groups
+    # Predefined directions for all 26 groups
     directions = []
     for x in [-1.0, 0.0, 1.0]:
         for y in [-1.0, 0.0, 1.0]:
@@ -492,6 +492,7 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
     all_visible_tris = []
     all_depths = []
 
+    # Cache key components (immutable types)
     eyet = tuple(eye)
     lot = tuple(lookat)
     tup = tuple(up)
