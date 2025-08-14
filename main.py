@@ -1,178 +1,132 @@
+import dearpygui.dearpygui as dpg
+from world import render_world
 
-from collections import defaultdict
-from functools import lru_cache
-from matplotlib import pyplot as plt
-from matplotlib.widgets import RadioButtons, Slider
-import numpy as np
-import icosphere
-from mpl_toolkits.mplot3d import Axes3D
+viewport = None
+dpgcontext = None
 
-PLANET_RADIUS_KM = 6371.0
-SUBDIVISIONS = 3
-NUM_STEPS = 100
-cbar_obj = None  # colorbar is stupid. this fixes it.
-current_step = 0
+def update_slider_limits():
+    # Ensure mountains are always higher than depths
+    depths = dpg.get_value("depths_value")
+    dpg.configure_item("hills_value", min_value=depths)
+    
+    # Ensure depths are always lower than mountains
+    hills = dpg.get_value("hills_value")
+    dpg.configure_item("depths_value", max_value=hills)
 
-def visualize_world_spherical(vertices, faces, data, ax, data_type):
-    global cbar_obj
-    ax.clear()
-    ax.set_zorder(1)
+def show_configure_window():
+    # Remove the main menu window
+    dpg.delete_item("main")
+    
+    with dpg.window(label="Configure Simulation", width=400, height=300, tag="config"):
+        # World Resolution Slider
+        dpg.add_slider_int(
+            label="World Resolution",
+            min_value=64,
+            max_value=512,
+            default_value=64,
+            clamped=True,
+            format="%d",
+            callback=lambda s, a, u: None,
+            width=200,
+            tag="resolution_value"
+        )
+        dpg.add_text("Higher will be slower but better", color=[150, 150, 150])
+        
+        # Depths Slider
+        dpg.add_slider_int(
+            label="Depths",
+            min_value=3000,  # Reasonable minimum
+            max_value=7000,  # Will be updated when mountains changes
+            default_value=6357,
+            clamped=True,
+            format="%d km",
+            callback=update_slider_limits,
+            width=200,
+            tag="depths_value"
+        )
+        dpg.add_text("Depths are at 6357 km on Earth", color=[150, 150, 150])
+        
+        # Mountains Slider
+        dpg.add_slider_int(
+            label="Mountains",
+            min_value=6357,  # Will be updated when depths changes
+            max_value=9000,  # Reasonable maximum
+            default_value=6378,
+            clamped=True,
+            format="%d km",
+            callback=update_slider_limits,
+            width=200,
+            tag="hills_value"
+        )
+        dpg.add_text("The tallest mounts on Earth are at 6378 km", color=[150, 150, 150])
+        
+        dpg.add_slider_int(
+            label="Plates",
+            min_value=10,
+            max_value=25,
+            default_value=20,
+            clamped=True,
+            tag="plate_count_value"
+        )
+        dpg.add_text("Earth has 15 plates, please set this above your goal though as randomization may drop a few plates.")
 
-    if data_type == 'elevation':
-        # Use vertex data directly, not face averages
-        face_data = data  #data is already vertex elevations
-        vmin = np.min(data)
-        vmax = np.max(data)
-        #print(f"Min Elevation: {vmin}, Max Elevation: {vmax}")
-		# Normalize data using the original data's vmin and vmax
-        norm_data = (face_data - vmin) / (vmax - vmin)      
-        colors = plt.cm.terrain(norm_data) #removed clipping as it caused issues with the terrain normalization
-        cmap = 'terrain'
-        title = 'Elevation'
-        cbar_label = 'Elevation (km)'
-    elif data_type == 'Water':
-        # Use vertex data directly, not face averages
-        face_data = data  #data is already vertex elevations
-        vmin = np.min(data)
-        vmax = np.max(data)
-        print(f"Min fluid: {vmin}, Max fluid: {vmax}")
-		# Normalize data using the original data's vmin and vmax
-        norm_data = (face_data - vmin) / (vmax - vmin)      
-        colors = plt.cm.terrain(norm_data) #removed clipping as it caused issues with the terrain normalization
-        cmap = 'Blues'
-        title = 'Surface Water'
-        cbar_label = 'water'
-    else:
-        # Default case if data_type is not 'elevation'
-        face_data = np.zeros(len(vertices))  # placeholder
-        colors = 'gray'
-        cmap = 'gray'
-        title = 'No Data'
-        cbar_label = 'Data Value'
+        # Start Simulation Button
+        dpg.add_button(
+            label="Start Simulation",
+            callback=start_simulation,
+            width=100,
+            height=30
+        )
 
+def start_simulation():
+    global viewport, dpgcontext
+    # Remove the config window
+    resolution=dpg.get_value("resolution_value")
+    min_height=dpg.get_value("depths_value")
+    max_height=dpg.get_value("hills_value")
+    plate_count=dpg.get_value("plate_count_value")
+    dpg.delete_item("config")
+    # Start the simulation with the configured parameters
+    print(f"Creating world with the following: res of {resolution}, depths are at {min_height}, mountain peaks are at {max_height}, plates have a max of {plate_count}")
+    render_world(
+        resolution=resolution,
+        min_height=min_height,
+        max_height=max_height,
+        plate_count=plate_count,
+        viewport = viewport,
+        context = dpgcontext
+    )
 
-    # Plot the mesh using vertex colors
-    mesh = ax.plot_trisurf(vertices[:, 0], vertices[:, 1], vertices[:, 2],
-                           triangles=faces,
-                           color='white',
-                           edgecolor='none',
-                           alpha=1)
-    mesh.set_array(face_data)
-    mesh.set_cmap(cmap)
-
-      # Colorbar Handling
-    if cbar_obj is None:
-        cbar_obj = plt.colorbar(mesh, ax=ax, shrink=0.5, aspect=20)
-    else:
-        cbar_obj.mappable.set_clim(vmin=vmin, vmax=vmax)  # Update colorbar range
-        cbar_obj.mappable = mesh
-        cbar_obj.update_normal(mesh)  # Update color
-
-    cbar_obj.set_label(cbar_label)
-    cbar_obj.ax.tick_params(labelsize=8) # Reduce colorbar label size
-
-    ax.set_title(title, fontsize=12) # Reduce title fontsize
-    ax.set_xlabel("X", fontsize=8)   # Reduce axis label fontsize
-    ax.set_ylabel("Y", fontsize=8)
-    ax.set_zlabel("Z", fontsize=8)
-    ax.tick_params(axis='both', which='major', labelsize=6) # Reduce tick label size
-    ax.set_aspect('equal')
-    ax.view_init(elev=30, azim=45)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_zticks([])
-    ax.set_title(title)
+def main():
+    global viewport, dpgcontext
+    dpgcontext = dpg.create_context()
+    viewport = dpg.create_viewport(title='Simulation Menu', width=600, height=400)
+    
+    with dpg.window(label="Main Menu", tag="main", width=600, height=400):
+        dpg.add_text("Simulation Main Menu", pos=[200, 50])
+        
+        # Play Button
+        dpg.add_button(
+            label="Play",
+            callback=show_configure_window,
+            pos=[250, 150],
+            width=100,
+            height=50
+        )
+        
+        # Quit Button
+        dpg.add_button(
+            label="Quit",
+            callback=lambda: dpg.stop_dearpygui(),
+            pos=[250, 220],
+            width=100,
+            height=50
+        )
+    
+    dpg.setup_dearpygui()
+    dpg.show_viewport()
+    dpg.start_dearpygui()
+    #dpg.destroy_context()
 
 if __name__ == "__main__":
-    subdivisions = SUBDIVISIONS
-    radius = PLANET_RADIUS_KM  # Use the global planet radius
-    num_steps = NUM_STEPS
-
-    world = icosphere.run_simulation(subdivisions=subdivisions, elevationRange=20000.0, 
-                                     steps=num_steps, totalWaterZL=1386.0, timestepSeconds=3600.0)
-    final_faces_cpp = world[-1].faces
-
-
-    # Convert C++ vectors to NumPy arrays
-    num_vertices = len(world[-1].vertices)
-    vertices_np = np.zeros((num_vertices, 3))
-
-    num_faces = len(final_faces_cpp)
-    elevations_np = np.zeros(num_faces)
-    surfaceWater_np = np.zeros(num_faces)
-    faces_np = np.zeros((num_faces, 3), dtype=int)
-    current_data_type='elevation'
-    figdata = np.zeros(num_faces)
-    for i, v in enumerate(world[-1].vertices):
-        vertices_np[i, :] = [v.x, v.y, v.z]
-
-    def getWorldPoint(val):
-        global figdata
-        #indices = {index: vertex for vertex, index in world[val].vertex_indices.items()}  
-
-        #indices = world[val].vertex_indices
-        for i, face in enumerate(final_faces_cpp):
-            #print(indices)
-            faces_np[i, 0] = face.a
-            faces_np[i, 1] = face.b
-            faces_np[i, 2] = face.c
-            elevations_np[i] = face.average_elevation
-            surfaceWater_np[i] = face.surfaceWater
-            if current_data_type == 'elevation':
-                figdata = elevations_np
-            elif current_data_type == 'Water':
-                figdata = surfaceWater_np
-
-    fig = plt.figure()
-    ax = fig.add_subplot(111, projection='3d')
-
-    # Create axes for the radio buttons
-    rax = plt.axes([0.05, 0.7, 0.15, 0.15])
-    radio = RadioButtons(rax, ('Elevation', 'Water'), active=0)
-    
-
-    getWorldPoint(0)
-    visualize_world_spherical(vertices_np, faces_np, figdata, ax, data_type=current_data_type)
-
-    def update_view():
-        visualize_world_spherical(vertices_np, faces_np, data=figdata, ax=ax, data_type=current_data_type)
-        fig.canvas.draw_idle()
-
-
-    #plt.tight_layout()
-    ax_slider = plt.axes([0.25, 0.1, 0.5, 0.03])
-    step_slider = Slider(ax=ax_slider, label='Step', valmin=0, 
-                         valmax=num_steps - 1, valinit=current_step, valstep=1)
-    
-    
-    def update_data_type(label):
-        global figdata, current_data_type
-        if label == 'Elevation':
-            current_data_type = 'elevation'
-            figdata = elevations_np
-        elif label == 'Water':
-            current_data_type = 'Water'
-            figdata = surfaceWater_np
-        
-        update_view()
-    radio.on_clicked(update_data_type)
-
-    def update_step(val):
-        global current_step, figdata
-        current_step = int(step_slider.val)
-        getWorldPoint(val)
-        
-        # Use the current data type to determine which data to show
-        if current_data_type == 'elevation':
-            figdata = elevations_np
-        else:
-            figdata = surfaceWater_np
-            
-        update_view()
-
-    step_slider.on_changed(update_step)
-
-
-    plt.subplots_adjust(bottom=0.15, left=0.2) # Add space at the bottom for the slider
-
-    plt.show()
+    main()

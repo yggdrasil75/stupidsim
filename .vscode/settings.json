@@ -104,5 +104,6 @@
         "__bit_reference": "cpp",
         "__split_buffer": "cpp",
         "__tree": "cpp"
-    }
+    },
+    "python.REPL.enableREPLSmartSend": false
 }
