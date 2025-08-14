@@ -484,15 +484,15 @@ def triface(polys, visible_face_indices):
 @time_function
 def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.ndarray, 
                fovfl: float = 90.0, res: tuple[int,int] = (800,600), 
-               near: float = 1.0, far: float = 1000) -> tuple[list[np.ndarray], list, list[np.ndarray]]:
+               near: float = 1.0, far: float = 1000) -> tuple[list[np.ndarray], list, list[np.ndarray], list[np.ndarray]]:
     
     viewMatrix, projMatrix, view_dir = comped(fovfl, lookat, eye, up, res[0], res[1], far, near)
 
     all_screen_verts = []
     all_visible_tris = []
     all_depths = []
+    all_colors = []
 
-    # Cache key components (immutable types)
     eyet = tuple(eye)
     lot = tuple(lookat)
     tup = tuple(up)
@@ -500,7 +500,7 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
     for obj in meshes:
         cache_key = (id(obj), eyet, lot, tup, rest)
         if cache_key in _mesh_cache and not obj._needs_neighbor_update:
-            screen_verts, visible_tris, depths = _mesh_cache[cache_key]
+            screen_verts, visible_tris, depths, colors = _mesh_cache[cache_key]
         else:
             mesh_center = np.mean(obj.vertices, axis=0)
             view_center = np.dot(np.append(mesh_center, 1), viewMatrix.T)[:3]
@@ -540,12 +540,101 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             visible_tris = triangles[visible_mask].tolist()
             depths = np.mean(tri_verts_view[visible_mask][:, :, 2], axis=1)
 
-            _mesh_cache[cache_key] = (screen_verts, visible_tris, depths)
+            obj_colors = obj.color
+            if obj_colors.shape[0] == 1:
+                colors = np.tile(obj_colors, (len(visible_tris), 1))
+            else:
+                tri_vert_colors = obj_colors[visible_tris]  # Shape: (n_tris, 3, color_channels)
+                colors = np.mean(tri_vert_colors, axis=1).astype(np.uint8)
+            
+            _mesh_cache[cache_key] = (screen_verts, visible_tris, depths, colors)
             if len(_mesh_cache) > 100:
                 _mesh_cache.popitem(last=False)
 
         all_screen_verts.append(screen_verts)
         all_visible_tris.append(visible_tris)
         all_depths.append(depths)
+        all_colors.append(colors)
 
-    return all_screen_verts, all_visible_tris, all_depths
+    return all_screen_verts, all_visible_tris, all_depths, all_colors
+
+
+@time_function
+def rasterize(vertices, tris, depths, colors, width, height):
+    """
+    Rasterize triangles onto an image using numpy.
+    
+    Args:
+        vertices: np.ndarray of shape (2, n) containing x,y coordinates
+        tris: np.ndarray of shape (m, 3) containing vertex indices for each triangle
+        depths: np.ndarray of shape (m,) containing z-depth for each triangle
+        colors: np.ndarray of shape (n, 3) containing RGB colors for each vertex
+        width: output image width
+        height: output image height
+    
+    Returns:
+        Rasterized image as np.ndarray of shape (height, width, 3)
+    """
+    # Initialize output image and depth buffer
+    image = np.zeros((height, width, 3), dtype=np.float32)
+    depth_buffer = np.full((height, width), np.inf, dtype=np.float32)
+    
+    # Sort triangles by depth (back to front for painter's algorithm)
+    sorted_indices = np.argsort(-depths)
+    
+    # Create grid of pixel coordinates
+    y, x = np.mgrid[0:height, 0:width]
+    pixel_coords = np.column_stack((x.ravel(), y.ravel()))
+    
+    for tri_idx in sorted_indices:
+        # Get triangle vertices
+        v_idx = tris[tri_idx]
+        tri_verts = vertices[:, v_idx].T  # shape (3, 2)
+        
+        # Compute barycentric coordinates for all pixels
+        v0, v1, v2 = tri_verts
+        denom = (v1[1] - v2[1]) * (v0[0] - v2[0]) + (v2[0] - v1[0]) * (v0[1] - v2[1])
+        
+        # Vectorized computation of barycentric coordinates
+        w0 = ((v1[1] - v2[1]) * (pixel_coords[:, 0] - v2[0]) + (v2[0] - v1[0]) * (pixel_coords[:, 1] - v2[1]))
+        w1 = ((v2[1] - v0[1]) * (pixel_coords[:, 0] - v2[0]) + (v0[0] - v2[0]) * (pixel_coords[:, 1] - v2[1]))
+        w0 = w0 / denom
+        w1 = w1 / denom
+        w2 = 1.0 - w0 - w1
+        
+        # Find pixels inside the triangle (all barycentric coords >= 0)
+        mask = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+        
+        if not np.any(mask):
+            continue
+            
+        # Get pixel indices inside the triangle
+        inside_pixels = pixel_coords[mask]
+        pixel_indices = inside_pixels.astype(int)
+        
+        # Compute barycentric coordinates only for inside pixels
+        w0_inside = w0[mask]
+        w1_inside = w1[mask]
+        w2_inside = w2[mask]
+        
+        # Compute depth for each pixel (using barycentric interpolation)
+        pixel_depths = depths[tri_idx]  # For simplicity, using triangle depth
+        
+        # Get colors for each vertex
+        tri_colors = colors[v_idx]  # shape (3, 3)
+        
+        # Interpolate colors using barycentric coordinates
+        interpolated_colors = (
+            w0_inside[:, np.newaxis] * tri_colors[0] +
+            w1_inside[:, np.newaxis] * tri_colors[1] +
+            w2_inside[:, np.newaxis] * tri_colors[2]
+        )
+        
+        # Update pixels where this triangle is closer than current depth buffer
+        for i, (px, py) in enumerate(pixel_indices):
+            if 0 <= px < width and 0 <= py < height:
+                if pixel_depths < depth_buffer[py, px]:
+                    depth_buffer[py, px] = pixel_depths
+                    image[py, px] = interpolated_colors[i]
+    
+    return image

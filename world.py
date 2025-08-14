@@ -794,7 +794,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
                 horizontal=True
             )
         
-        with dpg.drawlist(width=800, height=600, tag="draw_area"):
+        with dpg.drawlist(width=-1, height=-1, tag="draw_area"):
             pass
     
     with dpg.window(label='Camera Controls'):
@@ -844,18 +844,20 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
 
         dpg.delete_item("draw_area", children_only=True)
         
-        screen_verts, visible_tris, depths = project_2d(
+        screen_verts, visible_tris, depths, colors = project_2d(
             [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=res
             )
         
         if screen_verts and visible_tris[0]:
             points_np = screen_verts[0]
-            colors_np = world.sphere_mesh.color
-            for tri in visible_tris[0]:
+            #colors_np = world.sphere_mesh.color
+            colors_np = colors[0]
+            for i, tri in enumerate(visible_tris[0]):
                 p1 = points_np[tri[0]].tolist()
                 p2 = points_np[tri[1]].tolist()
                 p3 = points_np[tri[2]].tolist()
-                color = colors_np[tri[0]].tolist()
+                #print(colors_np)
+                color = colors_np[i].tolist()
                 dpg.draw_triangle(p1, p2, p3, color=color, fill=color, 
                                 parent="draw_area")
         #print("Still running")
