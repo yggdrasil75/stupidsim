@@ -543,10 +543,9 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
 
 
 @time_function
-def project_to_image(screen_verts_list: list[np.ndarray], 
-                    visible_tris_list: list, 
-                    colors_list: list[np.ndarray], 
-                    res: tuple[int, int] = (800, 600)) -> np.ndarray:
+def project_to_image(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.ndarray, 
+               fovfl: float = 90.0, res: tuple[int,int] = (800,600), 
+               near: float = 1.0, far: float = 1000) -> np.ndarray:
     """
     Rasterize the projected vertices and triangles into an image.
     
@@ -560,79 +559,7 @@ def project_to_image(screen_verts_list: list[np.ndarray],
         np.ndarray: Rasterized image as a uint8 array (H, W, 3)
     """
     # Initialize image buffer
-    image = np.zeros((res[1], res[0], 3), dtype=np.uint8)
-    depth_buffer = np.full((res[1], res[0]), np.inf, dtype=np.float32)
+    project_2d(meshes, eye, lookat, up, fovfl, res, near, far)
     
-    for screen_verts, visible_tris, colors in zip(screen_verts_list, visible_tris_list, colors_list):
-        if len(visible_tris) == 0:
-            continue
-            
-        # Convert triangles to numpy array if needed
-        triangles = np.array(visible_tris, dtype=np.int32)
-        
-        # Get vertex colors (handle both per-vertex and per-mesh colors)
-        if len(colors) == len(screen_verts):
-            # Per-vertex colors
-            vert_colors = colors
-        else:
-            # Single color for whole mesh
-            vert_colors = np.tile(colors[0], (len(screen_verts), 1))
-        
-        # Check if vertices have z-coordinates
-        has_depth = screen_verts.shape[1] > 2
-        
-        # Process each triangle
-        for tri in triangles:
-            # Get screen coordinates and colors for this triangle
-            v0, v1, v2 = screen_verts[tri]
-            c0, c1, c2 = vert_colors[tri]
-            
-            # Convert to integer coordinates
-            x0, y0 = int(round(v0[0])), int(round(v0[1]))
-            x1, y1 = int(round(v1[0])), int(round(v1[1]))
-            x2, y2 = int(round(v2[0])), int(round(v2[1]))
-            
-            # Get bounding box of triangle
-            min_x = max(0, min(x0, x1, x2))
-            max_x = min(res[0]-1, max(x0, x1, x2))
-            min_y = max(0, min(y0, y1, y2))
-            max_y = min(res[1]-1, max(y0, y1, y2))
-            
-            if min_x >= max_x or min_y >= max_y:
-                continue
-                
-            # Compute barycentric coordinates for each pixel in bounding box
-            tri_area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
-            if tri_area == 0:
-                continue
-                
-            inv_tri_area = 1.0 / tri_area
-            
-            for y in range(min_y, max_y + 1):
-                for x in range(min_x, max_x + 1):
-                    # Barycentric coordinates
-                    w0 = (x1 - x) * (y2 - y) - (x2 - x) * (y1 - y)
-                    w1 = (x2 - x) * (y0 - y) - (x0 - x) * (y2 - y)
-                    w2 = (x0 - x) * (y1 - y) - (x1 - x) * (y0 - y)
-                    
-                    # Check if point is inside triangle
-                    if w0 >= 0 and w1 >= 0 and w2 >= 0:
-                        # Normalize weights
-                        w0 *= inv_tri_area
-                        w1 *= inv_tri_area
-                        w2 *= inv_tri_area
-                        
-                        if has_depth:
-                            # Depth test (using z-buffer)
-                            depth = w0 * v0[2] + w1 * v1[2] + w2 * v2[2]
-                            if depth >= depth_buffer[y, x]:
-                                continue
-                            depth_buffer[y, x] = depth
-                        
-                        # Interpolate color
-                        r = int(w0 * c0[0] + w1 * c1[0] + w2 * c2[0])
-                        g = int(w0 * c0[1] + w1 * c1[1] + w2 * c2[1])
-                        b = int(w0 * c0[2] + w1 * c1[2] + w2 * c2[2])
-                        image[y, x] = np.clip([r, g, b], 0, 255)
     
     return image

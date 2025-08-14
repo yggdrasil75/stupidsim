@@ -1,3 +1,4 @@
+import array
 import copy
 from dataclasses import dataclass, field
 import random
@@ -831,53 +832,55 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
     dpg.show_viewport()
     dpg.set_primary_window("primary", True)
 
-    # while dpg.is_dearpygui_running():
-    #     print("DPG IS RUNNING")
-    #     world.simulate_erosion(steps=0)
-
-    #     dpg.delete_item("draw_area", children_only=True)
-        
-    #     # Project the mesh and get the raster image
-    #     screen_verts, visible_tris, depths = project_2d(
-    #         [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=(800, 600)
-    #     )
-        
-    #     if screen_verts and visible_tris[0]:
-    #         # Create the raster image
-    #         colors_list = [world.sphere_mesh.color]
-    #         image = project_to_image(screen_verts, visible_tris, colors_list, res=(800, 600))
-    #         dpg.add_raw_texture("texture_tag", image)
-    #         # Simply draw the image as a pixel array
-    #         dpg.add_image(
-    #             "texture_tag"  # The numpy array
-    #         )
-        
-    #     print("Still running")
-    #     dpg.render_dearpygui_frame()
-
     while dpg.is_dearpygui_running():
-        #print_timing_stats()
+        res=(int(dpg.get_item_width('primary') or 1), int(dpg.get_item_height('primary') or 1))
+        print("DPG IS RUNNING")
         world.simulate_erosion(steps=0)
 
         dpg.delete_item("draw_area", children_only=True)
         
+        # Project the mesh and get the raster image
         screen_verts, visible_tris, depths = project_2d(
-            [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=(800, 600)
-            )
+            [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=res
+        )
         
         if screen_verts and visible_tris[0]:
-            points_np = screen_verts[0]
-            colors_np = world.sphere_mesh.color
-            #depths_np = depths[0]
-            for tri in visible_tris[0]:
-                p1 = points_np[tri[0]].tolist()
-                p2 = points_np[tri[1]].tolist()
-                p3 = points_np[tri[2]].tolist()
-                color = colors_np[tri[0]].tolist()
-                dpg.draw_triangle(p1, p2, p3, color=color, fill=color, 
-                                parent="draw_area")
+            # Create the raster image
+            colors_list = [world.sphere_mesh.color]
+            image = project_to_image(screen_verts, visible_tris, colors_list, res=res)
+            print(image)
+            dpg.add_raw_texture(width=res[0], height=res[1], default_value=image, format=dpg.mvFormat_Float_rgb, tag="texture_tag")
+            # Simply draw the image as a pixel array
+            dpg.add_image(
+                "texture_tag"  # The numpy array
+            )
+        
         print("Still running")
         dpg.render_dearpygui_frame()
+
+    # while dpg.is_dearpygui_running():
+    #     #print_timing_stats()
+    #     world.simulate_erosion(steps=0)
+
+    #     dpg.delete_item("draw_area", children_only=True)
+        
+    #     screen_verts, visible_tris, depths = project_2d(
+    #         [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=(800, 600)
+    #         )
+        
+    #     if screen_verts and visible_tris[0]:
+    #         points_np = screen_verts[0]
+    #         colors_np = world.sphere_mesh.color
+    #         #depths_np = depths[0]
+    #         for tri in visible_tris[0]:
+    #             p1 = points_np[tri[0]].tolist()
+    #             p2 = points_np[tri[1]].tolist()
+    #             p3 = points_np[tri[2]].tolist()
+    #             color = colors_np[tri[0]].tolist()
+    #             dpg.draw_triangle(p1, p2, p3, color=color, fill=color, 
+    #                             parent="draw_area")
+    #     print("Still running")
+    #     dpg.render_dearpygui_frame()
     
     dpg.destroy_context()
 
