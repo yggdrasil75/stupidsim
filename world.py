@@ -691,7 +691,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
     
     if context is None: dpgContext = dpg.create_context()
     else: dpgContext = context
-    if viewport is None: viewport = dpg.create_viewport(title='Procedural World', width=1000, height=700)
+    if viewport is None: viewport = dpg.create_viewport(title='Procedural World', width=800, height=600)
     
 
     def update_colormap_callback(sender, app_data):
@@ -783,7 +783,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
     with dpg.window(label="Legend", tag="legend_window", show=True, width=200, pos=(800, 0)):
         pass
 
-    with dpg.window(label="3D View", tag="primary", width=800, height=600):
+    with dpg.window(label="3D View", tag="primary", width=-1, height=-1):
         with dpg.group(horizontal=True):
             dpg.add_text("Colormap:")
             dpg.add_radio_button(
@@ -837,8 +837,8 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
 
     while dpg.is_dearpygui_running():
         res=(int(dpg.get_item_width('primary') or 1), int(dpg.get_item_height('primary') or 1))
-        dpg.set_item_width("draw_area", res[1])
-        dpg.set_item_height("draw_area", res[0])
+        dpg.set_item_width("draw_area", res[0])
+        dpg.set_item_height("draw_area", res[1])
         #print_timing_stats()
         #world.simulate_erosion(steps=0)
 
