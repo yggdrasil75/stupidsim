@@ -1,7 +1,9 @@
 C++ version install instructions:
-```git clone https://github.com/yggdrasil75/stupidsim
+```
+git clone https://github.com/yggdrasil75/stupidsim
 cd stupdidsim
-python -m venv venv```
+python -m venv venv
+```
 
 ON WINDOWS:
 `venv\scripts\activate`
