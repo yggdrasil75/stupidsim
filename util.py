@@ -165,3 +165,19 @@ def print_timing_stats(mode: Literal['basic', 'enhanced'] = 'enhanced'):
                   f"{p.get('p99', 0):<10.6f} {p.get('p99.9', 0):<10.6f} {p.get('max', 0):<10.6f}")
         
         print("-" * 110)
+
+@njit
+def spherical_distance(point1: np.ndarray, point2: np.ndarray, radius: float) -> float:
+    unit_vector1 = normalize(point1)
+    unit_vector2 = normalize(point2)
+    
+    # Calculate the dot product between the two vectors
+    dot_product = np.dot(unit_vector1, unit_vector2)
+        
+    # Calculate the central angle between the two points
+    central_angle = np.arccos(dot_product)
+    
+    # Calculate the great-circle distance
+    distance = radius * central_angle
+    
+    return distance

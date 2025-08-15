@@ -10,117 +10,11 @@ import dearpygui.dearpygui as dpg
 from numba import njit, prange, int64, float32
 from plate import Plate
 import math
-from util import norm, time_function, print_timing_stats, make_2D_array
+from util import norm, spherical_distance, time_function, print_timing_stats, make_2D_array
 try:
     from PIL import Image
 except:
     pass
-
-@njit((int64[:], float32[:,:], float32[:,:], float32[:,:], float32[:], int64), cache=True)
-def _numba_grow_plates(plate_ids, neighbor_ndarrays, vertex_positions,
-                       plate_centers, growth_rates, num_vertices):    
-    assigned_mask = plate_ids != -1
-    assigned_indices = np.where(assigned_mask)[0]
-
-    if len(assigned_indices) == 0:
-        return plate_ids
-        
-    # Find frontier vertices in batches
-    frontier_list = []
-    batch_size = 1024  # Adjust based on memory constraints
-    
-    # First pass to calculate total size needed
-    total_neighbors = 0
-    for i in range(0, len(assigned_indices), batch_size):
-        batch_indices = assigned_indices[i:i+batch_size]
-        for idx in batch_indices:
-            total_neighbors += len(neighbor_ndarrays[idx])
-    
-    # Pre-allocate array for all neighbors
-    all_neighbors = np.empty(total_neighbors, dtype=np.int64)
-    pos = 0
-    
-    for i in range(0, len(assigned_indices), batch_size):
-        batch_indices = assigned_indices[i:i+batch_size]
-        
-        # Fill pre-allocated array with neighbors
-        for idx in batch_indices:
-            neighbors = neighbor_ndarrays[idx]
-            all_neighbors[pos:pos+len(neighbors)] = neighbors
-            pos += len(neighbors)
-        
-        # Find unassigned neighbors in this segment
-        segment = all_neighbors[:pos]  # Only the filled portion
-        unassigned = segment[plate_ids[segment] == -1]
-        if len(unassigned) > 0:
-            frontier_list.append(unassigned)
-        
-    if len(frontier_list) == 0:
-        return plate_ids
-        
-    # Second pass to concatenate frontier vertices (now with known sizes)
-    frontier_total = 0
-    for arr in frontier_list:
-        frontier_total += len(arr)
-    
-    frontier_verts = np.empty(frontier_total, dtype=np.int64)
-    pos = 0
-    for arr in frontier_list:
-        frontier_verts[pos:pos+len(arr)] = arr
-        pos += len(arr)
-    
-    frontier_verts = np.unique(frontier_verts)
-
-    # For each frontier vertex, find all plates that could claim it
-    frontier_pos = vertex_positions[frontier_verts]
-    dists = np.empty((len(frontier_verts), len(plate_centers)), dtype=np.float32)
-    for i in range(len(frontier_verts)):
-        for j in range(len(plate_centers)):
-            # Add some noise to the distance calculation
-            noise = 1.0 + (np.random.rand() * 0.2 - 0.1)  # ±10% noise
-            dists[i,j] = np.sqrt(np.sum((frontier_pos[i] - plate_centers[j])**2)) * noise
-
-    # Modified scoring - distance is less important, randomness more important
-    rand_factors = 0.8 + (np.random.rand(len(frontier_verts)) * 0.4)  # 0.8-1.2 range
-    distance_weight = 0.3  # Reduced from implicit 1.0 in original
-    scores = (growth_rates * rand_factors.reshape(-1, 1)) / (dists**distance_weight + 1e-6)
-
-    # Get all possible claims (plate, vertex pairs)
-    potential_plates = np.argmax(scores, axis=1)
-    potential_claims = np.empty((len(frontier_verts), 2), dtype=np.int64)
-    for i in range(len(frontier_verts)):
-        potential_claims[i,0] = frontier_verts[i]
-        potential_claims[i,1] = potential_plates[i]
-
-    # Sort claims by score to maintain realistic growth priority
-    max_scores = np.empty(len(frontier_verts), dtype=np.float32)
-    for i in range(len(frontier_verts)):
-        max_scores[i] = scores[i, potential_plates[i]]
-    sorted_indices = np.argsort(max_scores)[::-1]
-    sorted_claims = potential_claims[sorted_indices]
-
-    # Process claims in order, tracking which vertices get claimed
-    claimed = np.zeros(num_vertices, dtype=np.bool_)
-    for i in range(len(sorted_claims)):
-        vert_idx = sorted_claims[i,0]
-        plate_id = sorted_claims[i,1]
-        if not claimed[vert_idx]:
-            plate_ids[vert_idx] = plate_id
-            claimed[vert_idx] = True
-
-    return plate_ids
-
-@njit((int64[:], int64[:], float32[:,:]), cache=True)
-def _numba_check_containment(inner_verts, outer_verts_set, 
-                           neighbor_map) -> bool:
-    """
-    Numba-accelerated helper function to check plate containment.
-    """    
-    for vert in inner_verts:
-        for neighbor in neighbor_map[vert]:
-            if (neighbor not in outer_verts_set) and (neighbor not in inner_verts):
-                return False
-    return True
 
 #@njit(cache=True)
 def _update_elevations_a(plates, _heightmap):
@@ -164,7 +58,7 @@ def _update_elevations_b(plates, _heightmap, max_height, min_height):
 class World:
     sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=64, rings=64))
     sea_level: np.ndarray = field(default_factory=lambda: np.array(0.0, dtype=np.float32))
-    plate_count: np.ndarray = field(default_factory=lambda: np.array(20, dtype=np.int32))
+    plate_count: int = 20
     rainfall_rate: np.ndarray = field(default_factory=lambda: np.array(0.1, dtype=np.float32))
     evaporation_rate: np.ndarray = field(default_factory=lambda: np.array(0.05, dtype=np.float32))
     water_flow_max: np.ndarray = field(default_factory=lambda: np.array(1.0, dtype=np.float32))
@@ -190,6 +84,10 @@ class World:
         """Returns the maximum height from the heightmap"""
         return np.max(self.heightmap) if len(self.heightmap) > 0 else np.array(1.0)
 
+    @property
+    def radius(self):
+        return (self.min_height_value + self.max_height_value) / 4
+
     @time_function
     def __post_init__(self):
         # Initialize simulation state arrays based on the sphere mesh vertices
@@ -203,9 +101,7 @@ class World:
                         (self.max_height - self.min_height) + self.min_height
 
         print("Initializing plates...")
-        self._initialize_plates()
-        print("Validating plates...")
-        self._validate_and_reindex_plates()
+        self.gen_plates()
         print(f"Final plate count: {len(self.plates)}")
         for plate in self.plates:
             plate.calculate_mass()
@@ -214,272 +110,214 @@ class World:
         for plate in self.plates:
             plate.update_continental_borders(self.sphere_mesh.vertices)
 
-        unassigned = np.sum(self.plate_ids == -1)
-        if unassigned > 0:
-            print(f"Warning: {unassigned} vertices remain unassigned after plate validation")
-            self._assign_remaining_vertices()
-
         print("Initial world generation complete")
         self.plate_colors = np.random.randint(0, 256, (len(self.plates), 4), dtype=np.uint8)
         self.plate_colors[:, 3] = 255
         print(f'total vertices: {len(self.sphere_mesh.vertices)}')
 
-    @time_function
-    def _assign_remaining_vertices(self):
-        """Assign any remaining unassigned vertices to the nearest plate"""
-        unassigned = np.where(self.plate_ids == -1)[0]
-        if len(unassigned) == 0:
-            return
-            
-        vertex_positions = self.sphere_mesh.vertices
-        plate_centers = np.stack([vertex_positions[plate.vertex_ids[0]] 
-                                for plate in self.plates])
-        
-        for vert_idx in unassigned:
-            pos = vertex_positions[vert_idx]
-            distances = np.linalg.norm(plate_centers - pos, axis=1)
-            nearest_plate = np.argmin(distances)
-            self.plate_ids[vert_idx] = nearest_plate
-            self.plates[nearest_plate].vertex_ids = np.concatenate([self.plates[nearest_plate].vertex_ids, np.array([vert_idx], dtype=np.int64)])
-
-    @time_function
-    def _initialize_plates(self):
-        """Selects initial plate centers and creates Plate objects."""
-        num_vertices = len(self.sphere_mesh.vertices)
-        center_indices = np.random.permutation(num_vertices)[:self.plate_count]
-
-        for i in range(self.plate_count):
-            center_idx = int(center_indices[i])
-            plate_verts = np.array([center_idx], dtype=np.int64)
-
-            if np.random.rand() < 0.4:
-                plate = Plate.create_continental_plate(ID=i, vertex_ids=plate_verts)
-                plate.add_continental_center(center_idx)
-            else:
-                plate = Plate.create_oceanic_plate(ID=i, vertex_ids=plate_verts)
-            self.plates.append(plate)
-            self.plate_ids[center_idx] = i
-        print("Growing plates...")
-        self._grow_plates()
-
-        for i in range(self.plate_count):
-            for j in range(self.plate_count + i):
-                if self.is_plate_contained(i, j):
-                    self.merge_plates(i, j)
-        
-    @time_function
-    def _grow_plates(self):
-        """Optimized but still realistic plate growth using batched frontier processing."""
-        vertex_neighbors = self.sphere_mesh._neighbor_map['vertex_to_vertices']
-        num_vertices = len(self.sphere_mesh.vertices)
-        vertex_positions = self.sphere_mesh.vertices.astype(np.float32)
-        
-        # Precompute plate centers and growth rates
-        plate_centers = np.stack([vertex_positions[plate.vertex_ids[0]] 
-                                for plate in self.plates], dtype=np.float32)
-        growth_rates = np.array([plate.growth_rate for plate in self.plates], dtype=np.float32)
-        
-        # Convert neighbor map to list of arrays for faster access
-        neighbor_arrays = [np.array(neighbors, dtype=np.int64) 
-                         for neighbors in vertex_neighbors.values()]
-        
-        iteration = 0
-        while np.any(self.plate_ids == -1):
-            unassigned_count = np.sum(self.plate_ids == -1)
-            print(f"Iteration {iteration}: {unassigned_count} unassigned vertices remaining")
-            self.plate_ids = _numba_grow_plates(
-                self.plate_ids, 
-#                neighbor_arrays,
-                make_2D_array(neighbor_arrays)[0],
-
-                vertex_positions, 
-                plate_centers,
-                growth_rates, 
-                num_vertices
-            )
-            iteration += 1
-        
-        # Update Plate objects with their final vertex sets
-        for i, plate in enumerate(self.plates):
-            plate.vertex_ids = np.where(self.plate_ids == i)[0]
-
-    @time_function
-    def is_plate_contained(self, inner_plate_id: int, outer_plate_id: int) -> bool:
-        """
-        Check if one plate is wholly contained within another plate's territory.
-        """
-        if inner_plate_id == outer_plate_id:
-            return False
-            
-        if inner_plate_id >= len(self.plates) or outer_plate_id >= len(self.plates):
-            return False
-            
-        inner_plate = self.plates[inner_plate_id]
-        outer_plate = self.plates[outer_plate_id]
-        
-        if len(inner_plate.vertex_ids) == 0 or len(outer_plate.vertex_ids) == 0:
-            return False
-        
-        inner_verts_np = inner_plate.vertex_ids
-        outer_verts_set = outer_plate.vertex_ids
-        
-        neighbor_list = []
-        for neighbors in self.sphere_mesh._neighbor_map['vertex_to_vertices'].values():
-            neighbor_list.append(neighbors)
-        
-        neighbor_list, _ = make_2D_array(neighbor_list)
-        return _numba_check_containment(inner_verts_np, outer_verts_set, neighbor_list)
-
-    @time_function
-    def merge_plates(self, plate_a_id: int, plate_b_id: int):
-        """
-        Merge plate B into plate A, transferring all vertices and properties.
-        """
-        if plate_a_id == plate_b_id:
-            return
-        
-        if plate_a_id >= len(self.plates) or plate_b_id >= len(self.plates):
-            raise ValueError("Invalid plate ID")
-        
-        plate_a = self.plates[plate_a_id]
-        plate_b = self.plates[plate_b_id]
-        
-        plate_a.vertex_ids = np.concatenate([plate_a.vertex_ids, plate_b.vertex_ids])
-        self.plate_ids[plate_b.vertex_ids] = plate_a_id
-        
-        if hasattr(plate_b, 'continental_centers'):
-            if not hasattr(plate_a, 'continental_centers'):
-                plate_a.continental_centers = []
-            plate_a.continental_centers.extend(plate_b.continental_centers)
-        
-        if plate_b.plate_type == "continental":
-            plate_a.plate_type = "continental"
-            plate_a.growth_rate = np.maximum(plate_a.growth_rate, plate_b.growth_rate)
-        else:
-            if plate_a.plate_type == "continental":
-                pass
-            else:
-                plate_a.growth_rate = (plate_a.growth_rate + plate_b.growth_rate) / 2
-        
-        plate_b.vertex_ids = np.array([], dtype=np.int64)
-
-    @time_function
-    def _validate_and_reindex_plates(self):
-        """Checks for disjointed plates, splits or merges them, and re-indexes all plates."""
-        vertex_neighbors = self.sphere_mesh._neighbor_map['vertex_to_vertices']
-        plates_to_process = self.plates.copy()
-        final_plates = []
-        
-        processed_plate_ids = set()
-
-        # First handle any completely unassigned vertices
-        unassigned_verts = np.where(self.plate_ids == -1)[0].tolist()
-        if unassigned_verts:
-            print(f"Found {len(unassigned_verts)} unassigned vertices - assigning to random neighbors")
-            
-            changed = True
-            while changed and unassigned_verts:
-                changed = False
-                remaining_unassigned = []
-                
-                for vert_idx in unassigned_verts:
-                    neighbor_plates = set()
-                    for neighbor in vertex_neighbors.get(vert_idx, []):
-                        plate_id = self.plate_ids[neighbor]
-                        if plate_id != -1:
-                            neighbor_plates.add(plate_id)
+    def assign_origins(self, vertices: np.ndarray, num_plates: int, radius: float):
+        random_indices = np.random.choice(len(vertices), num_plates, replace=False)
+        plate_origins: np.ndarray = vertices[random_indices]
+        # Check distances between all pairs of plate origins
+        need_reassignment: bool = True
+        while need_reassignment:
+            need_reassignment = False
+            for i in range(len(plate_origins)):
+                for j in range(i+1, len(plate_origins)):
+                    # Calculate spherical distance between two plate origins
+                    dist = spherical_distance(vertices[random_indices[i]], vertices[random_indices[j]], radius)
                     
-                    if neighbor_plates:
-                        chosen_plate = random.choice(list(neighbor_plates))
-                        self.plate_ids[vert_idx] = chosen_plate
-                        self.plates[chosen_plate].vertex_ids = np.concatenate([
-                            self.plates[chosen_plate].vertex_ids,
-                            np.array([vert_idx], dtype=np.int64)
-                        ])
-                        changed = True
-                    else:
-                        remaining_unassigned.append(vert_idx)
-                
-                unassigned_verts = remaining_unassigned
-                print(f"Assigned some vertices, {len(unassigned_verts)} remaining unassigned")
+                    # If too close, replace one of them with a new random vertex
+                    if dist < (radius / 10):
+                        # Get all vertex indices not currently used as origins
+                        all_indices = set(range(len(vertices)))
+                        used_indices = set(random_indices)
+                        available_vertices = list(all_indices - used_indices)
+                        #available_vertices = [v for v in vertices if v not in plate_origins]
+                        if available_vertices:  # Ensure there are vertices left to choose from
+                            ni = np.random.choice(len(available_vertices))
+                            random_indices[j] = ni
+                            plate_origins[j] = vertices[ni]
+                            need_reassignment = True  # Need to check all pairs again
+                        else:
+                            raise ValueError("Not enough vertices to maintain minimum distance")
+        
+        return random_indices
+
+    def expand_plate(self, obj: mesh, vertices: np.ndarray, plates: list[Plate]):
+        nv = len(vertices)
+        mask = np.zeros(nv, dtype=bool)
+        
+        for plate in plates:
+            for vid in plate.vertex_ids:
+                mask[vid] = True
+        
+        while True:
+            # Track if we assigned any vertices in this iteration
+            assigned_any = False
             
-            if unassigned_verts:
-                print(f"Warning: {len(unassigned_verts)} vertices could not be assigned (no plate neighbors)")
+            for plate in plates:
+                # Get all adjacent vertices to this plate's current vertices
+                adjacent_vertices = np.zeros(nv, dtype=bool)
+                
+                for vid in plate.vertex_ids:
+                    asj = obj.get_adjacent_vertices(vid)
+                    adjacent_vertices[asj] = True
+                
+                # Find unassigned adjacent vertices
+                candidates = np.where(adjacent_vertices & ~mask)[0]
+                
+                if len(candidates) > 0:
+                    # Randomly select one to add to this plate
+                    new_vertex = np.random.choice(candidates)
+                    plate.vertex_ids.append(new_vertex)
+                    mask[new_vertex] = True
+                    assigned_any = True
+            
+            # If no plates could expand, break to avoid infinite loop
+            if not assigned_any or np.all(mask):
+                break
+        
+        return plates
 
-        while plates_to_process:
-            plate = plates_to_process.pop(0)
-            if len(plate.vertex_ids) == 0: continue
-            plate_id = self.plate_ids[plate.vertex_ids[0]]
+    def gen_plates(self):
+        obj: mesh = self.sphere_mesh
+        radius: float = self.radius
+        
 
-            if plate_id in processed_plate_ids:
+        plate_origins = self.assign_origins(obj.vertices, self.plate_count + 5, radius)
+        plates: list = []
+        for i, plate in enumerate(plate_origins):
+            arandomnumber = np.random.rand()
+            if arandomnumber > 0.4:
+                a = Plate.create_oceanic_plate(ID=i, vertex_ids=plate)
+            else:
+                a = Plate.create_continental_plate(ID=i, vertex_ids=plate)
+                a.add_continental_center(plate)
+            plates.append(a)
+        plates = self.expand_plate(obj, obj.vertices, plates)
+        
+        def get_plate_for_vertex(vid):
+            for plate in plates:
+                if vid in plate.vertex_ids:
+                    return plate
+            return None
+        
+        for plate in plates:
+            to_remove = []
+            for vid in plate.vertex_ids:
+                # Get adjacent vertices
+                adj_vids = set(obj.get_adjacent_vertices(vid))
+                
+                # Count how many are in the same plate
+                same_plate_count = sum(1 for adj_vid in adj_vids if adj_vid in plate.vertex_ids)
+                
+                # If only 1 or less, consider moving to adjacent plate
+                if same_plate_count <= 1:
+                    # Find adjacent plates
+                    adjacent_plates = set()
+                    for adj_vid in adj_vids:
+                        adj_plate = get_plate_for_vertex(adj_vid)
+                        if adj_plate and adj_plate != plate:
+                            adjacent_plates.add(adj_plate)
+                    
+                    # Move to a random adjacent plate if any exist
+                    if adjacent_plates:
+                        new_plate = np.random.choice(list(adjacent_plates))
+                        new_plate.vertex_ids.append(vid)
+                        to_remove.append(vid)
+            
+            # Remove from current plate
+            plate.vertex_ids = [v for v in plate.vertex_ids if v not in to_remove]
+        
+        i = 0
+        while i < len(plates):
+            plate = plates[i]
+            # Get all adjacent vertices to this plate
+            plate_boundary = set()
+            for vid in plate.vertex_ids:
+                adj_vids = obj.get_adjacent_vertices(vid)
+                for adj_vid in adj_vids:
+                    if adj_vid not in plate.vertex_ids:
+                        plate_boundary.add(adj_vid)
+            
+            # Find plates that contain all boundary vertices
+            surrounding_plates = []
+            for other_plate in plates:
+                if other_plate == plate:
+                    continue
+                if all(boundary_vid in other_plate.vertex_ids for boundary_vid in plate_boundary):
+                    surrounding_plates.append(other_plate)
+            
+            # If found, merge into one of them
+            if surrounding_plates:
+                # Choose the largest surrounding plate
+                largest_surrounder = max(surrounding_plates, key=lambda p: len(p.vertex_ids))
+                largest_surrounder.vertex_ids.extend(plate.vertex_ids)
+                plates.pop(i)
+                # Don't increment i since we removed an element
                 continue
-            processed_plate_ids.add(plate_id)
+            i += 1
+        
+        while len(plates) < self.plate_count and len(plates) > 0:
+            # Find largest plate
+            largest_plate = max(plates, key=lambda p: len(p.vertex_ids))
             
-            all_plate_verts = set(np.where(self.plate_ids == plate_id)[0].tolist())
-            visited = set()
-            components = []
-
-            # Use BFS to find all contiguous components for the current plate ID
-            while all_plate_verts:
-                q = [all_plate_verts.pop()]
-                component = {q[0]}
-                visited.add(q[0])
-                head = 0
-                while head < len(q):
-                    curr = q[head]
-                    head += 1
-                    for neighbor in vertex_neighbors.get(curr, []):
-                        if neighbor in all_plate_verts and neighbor not in visited:
-                            visited.add(neighbor)
-                            component.add(neighbor)
-                            q.append(neighbor)
-                            all_plate_verts.remove(neighbor)
-                components.append(list(component))
-
-            if not components: continue
-            
-            # Sort components by size, largest first
-            components.sort(key=len, reverse=True)
-
-            # The largest component becomes the main plate
-            main_component_verts = np.array(components[0], dtype=np.int64)
-            new_plate = plate
-            new_plate.vertex_ids = main_component_verts
-            final_plates.append(new_plate)
-            
-            # Handle other, smaller "fragment" components
-            for fragment_verts_list in components[1:]:
-                fragment_verts = np.array(fragment_verts_list, dtype=np.int64)
+            # Split into two roughly equal parts using BFS
+            if len(largest_plate.vertex_ids) >= 2:
+                # Start BFS from two distant points
+                start1 = largest_plate.vertex_ids[0]
+                visited = set()
+                queue = [start1]
+                part1 = set()
                 
-                if len(fragment_verts) > 50:
-                    new_fragment_plate = Plate.create_oceanic_plate(fragment_verts, vertex_ids=fragment_verts)
-                    final_plates.append(new_fragment_plate)
-                else:
-                    border_counts = {}
-                    for vert_idx in fragment_verts_list:
-                        for neighbor in vertex_neighbors.get(vert_idx, []):
-                            neighbor_plate_id = self.plate_ids[neighbor]
-                            if self.plate_ids[vert_idx] != neighbor_plate_id:
-                                border_counts[neighbor_plate_id] = border_counts.get(neighbor_plate_id, 0) + 1
+                target_size = len(largest_plate.vertex_ids) // 2
+                
+                while queue and len(part1) < target_size:
+                    current = queue.pop(0)
+                    if current in part1:
+                        continue
+                    part1.add(current)
                     
-                    if border_counts:
-                        best_neighbor_id = max(border_counts, key=border_counts.get)
-                        self.plate_ids[fragment_verts] = best_neighbor_id
-
-        # Final re-indexing step
-        self.plates = final_plates
-        new_plate_ids_array = np.full_like(self.plate_ids, -1)
-        for new_id, plate in enumerate(self.plates):
-            new_plate_ids_array[plate.vertex_ids] = new_id
+                    # Add adjacent vertices in same plate
+                    for neighbor in obj.get_adjacent_vertices(current):
+                        if neighbor in largest_plate.vertex_ids and neighbor not in part1:
+                            queue.append(neighbor)
+                
+                # Create new plate with part1
+                new_plate = Plate.create_oceanic_plate(len(plates), vertex_ids=part1)
+                plates.append(new_plate)
+                
+                # Update original plate
+                largest_plate.vertex_ids = [v for v in largest_plate.vertex_ids if v not in part1]
+            else:
+                break  # Can't split further
         
-        self.plate_ids = new_plate_ids_array
-        self.plate_count = np.array(len(self.plates))
-        
-        # One final check for any remaining unassigned vertices
-        unassigned_verts = np.where(self.plate_ids == -1)[0]
-        if len(unassigned_verts) > 0:
-            print(f"Warning: {len(unassigned_verts)} vertices remain unassigned after plate validation")
+        while len(plates) > self.plate_count and len(plates) > 1:
+            # Find all pairs of adjacent plates
+            adjacent_pairs = []
+            for i in range(len(plates)):
+                for j in range(i+1, len(plates)):
+                    plate1 = plates[i]
+                    plate2 = plates[j]
+                    
+                    # Check if plates are adjacent
+                    for vid in plate1.vertex_ids:
+                        adj_vids = obj.get_adjacent_vertices(vid)
+                        if any(adj_vid in plate2.vertex_ids for adj_vid in adj_vids):
+                            adjacent_pairs.append((i, j))
+                            break
             
+            if adjacent_pairs:
+                # Randomly select a pair to merge
+                i, j = adjacent_pairs[np.random.randint(len(adjacent_pairs))]
+                plates[i].vertex_ids.extend(plates[j].vertex_ids)
+                plates.pop(j)
+            else:
+                break  # No adjacent plates left to merge
+        
+        return plates
+
     @time_function
     def calculate_plate_collisions(self):
         """Calculate collisions between plates and adjust elevations accordingly"""

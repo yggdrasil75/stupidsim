@@ -57,6 +57,8 @@ class Plate:
     @classmethod
     def create_oceanic_plate(cls, ID, vertex_ids: np.ndarray, speed: float = 1.0):
         """Factory method for creating an oceanic plate."""
+        if type(vertex_ids) is not np.ndarray:
+            vertex_ids = np.array([vertex_ids])
         return cls(
             ID=ID,
             vertex_ids=vertex_ids,
