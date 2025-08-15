@@ -670,8 +670,8 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
 
     world = World(
         sphere_mesh=create_sphere_mesh(
-            #radius=(min_height+max_height) / 2, 
-            radius=1,
+            radius=(min_height+max_height) / 2, 
+            #radius=1,
             segments=resolution, 
             rings=resolution, 
             deformable=False),
@@ -740,9 +740,9 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
 
     def update_camera_position():
         nonlocal eye
-        x = (camera_distance * np.cos(elevation) * np.cos(azimuth)) #* min_height
-        y = (camera_distance * np.sin(elevation)) #* min_height
-        z = (camera_distance * np.cos(elevation) * np.sin(azimuth)) #* min_height
+        x = (camera_distance * np.cos(elevation) * np.cos(azimuth)) * min_height
+        y = (camera_distance * np.sin(elevation)) * min_height
+        z = (camera_distance * np.cos(elevation) * np.sin(azimuth)) * min_height
         eye = np.array([x, y, z], dtype=np.float32)
         
         dpg.set_value("camera_info", 
@@ -805,7 +805,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
                 tag="camera_distance",
                 min_value=1.0, 
                 max_value=15.0, 
-                default_value=camera_distance,
+                default_value=float(camera_distance),
                 callback=camera_control_callback
             )
             dpg.add_slider_float(
@@ -839,8 +839,8 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
         res=(int(dpg.get_item_width('primary') or 1), int(dpg.get_item_height('primary') or 1))
         dpg.set_item_width("draw_area", res[0])
         dpg.set_item_height("draw_area", res[1])
-        #print_timing_stats()
-        #world.simulate_erosion(steps=0)
+        print_timing_stats()
+        world.simulate_erosion(steps=0)
 
         dpg.delete_item("draw_area", children_only=True)
         
@@ -851,7 +851,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
         
         if screen_verts and visible_tris[0]:
             points_np = screen_verts[0]
-            #colors_np = world.sphere_mesh.color
+            
             colors_np = colors[0]
             for i, tri in enumerate(visible_tris[0]):
                 p1 = points_np[tri[0]].tolist()
@@ -861,7 +861,6 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
                 color = colors_np[i].tolist()
                 dpg.draw_triangle(p1, p2, p3, color=color, fill=color, 
                                 parent="draw_area")
-        #print("Still running")
         dpg.render_dearpygui_frame()
     
     dpg.destroy_context()

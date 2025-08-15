@@ -15,8 +15,6 @@ def update_slider_limits():
 
 def show_configure_window():
     # Remove the main menu window
-    dpg.delete_item("main")
-    
     with dpg.window(label="Configure Simulation", width=400, height=300, tag="config"):
         # World Resolution Slider
         dpg.add_slider_int(
@@ -77,6 +75,8 @@ def show_configure_window():
             width=100,
             height=30
         )
+    dpg.set_primary_window("config", True)
+    dpg.delete_item("main")
 
 def start_simulation():
     global viewport, dpgcontext
@@ -124,6 +124,7 @@ def main():
         )
     
     dpg.setup_dearpygui()
+    dpg.set_primary_window("main", True)
     dpg.show_viewport()
     dpg.start_dearpygui()
     #dpg.destroy_context()

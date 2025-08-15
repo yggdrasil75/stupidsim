@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 import heapq
 from weakref import WeakKeyDictionary
@@ -125,7 +125,7 @@ class mesh:
     _vertices: np.ndarray
     _polys: np.ndarray
     _color: np.ndarray
-    _tris: np.ndarray = field(default=None, init=False)  # Stores triangulated version
+    _tris: np.ndarray = field(default=None, init=False)  # type: ignore # Stores triangulated version
     interactive: bool = True  # can stuff collide
     physics: bool = True  # does it fall from gravity
     mass: np.ndarray = field(default_factory=lambda: np.array(1.0, dtype=np.float32))
@@ -139,7 +139,10 @@ class mesh:
     _directional_faces: list = field(default_factory=list, init=False)  # Stores partitioned faces by direction
     _needs_directional_partition: bool = field(default=True, init=False)  # Flag for when to repartition
     
-
+    _lod_meshes: list['mesh'] = field(default_factory=list, init=False)  # Stores lower LOD versions
+    _lod_level: int = field(default=0, init=False)  # Current LOD level (0 is highest)
+    _update_lods = False
+    
     @property
     def vertices(self):
         return self._vertices
@@ -198,6 +201,7 @@ class mesh:
 
     @color.setter
     def color(self, value):
+        self._update_lods = True
         if not isinstance(value, np.ndarray):
             value = np.array(value, dtype=np.uint8)
         
@@ -375,17 +379,285 @@ class mesh:
         self._needs_triangulation = False
         return self
 
-@time_function
-def get_lod_level(view_verts: np.ndarray, triangles: np.ndarray):
-    #TODO: Please implement
-    pass
-
-@time_function
-def simplify_mesh(vertices: np.ndarray, 
-                 triangles: np.ndarray, 
-                 lod_level: float):
-    #TODO: please implement
-    pass
+    def generate_lods(self, levels=3, ratio=0.5, max_error=0.01):
+        """
+        Generate lower level-of-detail versions of the mesh.
+        
+        Args:
+            levels: Number of LOD levels to generate
+            ratio: Target ratio of faces to keep at each level (e.g., 0.5 = keep half)
+            max_error: Maximum allowed error for edge collapses
+        """
+        self._lod_meshes = []  # Clear existing LODs
+        
+        current_mesh = self
+        for _ in range(levels):
+            simplified = current_mesh._simplify_mesh(ratio, max_error)
+            if simplified is not None:
+                self._lod_meshes.append(simplified)
+                current_mesh = simplified
+    
+    def get_lod(self, level=0):
+        """
+        Get a specific LOD level of the mesh.
+        level=0 returns the original mesh.
+        """
+        if level == 0:
+            return self
+        if not self._lod_meshes or self._update_lods:
+            self._update_lods = False
+            self.generate_lods(3, ratio=0.5)
+        if level > len(self._lod_meshes):
+            return self._lod_meshes[-1]
+        return self._lod_meshes[level-1]
+    
+    def set_lod_level(self, level):
+        """Set the current LOD level to use for this mesh instance"""
+        if level == 0 or not self._lod_meshes:
+            self._lod_level = 0
+        else:
+            self._lod_level = min(level, len(self._lod_meshes))
+    
+    def _simplify_mesh(self, ratio, max_error):
+        """
+        Internal method to create a simplified version of the mesh using edge collapses.
+        Returns a new mesh instance with fewer vertices/faces.
+        """
+        if len(self._polys) < 4:  # Don't simplify if already very simple
+            return None
+            
+        # Create working copies
+        vertices = self._vertices.copy()
+        polys = self._polys.copy()
+        colors = self._color.copy()
+        
+        # Build necessary data structures
+        edge_heap, vertex_faces, edge_map, quadrics = self._build_simplification_structures(
+            vertices, polys
+        )
+        
+        target_faces = max(4, int(len(polys) * ratio))
+        
+        while len(polys) > target_faces and edge_heap:
+            # Get the best edge to collapse
+            error, (v1, v2) = heapq.heappop(edge_heap)
+            
+            if error > max_error:
+                break  # No more good collapses available
+                
+            # Skip if either vertex was already removed
+            if v1 not in vertex_faces or v2 not in vertex_faces:
+                continue
+                
+            # Collapse the edge
+            new_vertex, new_polys = self._collapse_edge(
+                v1, v2, vertices, polys, vertex_faces, edge_map, quadrics
+            )
+            
+            if new_polys is None:
+                continue  # Collapse would create degenerate geometry
+                
+            # Update the mesh
+            vertices[v1] = new_vertex
+            polys = new_polys
+            
+            # Update colors if per-vertex
+            if len(colors) == len(vertices):
+                colors[v1] = (colors[v1] + colors[v2]) / 2
+                colors = np.delete(colors, v2, axis=0)
+            
+            # Recompute affected edges
+            self._update_affected_edges(v1, v2, vertices, polys, vertex_faces, 
+                                      edge_map, quadrics, edge_heap)
+        
+        # Create new mesh with simplified geometry
+        simplified = mesh(
+            id=self.id * 1000 + len(self._lod_meshes) + 1,  # Generate unique ID
+            _vertices=vertices,
+            _polys=polys,
+            _color=colors,
+            interactive=self.interactive,
+            physics=self.physics,
+            mass=self.mass.copy(),
+            restitution=self.restitution.copy(),
+            linearVelocity=self.linearVelocity.copy(),
+            angularVelocity=self.angularVelocity.copy()
+        )
+        
+        return simplified
+    
+    def _build_simplification_structures(self, vertices, polys):
+        """Build data structures needed for mesh simplification"""
+        # Compute vertex quadrics
+        quadrics = self._compute_vertex_quadrics(vertices, polys)
+        
+        # Build vertex-to-faces map
+        vertex_faces = defaultdict(list)
+        for i, face in enumerate(polys):
+            for v in face:
+                if v >= 0:  # Skip padding values
+                    vertex_faces[v].append(i)
+        
+        # Build edge map and compute initial edge costs
+        edge_map = defaultdict(list)
+        edge_heap = []
+        
+        for i, face in enumerate(polys):
+            n = len(face)
+            for j in range(n):
+                v1 = face[j]
+                v2 = face[(j+1)%n]
+                if v1 < 0 or v2 < 0:  # Skip invalid vertices
+                    continue
+                    
+                edge = tuple(sorted((v1, v2)))
+                if edge not in edge_map:
+                    cost = self._compute_edge_cost(edge, vertices, quadrics)
+                    heapq.heappush(edge_heap, (cost, edge))
+                edge_map[edge].append(i)
+        
+        return edge_heap, vertex_faces, edge_map, quadrics
+    
+    def _compute_vertex_quadrics(self, vertices, polys):
+        """Compute quadric error matrices for each vertex"""
+        quadrics = [np.zeros((4,4)) for _ in range(len(vertices))]
+        
+        for face in polys:
+            # Get valid vertices from face (skip padding)
+            face_verts = [v for v in face if v >= 0]
+            if len(face_verts) < 3:
+                continue
+                
+            # Compute plane equation
+            v0, v1, v2 = vertices[face_verts[0]], vertices[face_verts[1]], vertices[face_verts[2]]
+            normal = np.cross(v1 - v0, v2 - v0)
+            normal /= np.linalg.norm(normal) + 1e-10
+            a, b, c = normal
+            d = -np.dot(normal, v0)
+            
+            # Fundamental error quadric for this plane
+            Kp = np.array([
+                [a*a, a*b, a*c, a*d],
+                [a*b, b*b, b*c, b*d],
+                [a*c, b*c, c*c, c*d],
+                [a*d, b*d, c*d, d*d]
+            ])
+            
+            # Add to each vertex's quadric
+            for v in face_verts:
+                quadrics[v] += Kp
+                
+        return quadrics
+    
+    def _compute_edge_cost(self, edge, vertices, quadrics):
+        """Compute the error cost of collapsing an edge"""
+        v1, v2 = edge
+        Q = quadrics[v1] + quadrics[v2]
+        
+        # Try optimal position
+        Q3x3 = Q[:3,:3]
+        Q3x3[0,0] += 1e-6  # Add small value to make matrix invertible
+        Q3x3[1,1] += 1e-6
+        Q3x3[2,2] += 1e-6
+        
+        try:
+            optimal = -np.linalg.solve(Q3x3, Q[:3,3])
+            error = self._vertex_error(Q, optimal)
+        except np.linalg.LinAlgError:
+            # If matrix is singular, use midpoint
+            optimal = (vertices[v1] + vertices[v2]) / 2
+            error = self._vertex_error(Q, optimal)
+            
+        return error
+    
+    def _vertex_error(self, Q, v):
+        """Compute error for a vertex position given a quadric"""
+        v_homog = np.array([v[0], v[1], v[2], 1])
+        return np.dot(v_homog, np.dot(Q, v_homog))
+    
+    def _collapse_edge(self, v1, v2, vertices, polys, vertex_faces, edge_map, quadrics):
+        """Collapse edge (v1,v2) by moving v1 to optimal position and removing v2"""
+        # Compute optimal position for merged vertex
+        Q = quadrics[v1] + quadrics[v2]
+        Q3x3 = Q[:3,:3]
+        Q3x3[0,0] += 1e-6
+        Q3x3[1,1] += 1e-6
+        Q3x3[2,2] += 1e-6
+        
+        try:
+            new_vertex = -np.linalg.solve(Q3x3, Q[:3,3])
+        except np.linalg.LinAlgError:
+            new_vertex = (vertices[v1] + vertices[v2]) / 2
+        
+        # Update vertex position
+        vertices[v1] = new_vertex
+        
+        # Get all faces that use either vertex
+        affected_faces = set(vertex_faces[v1] + vertex_faces[v2])
+        
+        # Process each affected face
+        new_polys = []
+        degenerate_faces = 0
+        
+        for face_idx in affected_faces:
+            face = polys[face_idx]
+            
+            # Replace v2 with v1 in this face
+            new_face = [v1 if v == v2 else v for v in face]
+            
+            # Remove degenerate faces (those that become lines/points)
+            unique_verts = set(v for v in new_face if v >= 0)
+            if len(unique_verts) < 3:
+                degenerate_faces += 1
+                continue
+                
+            # Remove duplicate vertices in the face (can happen when collapsing)
+            # We need to maintain winding order while removing duplicates
+            seen = set()
+            final_face = []
+            for v in new_face:
+                if v < 0:  # Keep padding values
+                    final_face.append(v)
+                elif v not in seen:
+                    seen.add(v)
+                    final_face.append(v)
+            
+            if len(seen) >= 3:
+                new_polys.append(final_face)
+        
+        if degenerate_faces > len(affected_faces) / 2:
+            return None, None  # Too many degenerate faces - abort collapse
+            
+        return new_vertex, np.array(new_polys, dtype=polys.dtype)
+    
+    def _update_affected_edges(self, v1, v2, vertices, polys, vertex_faces, 
+                             edge_map, quadrics, edge_heap):
+        """Update edge costs after a collapse operation"""
+        # Update quadric for the merged vertex
+        quadrics[v1] = quadrics[v1] + quadrics[v2]
+        
+        # Get all vertices adjacent to v1 (now including v2's neighbors)
+        neighbors = set()
+        for face_idx in vertex_faces[v1]:
+            for v in polys[face_idx]:
+                if v >= 0 and v != v1:
+                    neighbors.add(v)
+        
+        # Remove v2 from all data structures
+        del vertex_faces[v2]
+        del quadrics[v2]
+        
+        # Recompute costs for all edges involving v1's neighbors
+        for neighbor in neighbors:
+            edge = tuple(sorted((v1, neighbor)))
+            new_cost = self._compute_edge_cost(edge, vertices, quadrics)
+            
+            # Update or add to heap
+            heapq.heappush(edge_heap, (new_cost, edge))
+            
+            # Update edge map
+            if edge not in edge_map:
+                edge_map[edge] = []
 
 @njit((float32, float32[:], float32[:], float32[:], int64, int64, int64, float32), cache=True)
 def comped(fov, lookat, eye, up, res0, res1, far, near):
@@ -498,16 +770,28 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
     tup = tuple(up)
     rest = tuple(res)
     for obj in meshes:
-        cache_key = (id(obj), eyet, lot, tup, rest)
+        objid = id(obj)
+        objCmap = (id(obj.color[1]), id(obj.color[-1]))
+        cache_key = (objid, eyet, lot, tup, rest, objCmap)
         if cache_key in _mesh_cache and not obj._needs_neighbor_update:
             screen_verts, visible_tris, depths, colors = _mesh_cache[cache_key]
         else:
             mesh_center = np.mean(obj.vertices, axis=0)
-            view_center = np.dot(np.append(mesh_center, 1), viewMatrix.T)[:3]
+            view_center = np.dot(np.append(mesh_center, 1), viewMatrix.T)[:3].astype(np.float32)
             
             # Skip if entire mesh is backfacing
             if np.dot(view_center, view_center) < 0:
                 continue
+
+            dist = norm(view_center)
+            if dist > far * 0.75:
+                lodl = 2
+            elif dist > far * 0.5:
+                lodl = 1
+            else:
+                lodl = 0
+
+            obj = obj.get_lod(lodl)
 
             # Get potentially visible faces
             visible_face_indices = obj.get_potentially_visible_faces(view_dir)
@@ -518,8 +802,6 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             screen_verts, view_verts = compedObj(obj.vertices, viewMatrix, projMatrix, res[0], res[1])
             
             # Get triangles from visible faces
-            #print(numba.typeof(obj.polys))
-            #print(numba.typeof(visible_face_indices))
             triangles = triface(obj.polys, visible_face_indices)
             
             if len(triangles) == 0:
