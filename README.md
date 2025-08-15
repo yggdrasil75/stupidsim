@@ -10,16 +10,19 @@ ON WINDOWS:
 ON LINUX:
 `source venv/bin/activate`
 
-```pip install -r requirements.txt
-python main.py```
+```
+pip install -r requirements.txt
+python main.py
+```
 
 current items tracked:
 tectonic plates
 elevation
-water depth
+~~water depth~~
 
 
 next items:
+water depth
 ice
 groundwater
 ph level of the water
