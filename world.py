@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import random
 import numba
 import numpy as np
-from holder.mesh import mesh, project_2d
+from holder.mesh import mesh, project_2d, rasterize
 from shapes.sphere import create_sphere_mesh
 import dearpygui.dearpygui as dpg
 from numba import njit, prange, int64, float32
@@ -783,7 +783,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
     with dpg.window(label="Legend", tag="legend_window", show=True, width=200, pos=(800, 0)):
         pass
 
-    with dpg.window(label="3D View", tag="primary", width=-1, height=-1):
+    with dpg.window(label="3D View", tag="primary", width=800, height=600):
         with dpg.group(horizontal=True):
             dpg.add_text("Colormap:")
             dpg.add_radio_button(
@@ -797,7 +797,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
         with dpg.drawlist(width=-1, height=-1, tag="draw_area"):
             pass
     
-    with dpg.window(label='Camera Controls'):
+    with dpg.window(label='Camera Controls', pos=(0, 50)):
         with dpg.collapsing_header(label="Camera Controls", default_open=True):
             dpg.add_text("Camera Position:", tag="camera_info")
             dpg.add_slider_float(
@@ -847,6 +847,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
         screen_verts, visible_tris, depths, colors = project_2d(
             [world.sphere_mesh], eye, lookat, up, fovfl=60.0, res=res
             )
+        #rasterize(screen_verts, visible_tris, depths, colors, res[0], res[1])
         
         if screen_verts and visible_tris[0]:
             points_np = screen_verts[0]
