@@ -518,7 +518,7 @@ class World:
             self.update_vertices_based_on_heightmap()
             self.update_colors()
 
-def render_world(resolution=128, min_height=6357, max_height=6378, plate_count=15, viewport = None, context = None):
+def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=15, viewport = None, context = None):
 
     world = World(
         sphere_mesh=create_sphere_mesh(
