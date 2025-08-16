@@ -5,13 +5,14 @@ from weakref import WeakKeyDictionary
 import numba
 import numpy as np
 #from globals import DEVICE
-from util import cross_2d, time_function, cross, normalize, norm
+from util import cross_2d, time_function, cross, normalize, norm, triangle_error_quadric
 from numba import njit, float32, types, int64, jit, int32
 from numba.typed import typedlist
 from scipy.sparse import csr_matrix
 
 _mesh_cache = OrderedDict()
 
+@time_function
 @njit(cache=True)
 def triangulate(polys):
     new_tris = []
@@ -55,6 +56,7 @@ def triangulate(polys):
 
     return new_tris
 
+@time_function
 def _partition_faces(_vertices, polys):
     _directional_faces = [[] for _ in range(26)]
 
@@ -101,7 +103,7 @@ def _partition_faces(_vertices, polys):
             
     return _directional_faces
 
-#@njit
+@time_function
 def _getfaces(view_dir):
     # Normalize view direction
     view_dir = normalize(-view_dir)
@@ -234,6 +236,7 @@ class mesh:
         
         self._needs_directional_partition = False
 
+    @time_function
     def get_potentially_visible_faces(self, view_dir):
         """Return face indices that are potentially visible given a view direction"""
         if self._needs_directional_partition:
@@ -254,6 +257,7 @@ class mesh:
         # # Collect all faces from visible groups
         return np.concatenate([self._directional_faces[i] for i in visible_groups]).astype(np.int64)
 
+    #@time_function
     def _update_neighbor_map(self):
         """Build or update the neighbor map data structure"""
         if not self._needs_neighbor_update:
@@ -332,21 +336,45 @@ class mesh:
         
         self._needs_neighbor_update = False
 
+    @time_function
     def get_adjacent_faces(self, face_idx):
         """Get list of face indices adjacent to the given face"""
         self._update_neighbor_map()
         return self._neighbor_map['face_to_faces'].get(face_idx, [])
 
+    @time_function
     def get_faces_for_vertex(self, vertex_idx):
         """Get list of face indices that contain the given vertex"""
         self._update_neighbor_map()
         return self._neighbor_map['vertex_to_faces'].get(vertex_idx, [])
 
+    #@time_function
     def get_adjacent_vertices(self, vertex_idx):
         """Get list of vertex indices adjacent to the given vertex"""
         self._update_neighbor_map()
         return self._neighbor_map['vertex_to_vertices'].get(vertex_idx, [])
+    
+    @time_function
+    def get_all_adjacent_vertices(self, vertex_ids):
+        self._update_neighbor_map()
+        
+        vertex_ids = np.atleast_1d(np.asarray(vertex_ids, dtype=np.int64))
+        
+        if len(vertex_ids) == 1:
+            v_idx = vertex_ids[0]
+            return np.array(self._neighbor_map['vertex_to_vertices'].get(v_idx, []), dtype=np.int64)
+        
+        adj = []
+        for v_idx in vertex_ids:
+            adj.extend(self._neighbor_map['vertex_to_vertices'].get(v_idx, []))
+        
+        if adj:
+            return np.unique(np.array(adj, dtype=np.int64))
+        else:
+            return np.array([], dtype=np.int64)
 
+
+    @time_function
     def toTri(self):
         """
         Convert all polygons to triangles using a simple fan triangulation.
@@ -366,6 +394,7 @@ class mesh:
         self._needs_triangulation = False
         return self
     
+    @time_function
     def _triangulate(self):
         """Internal method to triangulate the polygons and cache the result"""
         if len(self._polys) == 0:
@@ -379,7 +408,8 @@ class mesh:
         self._needs_triangulation = False
         return self
 
-    def generate_lods(self, levels=3, ratio=0.5, max_error=0.01):
+    @time_function
+    def generate_lods(self, levels=3, ratio=0.7, max_error=0.001):
         """
         Generate lower level-of-detail versions of the mesh.
         
@@ -397,6 +427,7 @@ class mesh:
                 self._lod_meshes.append(simplified)
                 current_mesh = simplified
     
+    @time_function
     def get_lod(self, level=0):
         """
         Get a specific LOD level of the mesh.
@@ -406,11 +437,12 @@ class mesh:
             return self
         if not self._lod_meshes or self._update_lods:
             self._update_lods = False
-            self.generate_lods(3, ratio=0.5)
+            self.generate_lods()
         if level > len(self._lod_meshes):
             return self._lod_meshes[-1]
         return self._lod_meshes[level-1]
     
+    @time_function
     def set_lod_level(self, level):
         """Set the current LOD level to use for this mesh instance"""
         if level == 0 or not self._lod_meshes:
@@ -418,12 +450,13 @@ class mesh:
         else:
             self._lod_level = min(level, len(self._lod_meshes))
     
+    @time_function
     def _simplify_mesh(self, ratio, max_error):
         """
         Internal method to create a simplified version of the mesh using edge collapses.
         Returns a new mesh instance with fewer vertices/faces.
         """
-        if len(self._polys) < 4:  # Don't simplify if already very simple
+        if len(self._polys) < 64:  # Don't simplify if already very simple
             return None
             
         # Create working copies
@@ -436,7 +469,7 @@ class mesh:
             vertices, polys
         )
         
-        target_faces = max(4, int(len(polys) * ratio))
+        target_faces = max(64, int(len(self._polys) * ratio))
         
         while len(polys) > target_faces and edge_heap:
             # Get the best edge to collapse
@@ -486,22 +519,29 @@ class mesh:
         
         return simplified
     
+    @time_function
     def _build_simplification_structures(self, vertices, polys):
         """Build data structures needed for mesh simplification"""
         # Compute vertex quadrics
-        quadrics = self._compute_vertex_quadrics(vertices, polys)
+        quadrics = np.zeros((len(vertices), 4, 4), dtype=np.float32)
+        #quadrics = self._compute_vertex_quadrics(vertices, polys)
         
+        for face in polys:
+            K = triangle_error_quadric(vertices[face[0]], vertices[face[1]], vertices[face[2]])
+            for v in face:
+                quadrics[v] += K
+            
         # Build vertex-to-faces map
         vertex_faces = defaultdict(list)
         for i, face in enumerate(polys):
             for v in face:
                 if v >= 0:  # Skip padding values
                     vertex_faces[v].append(i)
-        
+
         # Build edge map and compute initial edge costs
         edge_map = defaultdict(list)
         edge_heap = []
-        
+
         for i, face in enumerate(polys):
             n = len(face)
             for j in range(n):
@@ -518,6 +558,7 @@ class mesh:
         
         return edge_heap, vertex_faces, edge_map, quadrics
     
+    @time_function
     def _compute_vertex_quadrics(self, vertices, polys):
         """Compute quadric error matrices for each vertex"""
         quadrics = [np.zeros((4,4)) for _ in range(len(vertices))]
@@ -549,13 +590,14 @@ class mesh:
                 
         return quadrics
     
+    @time_function
     def _compute_edge_cost(self, edge, vertices, quadrics):
         """Compute the error cost of collapsing an edge"""
         v1, v2 = edge
         Q = quadrics[v1] + quadrics[v2]
         
         # Try optimal position
-        Q3x3 = Q[:3,:3]
+        Q3x3 = Q[:3,:3].copy()
         Q3x3[0,0] += 1e-6  # Add small value to make matrix invertible
         Q3x3[1,1] += 1e-6
         Q3x3[2,2] += 1e-6
@@ -570,16 +612,22 @@ class mesh:
             
         return error
     
+    @time_function
     def _vertex_error(self, Q, v):
         """Compute error for a vertex position given a quadric"""
-        v_homog = np.array([v[0], v[1], v[2], 1])
+        v_homog = np.array([v[0], v[1], v[2], 1], dtype=np.float32)
         return np.dot(v_homog, np.dot(Q, v_homog))
     
+    @time_function
     def _collapse_edge(self, v1, v2, vertices, polys, vertex_faces, edge_map, quadrics):
         """Collapse edge (v1,v2) by moving v1 to optimal position and removing v2"""
+        common_neighbors = set(self.get_adjacent_vertices(v1)) & set(self.get_adjacent_vertices(v2))
+        if len(common_neighbors ) != 2:
+            return None, None
+        
         # Compute optimal position for merged vertex
         Q = quadrics[v1] + quadrics[v2]
-        Q3x3 = Q[:3,:3]
+        Q3x3 = Q[:3,:3].copy()
         Q3x3[0,0] += 1e-6
         Q3x3[1,1] += 1e-6
         Q3x3[2,2] += 1e-6
@@ -603,7 +651,7 @@ class mesh:
             face = polys[face_idx]
             
             # Replace v2 with v1 in this face
-            new_face = [v1 if v == v2 else v for v in face]
+            new_face = np.where(face == v2, v1, face)
             
             # Remove degenerate faces (those that become lines/points)
             unique_verts = set(v for v in new_face if v >= 0)
@@ -611,8 +659,7 @@ class mesh:
                 degenerate_faces += 1
                 continue
                 
-            # Remove duplicate vertices in the face (can happen when collapsing)
-            # We need to maintain winding order while removing duplicates
+            # Remove duplicate vertices in the face while maintaining order
             seen = set()
             final_face = []
             for v in new_face:
@@ -630,6 +677,7 @@ class mesh:
             
         return new_vertex, np.array(new_polys, dtype=polys.dtype)
     
+    @time_function
     def _update_affected_edges(self, v1, v2, vertices, polys, vertex_faces, 
                              edge_map, quadrics, edge_heap):
         """Update edge costs after a collapse operation"""
@@ -639,13 +687,15 @@ class mesh:
         # Get all vertices adjacent to v1 (now including v2's neighbors)
         neighbors = set()
         for face_idx in vertex_faces[v1]:
+            if face_idx >= len(polys):
+                continue
             for v in polys[face_idx]:
                 if v >= 0 and v != v1:
                     neighbors.add(v)
         
         # Remove v2 from all data structures
-        del vertex_faces[v2]
-        del quadrics[v2]
+        if v2 in vertex_faces:
+            del vertex_faces[v2]
         
         # Recompute costs for all edges involving v1's neighbors
         for neighbor in neighbors:
@@ -659,12 +709,13 @@ class mesh:
             if edge not in edge_map:
                 edge_map[edge] = []
 
-@njit((float32, float32[:], float32[:], float32[:], int64, int64, int64, float32), cache=True)
+@time_function
+@njit(cache=True)
 def comped(fov, lookat, eye, up, res0, res1, far, near):
     zAxis = lookat - eye
-    zAxis = zAxis / np.linalg.norm(zAxis)
+    zAxis = zAxis / norm(zAxis)
     xAxis = cross(up, zAxis)
-    xAxis = xAxis / np.linalg.norm(xAxis)
+    xAxis = xAxis / norm(xAxis)
     yAxis = cross(zAxis, xAxis)
 
     viewMatrix = np.eye(4, dtype=np.float32)
@@ -687,10 +738,11 @@ def comped(fov, lookat, eye, up, res0, res1, far, near):
     projMatrix[3,2] = -1.0
 
     view_dir = (lookat - eye)
-    view_dir = view_dir / np.linalg.norm(view_dir)
+    view_dir = view_dir / norm(view_dir)
 
     return viewMatrix, projMatrix, view_dir
 
+@time_function
 @njit((float32[:,:], float32[:,:], float32[:,:], int64, int64), fastmath=True, cache=True)
 def compedObj(verts, viewmatrix, projMatrix, res0, res1):
     
@@ -718,6 +770,7 @@ def compedObj(verts, viewmatrix, projMatrix, res0, res1):
 
     return screen_verts, view_verts
 
+@time_function
 @njit((int32[:,:], int64[:]), fastmath=True, cache=True)
 def triface(polys, visible_face_indices):
     # Pre-allocate arrays for better performance
@@ -791,7 +844,7 @@ def project_2d(meshes: list[mesh], eye: np.ndarray, lookat: np.ndarray, up: np.n
             else:
                 lodl = 0
 
-            obj = obj.get_lod(lodl)
+            #obj = obj.get_lod(lodl)
 
             # Get potentially visible faces
             visible_face_indices = obj.get_potentially_visible_faces(view_dir)

@@ -4,10 +4,11 @@ import random
 import numpy as np
 import time
 from functools import wraps
-from numba import njit, float32, types, int64, int32
+from numba import njit, float32, types, int64, int32, cuda, jit
+#from numba.cuda import jit
 from numba.extending import overload
 from numpy._typing._array_like import NDArray
-import numpy.typing
+import numpy.typing as npt
 from typing import Literal
 
 _timing_stats = defaultdict(lambda: {
@@ -45,7 +46,44 @@ def normalize(vec):
         return vec
     return vec / n
 
-@njit(fastmath=True, cache=True)
+# @jit(device=True)
+# def cuda_normalize(vec, out):
+#     sum_sq = 0.0
+#     for i in range(3):
+#         sum_sq += vec[i] * vec[i]
+#     norm = np.sqrt(sum_sq)
+#     if norm > 1e-10:
+#         for i in range(3):
+#             out[i] = vec[i] / norm
+#     else:
+#         for i in range(3):
+#             out[i] = 0.0
+# @jit(device=True)
+# def cuda_cross(a, b, out):
+#     out[0] = a[1] * b[2] - a[2] * b[1]
+#     out[1] = a[2] * b[0] - a[0] * b[2]
+#     out[2] = a[0] * b[1] - a[1] * b[0]
+
+# @jit(device=True)
+# def cuda_dot(a,b):
+#     result = 0.0
+#     for i in range(3):
+#         result += a[i] * b[i]
+#     return result
+
+@njit
+def triangle_error_quadric(v0: NDArray[np.float32], v1: NDArray[np.float32], v2: NDArray[np.float32]) -> NDArray[np.float32]:
+    normal = cross(v1 - v0, v2 - v0)
+    normal = normalize(normal)
+    d = -np.dot(normal, v0)
+    plane = np.append(normal, d)
+    
+    K = np.outer(plane, plane)
+    area = 0.5 * norm(cross(v1 - v0, v2 - v0))
+    K *= area
+    return K
+
+@njit
 def clip_value(value, min_val, max_val):
     """Clip a value between min and max."""
     return min(max(value, min_val), max_val)

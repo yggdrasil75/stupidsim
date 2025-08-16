@@ -322,7 +322,6 @@ class World:
         
         for plate in plates:
             plate.get_boundary_vertices(self.sphere_mesh, self.sphere_mesh.vertices)
-            print(f"assigning {plate.ID} to {plate.vertex_ids}")
             for vid in plate.vertex_ids:
                 self.plate_ids[vid] = plate.ID
 
@@ -691,7 +690,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=15
         res=(int(dpg.get_item_width('primary') or 1), int(dpg.get_item_height('primary') or 1))
         dpg.set_item_width("draw_area", res[0])
         dpg.set_item_height("draw_area", res[1])
-        #print_timing_stats()
+        print_timing_stats()
         world.simulate_erosion(steps=0)
 
         dpg.delete_item("draw_area", children_only=True)
