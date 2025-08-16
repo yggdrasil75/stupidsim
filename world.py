@@ -11,10 +11,6 @@ from numba import njit, prange, int64, float32
 from plate import Plate
 import math
 from util import norm, spherical_distance, time_function, print_timing_stats, make_2D_array
-try:
-    from PIL import Image
-except:
-    pass
 
 #@njit(cache=True)
 def _update_elevations_a(plates, _heightmap):
@@ -58,7 +54,7 @@ def _update_elevations_b(plates, _heightmap, max_height, min_height):
 class World:
     sphere_mesh: mesh = field(default_factory=lambda: create_sphere_mesh(segments=64, rings=64))
     sea_level: np.ndarray = field(default_factory=lambda: np.array(0.0, dtype=np.float32))
-    plate_count: int = 20
+    plate_count: int = 15
     rainfall_rate: np.ndarray = field(default_factory=lambda: np.array(0.1, dtype=np.float32))
     evaporation_rate: np.ndarray = field(default_factory=lambda: np.array(0.05, dtype=np.float32))
     water_flow_max: np.ndarray = field(default_factory=lambda: np.array(1.0, dtype=np.float32))
@@ -101,14 +97,12 @@ class World:
                         (self.max_height - self.min_height) + self.min_height
 
         print("Initializing plates...")
-        self.gen_plates()
+        self.plates = self.gen_plates()
         print(f"Final plate count: {len(self.plates)}")
         for plate in self.plates:
             plate.calculate_mass()
         print("Calculating plate elevations...")
         self.update_elevations()
-        for plate in self.plates:
-            plate.update_continental_borders(self.sphere_mesh.vertices)
 
         print("Initial world generation complete")
         self.plate_colors = np.random.randint(0, 256, (len(self.plates), 4), dtype=np.uint8)
@@ -149,8 +143,8 @@ class World:
         mask = np.zeros(nv, dtype=bool)
         
         for plate in plates:
-            for vid in plate.vertex_ids:
-                mask[vid] = True
+            #for vid in plate.vertex_ids:
+            mask[plate.vertex_ids] = True
         
         while True:
             # Track if we assigned any vertices in this iteration
@@ -159,8 +153,9 @@ class World:
             for plate in plates:
                 # Get all adjacent vertices to this plate's current vertices
                 adjacent_vertices = np.zeros(nv, dtype=bool)
-                
-                for vid in plate.vertex_ids:
+
+                vids = np.atleast_1d(plate.vertex_ids)
+                for vid in vids:
                     asj = obj.get_adjacent_vertices(vid)
                     adjacent_vertices[asj] = True
                 
@@ -170,7 +165,7 @@ class World:
                 if len(candidates) > 0:
                     # Randomly select one to add to this plate
                     new_vertex = np.random.choice(candidates)
-                    plate.vertex_ids.append(new_vertex)
+                    plate.vertex_ids = np.append(plate.vertex_ids, new_vertex)
                     mask[new_vertex] = True
                     assigned_any = True
             
@@ -184,9 +179,9 @@ class World:
         obj: mesh = self.sphere_mesh
         radius: float = self.radius
         
-
+        print("generating plates: assigning origins")
         plate_origins = self.assign_origins(obj.vertices, self.plate_count + 5, radius)
-        plates: list = []
+        plates: list[Plate] = []
         for i, plate in enumerate(plate_origins):
             arandomnumber = np.random.rand()
             if arandomnumber > 0.4:
@@ -195,6 +190,7 @@ class World:
                 a = Plate.create_continental_plate(ID=i, vertex_ids=plate)
                 a.add_continental_center(plate)
             plates.append(a)
+        print("expanding plates")
         plates = self.expand_plate(obj, obj.vertices, plates)
         
         def get_plate_for_vertex(vid):
@@ -203,6 +199,10 @@ class World:
                     return plate
             return None
         
+        for plate in plates:
+            plate.calculate_mass()
+
+        print("moving erratic vertices")
         for plate in plates:
             to_remove = []
             for vid in plate.vertex_ids:
@@ -224,12 +224,13 @@ class World:
                     # Move to a random adjacent plate if any exist
                     if adjacent_plates:
                         new_plate = np.random.choice(list(adjacent_plates))
-                        new_plate.vertex_ids.append(vid)
+                        new_plate.vertex_ids = np.append(new_plate.vertex_ids, vid)
                         to_remove.append(vid)
             
             # Remove from current plate
-            plate.vertex_ids = [v for v in plate.vertex_ids if v not in to_remove]
+            plate.vertex_ids = np.array([v for v in plate.vertex_ids if v not in to_remove])
         
+        print("find locked plates and merge to parent")
         i = 0
         while i < len(plates):
             plate = plates[i]
@@ -259,6 +260,7 @@ class World:
                 continue
             i += 1
         
+        print("if too few plates after removing locked, split a massive one")
         while len(plates) < self.plate_count and len(plates) > 0:
             # Find largest plate
             largest_plate = max(plates, key=lambda p: len(p.vertex_ids))
@@ -289,10 +291,11 @@ class World:
                 plates.append(new_plate)
                 
                 # Update original plate
-                largest_plate.vertex_ids = [v for v in largest_plate.vertex_ids if v not in part1]
+                largest_plate.vertex_ids = np.array([v for v in largest_plate.vertex_ids if v not in part1])
             else:
                 break  # Can't split further
         
+        print("if too many plates after locking, merge some tiny ones.")
         while len(plates) > self.plate_count and len(plates) > 1:
             # Find all pairs of adjacent plates
             adjacent_pairs = []
@@ -311,11 +314,18 @@ class World:
             if adjacent_pairs:
                 # Randomly select a pair to merge
                 i, j = adjacent_pairs[np.random.randint(len(adjacent_pairs))]
-                plates[i].vertex_ids.extend(plates[j].vertex_ids)
+                #plates[i].vertex_ids.extend(plates[j].vertex_ids)
+                plates[i].vertex_ids = np.concatenate((plates[i].vertex_ids, plates[j].vertex_ids))
                 plates.pop(j)
             else:
                 break  # No adjacent plates left to merge
         
+        for plate in plates:
+            plate.get_boundary_vertices(self.sphere_mesh, self.sphere_mesh.vertices)
+            print(f"assigning {plate.ID} to {plate.vertex_ids}")
+            for vid in plate.vertex_ids:
+                self.plate_ids[vid] = plate.ID
+
         return plates
 
     @time_function
@@ -335,8 +345,8 @@ class World:
                     continue
                     
                 # Find boundary vertices that are close to each other
-                bound1 = plate1.get_boundary_vertices(vertex_positions)
-                bound2 = plate2.get_boundary_vertices(vertex_positions)
+                bound1 = plate1.get_boundary_vertices(self.sphere_mesh, vertex_positions)
+                bound2 = plate2.get_boundary_vertices(self.sphere_mesh, vertex_positions)
                 
                 if len(bound1) == 0 or len(bound2) == 0:
                     continue
@@ -429,11 +439,15 @@ class World:
             full_colors = np.full((num_vertices, 4), 128, dtype=np.uint8)
             full_colors[:, 3] = 255
             
-            assigned_mask = self.plate_ids != -1
-            if np.any(assigned_mask):
-                assigned_ids = self.plate_ids[assigned_mask]
-                if assigned_ids.max() < len(self.plate_colors):
-                    full_colors[assigned_mask] = self.plate_colors[assigned_ids]
+
+            for plate in self.plates:
+                if plate.ID < len(self.plate_colors):
+                    full_colors[plate.vertex_ids] = self.plate_colors[plate.ID]
+            # assigned_mask = self.plate_ids != -1
+            # if np.any(assigned_mask):
+            #     assigned_ids = self.plate_ids[assigned_mask]
+            #     if assigned_ids.max() < len(self.plate_colors):
+            #         full_colors[assigned_mask] = self.plate_colors[assigned_ids]
             
             self.sphere_mesh.color = full_colors
 
@@ -504,7 +518,7 @@ class World:
             self.update_vertices_based_on_heightmap()
             self.update_colors()
 
-def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20, viewport = None, context = None):
+def render_world(resolution=128, min_height=6357, max_height=6378, plate_count=15, viewport = None, context = None):
 
     world = World(
         sphere_mesh=create_sphere_mesh(
@@ -513,7 +527,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
             segments=resolution, 
             rings=resolution, 
             deformable=False),
-        plate_count=np.array(plate_count, dtype=np.int32),
+        plate_count=plate_count,
         min_height_value=min_height,
         max_height_value=max_height
     )
@@ -677,7 +691,7 @@ def render_world(resolution=64, min_height=6357, max_height=6378, plate_count=20
         res=(int(dpg.get_item_width('primary') or 1), int(dpg.get_item_height('primary') or 1))
         dpg.set_item_width("draw_area", res[0])
         dpg.set_item_height("draw_area", res[1])
-        print_timing_stats()
+        #print_timing_stats()
         world.simulate_erosion(steps=0)
 
         dpg.delete_item("draw_area", children_only=True)

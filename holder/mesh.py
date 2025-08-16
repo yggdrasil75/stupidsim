@@ -132,7 +132,7 @@ class mesh:
     restitution: np.ndarray = field(default_factory=lambda: np.array(0.3, dtype=np.float32))
     linearVelocity: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
     angularVelocity: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
-    _neighbor_map: dict = field(default_factory=dict, init=False)  # Stores adjacency information
+    _neighbor_map: dict[str, dict] = field(default_factory=dict, init=False)  # Stores adjacency information
     _needs_neighbor_update: bool = field(default=True, init=False)  # Flag for when to rebuild neighbor map
     _needs_triangulation: bool = field(default=True, init=False)  # Flag for when to rebuild triangles
 

@@ -17,7 +17,16 @@ class Plate:
     continental_border_vertices: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.int64))  # New field
     mass: np.ndarray = field(init=False)  # Will be calculated
     collision_force: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))  # Collision force vector
+    _boundary_vertices: np.ndarray = field(default_factory=lambda: np.empty([]))
     
+    def __hash__(self):
+        return hash(self.ID)
+    
+    def __eq__(self, other):
+        if not isinstance(other, Plate):
+            return False
+        return self.ID == other.ID
+
     def calculate_mass(self):
         """Calculate plate mass based on vertex count, base elevation and growth rate"""
         vertex_factor = len(self.vertex_ids) / 1000.0  # Normalize vertex count
@@ -46,9 +55,9 @@ class Plate:
             return
             
         # Find boundary vertices that are also continental
-        all_boundaries = self.get_boundary_vertices(all_vertices, threshold)
+        #all_boundaries = self.get_boundary_vertices(all_vertices, threshold)
         continental_boundaries = np.array(
-            [v for v in all_boundaries if v in continental_verts],
+            [v for v in self._boundary_vertices if v in continental_verts],
             dtype=np.int64
         )
         
@@ -74,6 +83,8 @@ class Plate:
     @classmethod
     def create_continental_plate(cls, ID, vertex_ids: np.ndarray, speed: float = 0.5):
         """Factory method for creating a continental plate."""
+        if type(vertex_ids) is not np.ndarray:
+            vertex_ids = np.array([vertex_ids])
         return cls(
             ID=ID,
             vertex_ids=vertex_ids,
@@ -105,30 +116,27 @@ class Plate:
         self.growth_rate = np.clip(
             self.growth_rate + amount, 0.0, 0.2)
     
-    def get_boundary_vertices(self, all_vertices: np.ndarray, threshold: float = 0.1) -> np.ndarray:
+    
+    def get_boundary_vertices(self, obj: 'mesh', all_vertices: np.ndarray) -> np.ndarray:
         """
         Identify boundary vertices of the plate.
         Returns vertex IDs that are on the boundary of the plate.
         """
-        # Get positions of our vertices
-        our_verts = all_vertices[self.vertex_ids]
-        
-        # For each vertex, find distance to nearest non-plate vertex
-        # Create mask for non-plate vertices
-        mask = np.ones(all_vertices.shape[0], dtype=bool)
-        mask[self.vertex_ids] = False
-        other_verts = all_vertices[mask]
-        
-        # Calculate distances between our vertices and other vertices
-        distances = np.linalg.norm(our_verts[:, np.newaxis] - other_verts, axis=2)
-        
-        # Find minimum distance to non-plate vertices for each plate vertex
-        min_distances = np.min(distances, axis=1)
-        
-        # Boundary vertices are those close to non-plate vertices
-        boundary_mask = min_distances < threshold
-        return self.vertex_ids[boundary_mask]
-    
+        if self._boundary_vertices.size > 5:
+            return self._boundary_vertices
+        boundary_mmask = np.zeros(len(self.vertex_ids), dtype=bool)
+        sortedpv = np.sort(self.vertex_ids)
+        for i, vid in enumerate(self.vertex_ids):
+            adj = obj.get_adjacent_vertices(vid)
+            adj = np.array(adj)
+            found = np.searchsorted(sortedpv, adj)
+            valids = (found < len(sortedpv))
+            matches = np.zeros(len(adj), dtype=bool)
+            matches[valids] = (sortedpv[found[valids]] == adj[valids])
+            if not np.all(matches):
+                boundary_mmask[i] = True
+        return self.vertex_ids[boundary_mmask]
+
     def get_continental_vertices(self) -> np.ndarray:
         """Get all vertices that are part of continental landmasses."""
         if not self.continental_centers:
