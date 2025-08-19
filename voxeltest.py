@@ -175,8 +175,8 @@ def create_planet_with_tectonics(system, center, radius, num_points=50000, num_p
             center[2] + z * radius
         ], dtype=np.float64)
         
-        # Add voxel with default color (will be updated later)
-        system.add_voxel(point, np.array([0, 0, 0, 255], dtype=np.uint8), 1.5)
+        # Add voxel with default color (will be updated later) - INCREASED SIZE
+        system.add_voxel(point, np.array([0, 0, 0, 255], dtype=np.uint8), 3.0)  # Increased from 1.5 to 3.0
     
     # Assign tectonic plates
     print("Assigning tectonic plates...")
@@ -257,18 +257,29 @@ def render_orthographic(system, angle_x=0.0, angle_y=0.0, angle_z=0.0, distance=
         # Apply distance scaling (zoom)
         scaled_pos = rotated_pos * distance
         
-        # Simple orthographic projection: ignore z-coordinate for now
-        x = int(scaled_pos[0] + center_x)
-        y = int(scaled_pos[1] + center_y)
+        # Calculate voxel size in screen space (larger for better coverage)
+        voxel_size = max(1, int(voxel.size * 2.0))  # Increased size multiplier
         
-        # Check if within bounds
-        if 0 <= x < system.width and 0 <= y < system.height:
-            # Simple alpha blending
-            alpha = voxel.color[3] / 255.0
-            image[y, x, 0] = int(voxel.color[0] * alpha + image[y, x, 0] * (1 - alpha))
-            image[y, x, 1] = int(voxel.color[1] * alpha + image[y, x, 1] * (1 - alpha))
-            image[y, x, 2] = int(voxel.color[2] * alpha + image[y, x, 2] * (1 - alpha))
-            image[y, x, 3] = min(255, image[y, x, 3] + voxel.color[3])
+        # Calculate bounding box for the voxel
+        x_center = int(scaled_pos[0] + center_x)
+        y_center = int(scaled_pos[1] + center_y)
+        
+        half_size = voxel_size // 2
+        
+        # Draw a filled square instead of just a point
+        for dx in range(-half_size, half_size + 1):
+            for dy in range(-half_size, half_size + 1):
+                x = x_center + dx
+                y = y_center + dy
+                
+                # Check if within bounds
+                if 0 <= x < system.width and 0 <= y < system.height:
+                    # Simple alpha blending
+                    alpha = voxel.color[3] / 255.0
+                    image[y, x, 0] = int(voxel.color[0] * alpha + image[y, x, 0] * (1 - alpha))
+                    image[y, x, 1] = int(voxel.color[1] * alpha + image[y, x, 1] * (1 - alpha))
+                    image[y, x, 2] = int(voxel.color[2] * alpha + image[y, x, 2] * (1 - alpha))
+                    image[y, x, 3] = min(255, image[y, x, 3] + voxel.color[3])
     
     return image
 
