@@ -1,40 +1,42 @@
-#new plate assignment attempt
-import numpy as np
-from util import spherical_distance
-import numpy as np
+import dearpygui.dearpygui as dpg
+import array
+
+dpg.create_context()
 
 
-def assign_origins(self, vertices, num_plates, radius):
-    random_indices = np.random.choice(len(vertices), num_plates, replace=False)
-    plate_origins_indices = random_indices.copy()  # This will store the indices we return
-    plate_origins = vertices[random_indices]  # This is just for distance checking
-    
-    # Check distances between all pairs of plate origins
-    need_reassignment = True
-    while need_reassignment:
-        need_reassignment = False
-        for i in range(len(plate_origins_indices)):
-            for j in range(i+1, len(plate_origins_indices)):
-                # Calculate spherical distance between two plate origins
-                dist = spherical_distance(vertices[plate_origins_indices[i]], 
-                                         vertices[plate_origins_indices[j]], 
-                                         radius)
-                
-                # If too close, replace one of them with a new random vertex
-                if dist < (radius / 10):
-                    # Get all vertex indices not currently used as origins
-                    all_indices = set(range(len(vertices)))
-                    used_indices = set(plate_origins_indices)
-                    available_vertices = list(all_indices - used_indices)
-                    
-                    if available_vertices:  # Ensure there are vertices left to choose from
-                        # Select a new random index from available vertices
-                        new_index = np.random.choice(available_vertices)
-                        # Update both our tracking arrays
-                        plate_origins_indices[j] = new_index
-                        plate_origins[j] = vertices[new_index]
-                        need_reassignment = True  # Need to check all pairs again
-                    else:
-                        raise ValueError("Not enough vertices to maintain minimum distance")
-    
-    return plate_origins_indices
+texture_data = []
+for i in range(0, 100 * 100):
+    texture_data.append(255 / 255)
+    texture_data.append(0)
+    texture_data.append(255 / 255)
+    texture_data.append(255 / 255)
+
+raw_data = array.array('f', texture_data)
+
+with dpg.texture_registry(show=True):
+    dpg.add_raw_texture(width=100, height=100, default_value=raw_data, format=dpg.mvFormat_Float_rgba, tag="texture_tag")
+
+
+def update_dynamic_texture(sender, app_data, user_data):
+    new_color = dpg.get_value(sender)
+    new_color[0] = new_color[0] / 255
+    new_color[1] = new_color[1] / 255
+    new_color[2] = new_color[2] / 255
+    new_color[3] = new_color[3] / 255
+
+    for i in range(0, 100 * 100 * 4):
+        raw_data[i] = new_color[i % 4]
+
+
+with dpg.window(label="Tutorial"):
+    dpg.add_image("texture_tag")
+    dpg.add_color_picker((255, 0, 255, 255), label="Texture",
+                         no_side_preview=True, alpha_bar=True, width=200,
+                         callback=update_dynamic_texture)
+
+
+dpg.create_viewport(title='Custom Title', width=800, height=600)
+dpg.setup_dearpygui()
+dpg.show_viewport()
+dpg.start_dearpygui()
+dpg.destroy_context()
