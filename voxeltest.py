@@ -215,9 +215,26 @@ def apply_plate_colors(system):
             
             voxel.color = base_color
 
+@njit
+def rotate_point(point, angle_x, angle_y, angle_z):
+    """Rotate a point around the origin using Euler angles"""
+    # Rotation around X axis
+    y = point[1] * math.cos(angle_x) - point[2] * math.sin(angle_x)
+    z = point[1] * math.sin(angle_x) + point[2] * math.cos(angle_x)
+    
+    # Rotation around Y axis
+    x = point[0] * math.cos(angle_y) + z * math.sin(angle_y)
+    z = -point[0] * math.sin(angle_y) + z * math.cos(angle_y)
+    
+    # Rotation around Z axis
+    x_new = x * math.cos(angle_z) - y * math.sin(angle_z)
+    y_new = x * math.sin(angle_z) + y * math.cos(angle_z)
+    
+    return np.array([x_new, y_new, z], dtype=np.float64)
+
 @njit(parallel=True)
-def render_orthographic(system):
-    """Render the voxels using orthographic projection"""
+def render_orthographic(system, angle_x=0.0, angle_y=0.0, angle_z=0.0, distance=1.0):
+    """Render the voxels using orthographic projection with rotation and zoom"""
     image = np.zeros((system.height, system.width, 4), dtype=np.uint8)
     
     # Fill with background color
@@ -226,11 +243,23 @@ def render_orthographic(system):
     image[:, :, 2] = system.background_color[2]  # B
     image[:, :, 3] = system.background_color[3]  # A
     
-    # Simple orthographic projection: ignore z-coordinate for now
+    # Calculate center point
+    center_x = system.width / 2
+    center_y = system.height / 2
+    
+    # Render each voxel with rotation
     for i in prange(len(system.voxels)):
         voxel = system.voxels[i]
-        x = int(voxel.position[0] + system.width / 2)
-        y = int(voxel.position[1] + system.height / 2)
+        
+        # Apply rotation to the voxel position
+        rotated_pos = rotate_point(voxel.position, angle_x, angle_y, angle_z)
+        
+        # Apply distance scaling (zoom)
+        scaled_pos = rotated_pos * distance
+        
+        # Simple orthographic projection: ignore z-coordinate for now
+        x = int(scaled_pos[0] + center_x)
+        y = int(scaled_pos[1] + center_y)
         
         # Check if within bounds
         if 0 <= x < system.width and 0 <= y < system.height:
@@ -243,30 +272,29 @@ def render_orthographic(system):
     
     return image
 
-def generate_planet():
+class Camera:
+    def __init__(self):
+        self.yaw = 0.0      # Rotation around Y axis
+        self.pitch = 0.0    # Rotation around X axis
+        self.roll = 0.0     # Rotation around Z axis
+        self.azimuth = 0.0  # Azimuth angle for orbital camera
+        self.distance = 1.0  # Distance from center (zoom)
+        self.auto_rotate = False
+        self.rotation_speed = math.radians(1)  # 1 degree per second
+
+    def update_rotation(self, dt):
+        """Update rotation if auto-rotate is enabled"""
+        if self.auto_rotate:
+            self.yaw += self.rotation_speed * dt
+
+def generate_planet(system, camera):
     """Generate the planet and return the texture data"""
-    # Create the voxel system
-    width, height = 800, 800
-    system = VoxelSystem(width, height)
-    
-    # Create a planet with tectonic plates
-    center = np.array([0.0, 0.0, 0.0])
-    radius = 300.0
-    
-    print("Creating planet with tectonic plates...")
-    start_time = time.time()
-    create_planet_with_tectonics(system, center, radius, 50000, 12)
-    print(f"Created {len(system.voxels)} voxels in {time.time() - start_time:.2f} seconds")
-    
-    # Render the scene
-    print("Rendering...")
-    start_time = time.time()
-    image_data = render_orthographic(system)
-    print(f"Rendered in {time.time() - start_time:.2f} seconds")
+    # Render the scene with current camera rotation
+    image_data = render_orthographic(system, camera.pitch, camera.yaw, camera.roll, camera.distance)
     
     # Convert to a format suitable for DPG
     # DPG expects a flat array of floats in the range [0, 1]
-    texture_data = np.zeros((height, width, 4), dtype=np.float32)
+    texture_data = np.zeros((system.height, system.width, 4), dtype=np.float32)
     texture_data[:, :, 0] = image_data[:, :, 0].astype(np.float32) / 255.0  # R
     texture_data[:, :, 1] = image_data[:, :, 1].astype(np.float32) / 255.0  # G
     texture_data[:, :, 2] = image_data[:, :, 2].astype(np.float32) / 255.0  # B
@@ -274,34 +302,132 @@ def generate_planet():
     
     return texture_data.flatten()
 
+def update_texture(system, camera):
+    """Update the texture with the current camera rotation"""
+    texture_data = generate_planet(system, camera)
+    dpg.set_value("planet_texture", texture_data)
+
 def dpgmain():
     # Initialize Dear PyGui
     dpg.create_context()
     dpg.create_viewport(title='Voxel Planet', width=800, height=800)
     
+    # Create the voxel system
+    width, height = 800, 800
+    system = VoxelSystem(width, height)
+    
+    # Create a planet with tectonic plates
+    center = np.array([0.0, 0.0, 0.0])
+    radius = 100.0
+    
+    print("Creating planet with tectonic plates...")
+    start_time = time.time()
+    create_planet_with_tectonics(system, center, radius, 50000, 12)
+    print(f"Created {len(system.voxels)} voxels in {time.time() - start_time:.2f} seconds")
+    
+    # Create camera
+    camera = Camera()
+    
     # Generate the planet texture
-    texture_data = generate_planet()
+    texture_data = generate_planet(system, camera)
     
     # Create texture registry and add texture
     with dpg.texture_registry():
-        dpg.add_raw_texture(width=800, height=800, default_value=texture_data, 
+        dpg.add_raw_texture(width=width, height=height, default_value=texture_data, 
                            format=dpg.mvFormat_Float_rgba, tag="planet_texture")
     
     # Create main window with the texture
     with dpg.window(label="Voxel Planet", tag="primary_window", width=800, height=800):
-        dpg.add_image("planet_texture", width=800, height=800)
+        with dpg.group(horizontal=True):
+            # Image display
+            dpg.add_image("planet_texture", width=800, height=800)
+            
+            # Control panel
+            with dpg.group(width=200, height=200):
+                # Rotation sliders
+                dpg.add_text("Rotation Controls")
+                dpg.add_slider_float(label="Yaw", min_value=-3.14, max_value=3.14, default_value=0.0, 
+                                    callback=lambda s, a: update_camera_rotation(sender=s, app_data=a, system=system, camera=camera, rotation_type='yaw'))
+                dpg.add_slider_float(label="Pitch", min_value=-3.14, max_value=3.14, default_value=0.0,
+                                    callback=lambda s, a: update_camera_rotation(sender=s, app_data=a, system=system, camera=camera, rotation_type='pitch'))
+                dpg.add_slider_float(label="Roll", min_value=-3.14, max_value=3.14, default_value=0.0,
+                                    callback=lambda s, a: update_camera_rotation(sender=s, app_data=a, system=system, camera=camera, rotation_type='roll'))
+                
+                # Azimuth and distance sliders
+                dpg.add_text("View Controls")
+                dpg.add_slider_float(label="Azimuth", min_value=0.0, max_value=6.28, default_value=0.0,
+                                    callback=lambda s, a: update_camera_rotation(sender=s, app_data=a, system=system, camera=camera, rotation_type='azimuth'))
+                dpg.add_slider_float(label="Distance", min_value=0.1, max_value=10.0, default_value=1.0,
+                                    callback=lambda s, a: update_camera_rotation(sender=s, app_data=a, system=system, camera=camera, rotation_type='distance'))
+                
+                # Auto-rotation button
+                dpg.add_text("Auto Rotation")
+                dpg.add_button(label="Toggle Auto Rotation", 
+                              callback=lambda: toggle_auto_rotation(system, camera))
+                
+                # Reset button
+                dpg.add_button(label="Reset View", 
+                              callback=lambda: reset_view(system, camera))
     
     # Set primary window and show viewport
     dpg.set_primary_window("primary_window", True)
     dpg.setup_dearpygui()
     dpg.show_viewport()
     
-    # Start the rendering loop
+    # Start the rendering loop with time tracking for auto-rotation
+    last_time = time.time()
     while dpg.is_dearpygui_running():
+        current_time = time.time()
+        dt = current_time - last_time
+        last_time = current_time
+        
+        # Update auto-rotation if enabled
+        if camera.auto_rotate:
+            camera.update_rotation(dt)
+            update_texture(system, camera)
+        
         dpg.render_dearpygui_frame()
     
     # Cleanup
     dpg.destroy_context()
+
+def update_camera_rotation(sender, app_data, system, camera, rotation_type):
+    """Update camera rotation based on slider changes"""
+    if rotation_type == 'yaw':
+        camera.yaw = app_data
+    elif rotation_type == 'pitch':
+        camera.pitch = app_data
+    elif rotation_type == 'roll':
+        camera.roll = app_data
+    elif rotation_type == 'azimuth':
+        camera.azimuth = app_data
+    elif rotation_type == 'distance':
+        camera.distance = app_data
+    
+    update_texture(system, camera)
+
+def toggle_auto_rotation(system, camera):
+    """Toggle auto-rotation on/off"""
+    camera.auto_rotate = not camera.auto_rotate
+    update_texture(system, camera)
+
+def reset_view(system, camera):
+    """Reset camera to default view"""
+    camera.yaw = 0.0
+    camera.pitch = 0.0
+    camera.roll = 0.0
+    camera.azimuth = 0.0
+    camera.distance = 1.0
+    camera.auto_rotate = False
+    
+    # Update sliders to match
+    dpg.set_value("Yaw", 0.0)
+    dpg.set_value("Pitch", 0.0)
+    dpg.set_value("Roll", 0.0)
+    dpg.set_value("Azimuth", 0.0)
+    dpg.set_value("Distance", 1.0)
+    
+    update_texture(system, camera)
 
 if __name__ == "__main__":
     dpgmain()

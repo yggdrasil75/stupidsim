@@ -16,7 +16,7 @@ raw_data = array.array('f', texture_data)
 with dpg.texture_registry(show=True):
     dpg.add_raw_texture(width=100, height=100, default_value=raw_data, format=dpg.mvFormat_Float_rgba, tag="texture_tag")
 
-
+dpg.show_item
 def update_dynamic_texture(sender, app_data, user_data):
     new_color = dpg.get_value(sender)
     new_color[0] = new_color[0] / 255
