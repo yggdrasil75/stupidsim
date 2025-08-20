@@ -16,16 +16,18 @@ voxel_spec = [
     ('size', types.float64),
     ('plate_id', types.int64),  # Add plate ID
     ('elevation', types.float64),  # Add elevation
+    ('density', types.float64),  # Add density for solid interior
 ]
 
 @jitclass(voxel_spec)
 class Voxel:
-    def __init__(self, position, color, size=1.0, plate_id=-1, elevation=0.0):
+    def __init__(self, position, color, size=1.0, plate_id=-1, elevation=0.0, density=1.0):
         self.position = position
         self.color = color
         self.size = size
         self.plate_id = plate_id
         self.elevation = elevation
+        self.density = density
 
 # Get the type of the Voxel class for use in the list
 VoxelType = Voxel.class_type.instance_type
@@ -48,32 +50,10 @@ class VoxelSystem:
         self.background_color = background_color
         self.plate_colors = Dict.empty(key_type=types.int64, value_type=types.uint8[:])
     
-    def add_voxel(self, position, color, size=1.0, plate_id=-1, elevation=0.0):
+    def add_voxel(self, position, color, size=1.0, plate_id=-1, elevation=0.0, density=1.0):
         """Add a voxel to the system"""
-        voxel = Voxel(position.astype(np.float64), color.astype(np.uint8), float(size), plate_id, elevation)
+        voxel = Voxel(position.astype(np.float64), color.astype(np.uint8), float(size), plate_id, elevation, density)
         self.voxels.append(voxel)
-    
-    def create_sphere(self, center, radius, color, num_points=1000):
-        """Create a sphere of voxels using Fibonacci sphere algorithm"""
-        golden_ratio = (1.0 + math.sqrt(5.0)) / 2.0
-        
-        for i in range(num_points):
-            y = 1.0 - (i / float(num_points - 1)) * 2.0  # y goes from 1 to -1
-            radius_at_y = math.sqrt(1.0 - y * y)  # radius at y
-            
-            theta = 2.0 * math.pi * i / golden_ratio  # golden angle increment
-            
-            x = math.cos(theta) * radius_at_y
-            z = math.sin(theta) * radius_at_y
-            
-            # Scale by radius and translate by center
-            point = np.array([
-                center[0] + x * radius,
-                center[1] + y * radius,
-                center[2] + z * radius
-            ], dtype=np.float64)
-            
-            self.add_voxel(point, color, 1.0)
 
 @njit
 def distance(a, b):
@@ -157,22 +137,44 @@ def calculate_elevation(system, center, radius):
 
 def create_planet_with_tectonics(system, center, radius, num_points=50000, num_plates=10):
     """Create a planet with tectonic plates"""
-    indices = np.arange(0, num_points, dtype=float) + 0.5
-    phi = np.arccos(1 - 2 * indices / num_points)
-    theta = np.pi * (1 + 5**0.5) * indices
-    
+    # Generate points throughout the entire volume of the sphere
     for i in range(num_points):
-        x = np.cos(theta[i]) * np.sin(phi[i])
-        y = np.sin(theta[i]) * np.sin(phi[i])
-        z = np.cos(phi[i])
+        # Generate a random point in a cube
+        x = random.uniform(-1, 1)
+        y = random.uniform(-1, 1)
+        z = random.uniform(-1, 1)
         
+        # Calculate distance from center
+        dist = math.sqrt(x*x + y*y + z*z)
+        
+        # If point is outside the unit sphere, normalize it to the surface
+        if dist > 1.0:
+            x /= dist
+            y /= dist
+            z /= dist
+            dist = 1.0
+        
+        # Scale by a random radius to fill the sphere
+        r = random.uniform(0, 1)  # Uniform distribution in volume
+        r = r ** (1/3)  # Correct for volume distribution
+        
+        # Apply the radius scaling
+        x *= r
+        y *= r
+        z *= r
+        dist *= r
+        
+        # Scale by planet radius and translate to center
         point = np.array([
             center[0] + x * radius,
             center[1] + y * radius,
             center[2] + z * radius
         ], dtype=np.float64)
         
-        system.add_voxel(point, np.array([0, 0, 0, 255], dtype=np.uint8), 1.0)
+        # Calculate density based on distance from center (higher density near core)
+        density = 1.0 - dist  # Linear density gradient
+        
+        system.add_voxel(point, np.array([0, 0, 0, 255], dtype=np.uint8), 1.0, -1, 0.0, density)
     
     # Assign tectonic plates
     print("Assigning tectonic plates...")
@@ -186,7 +188,7 @@ def create_planet_with_tectonics(system, center, radius, num_points=50000, num_p
     #calculate_elevation(system, center, radius)
     print(f"Calculated elevation in {time.time() - start_time:.2f} seconds")
     
-    # Apply colors based on plate and elevation
+    # Apply colors based on plate and elevation/density
     print("Applying colors...")
     start_time = time.time()
     apply_plate_colors(system)
@@ -194,22 +196,30 @@ def create_planet_with_tectonics(system, center, radius, num_points=50000, num_p
 
 @njit
 def apply_plate_colors(system):
-    """Apply colors based on plate membership and elevation"""
+    """Apply colors based on plate membership, elevation, and density"""
     for i in prange(len(system.voxels)):
         voxel = system.voxels[i]
         
         if voxel.plate_id in system.plate_colors:
             base_color = system.plate_colors[voxel.plate_id].copy()
             
-            # Modify color based on elevation
+            # Modify color based on elevation and density
             # Higher elevation = lighter color
+            # Higher density (deeper) = darker color
             elevation_factor = 0.5 + voxel.elevation * 0.5
+            density_factor = 0.3 + 0.7 * (1.0 - voxel.density)  # Invert density for color (darker when denser)
             
-            base_color[0] = min(255, int(base_color[0] * elevation_factor))
-            base_color[1] = min(255, int(base_color[1] * elevation_factor))
-            base_color[2] = min(255, int(base_color[2] * elevation_factor))
+            combined_factor = elevation_factor * density_factor
+            
+            base_color[0] = min(255, int(base_color[0] * combined_factor))
+            base_color[1] = min(255, int(base_color[1] * combined_factor))
+            base_color[2] = min(255, int(base_color[2] * combined_factor))
             
             voxel.color = base_color
+        else:
+            # Default color for interior (based on density)
+            gray_value = int(100 + 100 * (1.0 - voxel.density))
+            voxel.color = np.array([gray_value, gray_value, gray_value, 255], dtype=np.uint8)
 
 @njit
 def rotate_point(point, angle_x, angle_y, angle_z):
@@ -365,7 +375,7 @@ def dpgmain():
     
     print("Creating planet with tectonic plates...")
     start_time = time.time()
-    create_planet_with_tectonics(system, center, radius, 50000, 12)
+    create_planet_with_tectonics(system, center, radius, 500000, 12)
     print(f"Created {len(system.voxels)} voxels in {time.time() - start_time:.2f} seconds")
     
     # Create camera
