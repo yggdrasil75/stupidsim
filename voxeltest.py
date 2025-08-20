@@ -17,17 +17,19 @@ voxel_spec = [
     ('plate_id', types.int64),  # Add plate ID
     ('elevation', types.float64),  # Add elevation
     ('density', types.float64),  # Add density for solid interior
+    ('is_surface', types.boolean),  # Add flag for surface voxels
 ]
 
 @jitclass(voxel_spec)
 class Voxel:
-    def __init__(self, position, color, size=1.0, plate_id=-1, elevation=0.0, density=1.0):
+    def __init__(self, position, color, size=1.0, plate_id=-1, elevation=0.0, density=1.0, is_surface=False):
         self.position = position
         self.color = color
         self.size = size
         self.plate_id = plate_id
         self.elevation = elevation
         self.density = density
+        self.is_surface = is_surface
 
 # Get the type of the Voxel class for use in the list
 VoxelType = Voxel.class_type.instance_type
@@ -50,9 +52,9 @@ class VoxelSystem:
         self.background_color = background_color
         self.plate_colors = Dict.empty(key_type=types.int64, value_type=types.uint8[:])
     
-    def add_voxel(self, position, color, size=1.0, plate_id=-1, elevation=0.0, density=1.0):
+    def add_voxel(self, position, color, size=1.0, plate_id=-1, elevation=0.0, density=1.0, is_surface=False):
         """Add a voxel to the system"""
-        voxel = Voxel(position.astype(np.float64), color.astype(np.uint8), float(size), plate_id, elevation, density)
+        voxel = Voxel(position.astype(np.float64), color.astype(np.uint8), float(size), plate_id, elevation, density, is_surface)
         self.voxels.append(voxel)
 
 @njit
@@ -61,12 +63,12 @@ def distance(a, b):
     return math.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2 + (a[2] - b[2])**2)
 
 @njit
-def assign_plates(system, num_plates=10):
-    """Assign tectonic plates to voxels"""
-    # Create plate origins (random points on the sphere)
+def assign_plates(system, num_plates=10, core_radius=0.3):
+    """Assign tectonic plates to surface voxels only"""
+    # Create plate origins (random points on the sphere surface)
     plate_origins = []
     for i in range(num_plates):
-        # Generate random point on sphere
+        # Generate random point on sphere surface
         theta = random.random() * 2 * math.pi
         phi = math.acos(2 * random.random() - 1)
         
@@ -82,12 +84,15 @@ def assign_plates(system, num_plates=10):
         b = random.randint(50, 200)
         system.plate_colors[i] = np.array([r, g, b, 255], dtype=np.uint8)
     
-    # Assign each voxel to the nearest plate origin
+    # Assign each surface voxel to the nearest plate origin
     for i in prange(len(system.voxels)):
         voxel = system.voxels[i]
-        min_dist = float('inf')
-        closest_plate = -1
         
+        # Skip core voxels (they won't be assigned to any plate)
+        if not voxel.is_surface:
+            voxel.plate_id = -2  # Mark as core
+            continue
+            
         # Normalize voxel position to get direction vector
         pos = voxel.position
         norm = math.sqrt(pos[0]**2 + pos[1]**2 + pos[2]**2)
@@ -95,14 +100,17 @@ def assign_plates(system, num_plates=10):
             dir_vec = np.array([pos[0]/norm, pos[1]/norm, pos[2]/norm], dtype=np.float64)
             
             # Find closest plate origin
+            min_dist = float('inf')
+            closest_plate = -1
+            
             for j in range(len(plate_origins)):
                 dist = distance(dir_vec, plate_origins[j])
                 if dist < min_dist:
                     min_dist = dist
                     closest_plate = j
         
-        # Update voxel plate ID
-        voxel.plate_id = closest_plate
+            # Update voxel plate ID
+            voxel.plate_id = closest_plate
 
 @njit
 def calculate_elevation(system, center, radius):
@@ -110,6 +118,11 @@ def calculate_elevation(system, center, radius):
     for i in prange(len(system.voxels)):
         voxel = system.voxels[i]
         
+        # Skip core voxels for elevation calculation
+        if not voxel.is_surface:
+            voxel.elevation = 0.0
+            continue
+            
         # Normalize position to get direction vector
         pos = voxel.position
         norm = math.sqrt(pos[0]**2 + pos[1]**2 + pos[2]**2)
@@ -119,7 +132,7 @@ def calculate_elevation(system, center, radius):
             # Find distance to nearest plate boundary
             min_boundary_dist = float('inf')
             for j in range(len(system.voxels)):
-                if i == j or system.voxels[j].plate_id == voxel.plate_id:
+                if i == j or not system.voxels[j].is_surface or system.voxels[j].plate_id == voxel.plate_id:
                     continue
                     
                 other_pos = system.voxels[j].position
@@ -135,8 +148,12 @@ def calculate_elevation(system, center, radius):
             elevation = min(1.0, max(0.0, 1.0 - min_boundary_dist * 5.0))
             voxel.elevation = elevation
 
-def create_planet_with_tectonics(system, center, radius, num_points=50000, num_plates=10):
-    """Create a planet with tectonic plates"""
+def create_planet_with_tectonics(system, center, radius, num_points=50000, num_plates=10, core_radius=0.3):
+    """Create a solid planet with tectonic plates and a core"""
+    # Define core radius (fraction of total radius)
+    core_radius_fraction = core_radius
+    core_radius_absolute = radius * core_radius_fraction
+    
     # Generate points throughout the entire volume of the sphere
     for i in range(num_points):
         # Generate a random point in a cube
@@ -174,15 +191,31 @@ def create_planet_with_tectonics(system, center, radius, num_points=50000, num_p
         # Calculate density based on distance from center (higher density near core)
         density = 1.0 - dist  # Linear density gradient
         
-        system.add_voxel(point, np.array([0, 0, 0, 255], dtype=np.uint8), 1.0, -1, 0.0, density)
+        # Determine if this is a surface voxel (near the outer shell)
+        is_surface = (r > 0.95)  # Outer 5% of radius is considered surface
+        
+        # Mark core voxels (inner core_radius_fraction of radius)
+        is_core = (r < core_radius_fraction)
+        
+        # For core voxels, use a different color and mark them specially
+        if is_core:
+            # Core voxels get special treatment
+            color = np.array([150, 100, 50, 255], dtype=np.uint8)  # Core color
+            plate_id = -2  # Special ID for core
+            is_surface = False
+        else:
+            color = np.array([0, 0, 0, 255], dtype=np.uint8)  # Temporary color
+            plate_id = -1  # Will be assigned later
+        
+        system.add_voxel(point, color, 1.0, plate_id, 0.0, density, is_surface)
     
-    # Assign tectonic plates
-    print("Assigning tectonic plates...")
+    # Assign tectonic plates to surface voxels only
+    print("Assigning tectonic plates to surface...")
     start_time = time.time()
-    assign_plates(system, num_plates)
+    assign_plates(system, num_plates, core_radius_fraction)
     print(f"Assigned plates in {time.time() - start_time:.2f} seconds")
     
-    # Calculate elevation based on plate boundaries
+    # Calculate elevation based on plate boundaries (surface only)
     print("Calculating elevation...")
     start_time = time.time()
     #calculate_elevation(system, center, radius)
@@ -191,16 +224,26 @@ def create_planet_with_tectonics(system, center, radius, num_points=50000, num_p
     # Apply colors based on plate and elevation/density
     print("Applying colors...")
     start_time = time.time()
-    apply_plate_colors(system)
+    apply_plate_colors(system, core_radius_fraction)
     print(f"Applied colors in {time.time() - start_time:.2f} seconds")
 
 @njit
-def apply_plate_colors(system):
+def apply_plate_colors(system, core_radius_fraction):
     """Apply colors based on plate membership, elevation, and density"""
     for i in prange(len(system.voxels)):
         voxel = system.voxels[i]
         
-        if voxel.plate_id in system.plate_colors:
+        # Core voxels (special treatment)
+        if voxel.plate_id == -2:
+            # Core gets a consistent color based on depth
+            core_depth = 1.0 - voxel.density  # Deeper = darker
+            red = int(150 + 50 * core_depth)
+            green = int(100 + 30 * core_depth)
+            blue = int(50 + 20 * core_depth)
+            voxel.color = np.array([red, green, blue, 255], dtype=np.uint8)
+        
+        # Surface voxels with plate assignment
+        elif voxel.plate_id in system.plate_colors:
             base_color = system.plate_colors[voxel.plate_id].copy()
             
             # Modify color based on elevation and density
@@ -216,9 +259,11 @@ def apply_plate_colors(system):
             base_color[2] = min(255, int(base_color[2] * combined_factor))
             
             voxel.color = base_color
+        
+        # Interior voxels (not surface, not core)
         else:
-            # Default color for interior (based on density)
-            gray_value = int(100 + 100 * (1.0 - voxel.density))
+            # Interior color based on depth/density
+            gray_value = int(50 + 150 * (1.0 - voxel.density))
             voxel.color = np.array([gray_value, gray_value, gray_value, 255], dtype=np.uint8)
 
 @njit
@@ -369,13 +414,13 @@ def dpgmain():
     width, height = 800, 800
     system = VoxelSystem(width, height)
     
-    # Create a planet with tectonic plates
+    # Create a planet with tectonic plates and core
     center = np.array([0.0, 0.0, 0.0])
     radius = 100.0
     
-    print("Creating planet with tectonic plates...")
+    print("Creating planet with tectonic plates and core...")
     start_time = time.time()
-    create_planet_with_tectonics(system, center, radius, 500000, 12)
+    create_planet_with_tectonics(system, center, radius, 500000, 12, core_radius=0.3)
     print(f"Created {len(system.voxels)} voxels in {time.time() - start_time:.2f} seconds")
     
     # Create camera
