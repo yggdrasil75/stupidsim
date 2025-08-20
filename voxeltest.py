@@ -157,17 +157,14 @@ def calculate_elevation(system, center, radius):
 
 def create_planet_with_tectonics(system, center, radius, num_points=50000, num_plates=10):
     """Create a planet with tectonic plates"""
-    golden_ratio = (1.0 + math.sqrt(5.0)) / 2.0
+    indices = np.arange(0, num_points, dtype=float) + 0.5
+    phi = np.arccos(1 - 2 * indices / num_points)
+    theta = np.pi * (1 + 5**0.5) * indices
     
-    # First create the sphere points
     for i in range(num_points):
-        y = 1.0 - (i / float(num_points - 1)) * 2.0
-        radius_at_y = math.sqrt(1.0 - y * y)
-        
-        theta = 2.0 * math.pi * i / golden_ratio
-        
-        x = math.cos(theta) * radius_at_y
-        z = math.sin(theta) * radius_at_y
+        x = np.cos(theta[i]) * np.sin(phi[i])
+        y = np.sin(theta[i]) * np.sin(phi[i])
+        z = np.cos(phi[i])
         
         point = np.array([
             center[0] + x * radius,
@@ -175,8 +172,7 @@ def create_planet_with_tectonics(system, center, radius, num_points=50000, num_p
             center[2] + z * radius
         ], dtype=np.float64)
         
-        # Add voxel with default color (will be updated later) - INCREASED SIZE
-        system.add_voxel(point, np.array([0, 0, 0, 255], dtype=np.uint8), 3.0)  # Increased from 1.5 to 3.0
+        system.add_voxel(point, np.array([0, 0, 0, 255], dtype=np.uint8), 1.0)
     
     # Assign tectonic plates
     print("Assigning tectonic plates...")
@@ -247,8 +243,15 @@ def render_orthographic(system, angle_x=0.0, angle_y=0.0, angle_z=0.0, distance=
     center_x = system.width / 2
     center_y = system.height / 2
     
+    # Create depth buffer for proper occlusion
+    depth_buffer = np.full((system.height, system.width), float('inf'))
+    
+    # Sort voxels by distance from camera for proper rendering order
+    sorted_indices = np.argsort(np.array([-np.linalg.norm(voxel.position) for voxel in system.voxels], dtype=np.float32), kind='quicksort')
+    
     # Render each voxel with rotation
-    for i in prange(len(system.voxels)):
+    for idx in prange(len(sorted_indices)):
+        i = sorted_indices[idx]
         voxel = system.voxels[i]
         
         # Apply rotation to the voxel position
@@ -257,31 +260,60 @@ def render_orthographic(system, angle_x=0.0, angle_y=0.0, angle_z=0.0, distance=
         # Apply distance scaling (zoom)
         scaled_pos = rotated_pos * distance
         
-        # Calculate voxel size in screen space (larger for better coverage)
-        voxel_size = max(1, int(voxel.size * 2.0))  # Increased size multiplier
-        
-        # Calculate bounding box for the voxel
+        # Calculate screen position
         x_center = int(scaled_pos[0] + center_x)
         y_center = int(scaled_pos[1] + center_y)
         
-        half_size = voxel_size // 2
+        # Skip if outside view
+        if x_center < 0 or x_center >= system.width or y_center < 0 or y_center >= system.height:
+            continue
         
-        # Draw a filled square instead of just a point
-        for dx in range(-half_size, half_size + 1):
-            for dy in range(-half_size, half_size + 1):
-                x = x_center + dx
-                y = y_center + dy
-                
-                # Check if within bounds
-                if 0 <= x < system.width and 0 <= y < system.height:
-                    # Simple alpha blending
-                    alpha = voxel.color[3] / 255.0
-                    image[y, x, 0] = int(voxel.color[0] * alpha + image[y, x, 0] * (1 - alpha))
-                    image[y, x, 1] = int(voxel.color[1] * alpha + image[y, x, 1] * (1 - alpha))
-                    image[y, x, 2] = int(voxel.color[2] * alpha + image[y, x, 2] * (1 - alpha))
-                    image[y, x, 3] = min(255, image[y, x, 3] + voxel.color[3])
+        # Calculate depth (distance from camera)
+        depth = np.linalg.norm(rotated_pos)
+        
+        # Use a single pixel per voxel instead of squares to avoid Moiré patterns
+        # Or use anti-aliased circles for better quality
+        
+        # Method 1: Single pixel (fastest, no Moiré)
+        if depth < depth_buffer[y_center, x_center]:
+            image[y_center, x_center, :3] = voxel.color[:3]
+            image[y_center, x_center, 3] = 255
+            depth_buffer[y_center, x_center] = depth
+        
+        # Method 2: Small anti-aliased circle (better quality)
+        # draw_anti_aliased_circle(image, depth_buffer, x_center, y_center, 
+        #                         voxel.color, depth, radius=1)
     
     return image
+
+@njit
+def draw_anti_aliased_circle(image, depth_buffer, center_x, center_y, color, depth, radius=1):
+    """Draw an anti-aliased circle to reduce Moiré patterns"""
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            x = center_x + dx
+            y = center_y + dy
+            
+            if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
+                # Calculate distance from center
+                dist = math.sqrt(dx*dx + dy*dy)
+                
+                if dist <= radius:
+                    # Calculate alpha based on distance from edge
+                    alpha = max(0.0, min(1.0, 1.0 - (dist / radius)))
+                    
+                    if depth < depth_buffer[y, x]:
+                        # Blend with existing color
+                        current_color = image[y, x]
+                        new_r = int(color[0] * alpha + current_color[0] * (1 - alpha))
+                        new_g = int(color[1] * alpha + current_color[1] * (1 - alpha))
+                        new_b = int(color[2] * alpha + current_color[2] * (1 - alpha))
+                        
+                        image[y, x, 0] = new_r
+                        image[y, x, 1] = new_g
+                        image[y, x, 2] = new_b
+                        image[y, x, 3] = 255
+                        depth_buffer[y, x] = depth
 
 class Camera:
     def __init__(self):
