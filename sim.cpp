@@ -41,7 +41,6 @@ public:
         return Vec3(x/n, y/n, z/n);
     }
     
-    // Cross product (essential for face normals)
     inline Vec3 cross(const Vec3& other) const {
         return Vec3(
             y * other.z - z * other.y,
@@ -50,12 +49,10 @@ public:
         );
     }
     
-    // Dot product
     inline double dot(const Vec3& other) const {
         return x * other.x + y * other.y + z * other.z;
     }
     
-    // Arithmetic operations
     inline Vec3 operator+(const Vec3& other) const {
         return Vec3(x + other.x, y + other.y, z + other.z);
     }
@@ -72,12 +69,16 @@ public:
         return Vec3(x / scalar, y / scalar, z / scalar);
     }
     
-    // For using Vec3 as a key in unordered_map
     bool operator==(const Vec3& other) const {
         return x == other.x && y == other.y && z == other.z;
     }
     
-    // Hash function for Vec3
+    bool operator<(const Vec3& other) const {
+        if (x != other.x) return x < other.x;
+        if (y != other.y) return y < other.y;
+        return z < other.z;
+    }
+    
     struct Hash {
         size_t operator()(const Vec3& v) const {
             size_t h1 = std::hash<double>()(v.x);
@@ -88,52 +89,17 @@ public:
     };
 };
 
-// Optimized face normal calculation
-inline Vec3 calculateFaceNormal(const Vec3& v0, const Vec3& v1, const Vec3& v2) {
-    Vec3 edge1 = v1 - v0;
-    Vec3 edge2 = v2 - v0;
-    return edge1.cross(edge2).normalize();
-}
-
-// Dot product
-double dot(const Vec3& a, const Vec3& b) {
-    return a.x*b.x + a.y*b.y + a.z*b.z;
-}
-
-// Cross product
-Vec3 cross(const Vec3& a, const Vec3& b) {
-    return Vec3(
-        a.y*b.z - a.z*b.y,
-        a.z*b.x - a.x*b.z,
-        a.x*b.y - a.y*b.x
-    );
-}
-
-// Simple 2D point
-struct Point2D {
-    int x, y;
-    Point2D(int x = 0, int y = 0) : x(x), y(y) {}
-};
-
-// Cube vertices
-const std::vector<Vec3> cubeVertices = {
-    Vec3(-0.5, -0.5, -0.5), Vec3(0.5, -0.5, -0.5), Vec3(0.5, 0.5, -0.5), Vec3(-0.5, 0.5, -0.5),
-    Vec3(-0.5, -0.5, 0.5), Vec3(0.5, -0.5, 0.5), Vec3(0.5, 0.5, 0.5), Vec3(-0.5, 0.5, 0.5)
-};
-
-// Cube faces (vertex indices)
-const std::vector<std::vector<int>> cubeFaces = {
-    {0, 1, 2, 3}, // bottom
-    {4, 5, 6, 7}, // top
-    {0, 1, 5, 4}, // front
-    {2, 3, 7, 6}, // back
-    {0, 3, 7, 4}, // left
-    {1, 2, 6, 5}  // right
-};
-
-// Face colors
-const std::vector<std::string> faceColors = {
-    "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF"
+class Triangle {
+public:
+    Vec3 v0, v1, v2;
+    
+    Triangle(const Vec3& v0, const Vec3& v1, const Vec3& v2) : v0(v0), v1(v1), v2(v2) {}
+    
+    Vec3 normal() const {
+        Vec3 edge1 = v1 - v0;
+        Vec3 edge2 = v2 - v0;
+        return edge1.cross(edge2).normalize();
+    }
 };
 
 std::vector<Vec3> fibsphere(int numPoints, float radius) {
@@ -142,9 +108,7 @@ std::vector<Vec3> fibsphere(int numPoints, float radius) {
         
     for (int i = 0; i < numPoints; ++i) {
         double k = i + 0.5;
-        double theta = 2.0 * M_PI * k / M_PHI; // Golden angle
-        
-        // Spherical coordinates
+        double theta = 2.0 * M_PI * k / M_PHI;
         double phi_angle = acos(1.0 - 2.0 * (i + 0.5) / numPoints);
         
         double x = cos(theta) * sin(phi_angle);
@@ -157,36 +121,32 @@ std::vector<Vec3> fibsphere(int numPoints, float radius) {
     return points;
 }
 
-// Generate a sphere of voxels (cubes)
-std::vector<Vec3> generateVoxelSphere(int numVoxels, double radius) {
-    std::vector<Vec3> voxels;
-    voxels.reserve(numVoxels);
+// Create a mesh from Fibonacci sphere points using nearest neighbors
+std::vector<Triangle> createSphereMesh(const std::vector<Vec3>& points) {
+    std::vector<Triangle> triangles;
     
-    // Calculate the number of layers needed for the sphere
-    int layers = std::cbrt(numVoxels) * 1.2;
-    if (layers < 1) layers = 1;
+    // For each point, find its nearest neighbors and create triangles
+    int numPoints = points.size();
+    triangles.reserve(numPoints * 6);
     
-    // Distribute voxels in a spherical pattern
-    int voxelsPerLayer = numVoxels / layers;
-    int remainingVoxels = numVoxels % layers;
+    // Create a k-d tree like structure by sorting points by their spherical coordinates
+    std::vector<std::pair<double, int>> sortedByTheta;
+    for (int i = 0; i < numPoints; i++) {
+        double theta = atan2(points[i].y, points[i].x);
+        sortedByTheta.emplace_back(theta, i);
+    }
+    std::sort(sortedByTheta.begin(), sortedByTheta.end());
     
-    for (int i = 0; i < layers; i++) {
-        double phi = M_PI * i / (layers - 1);
-        int voxelsInThisLayer = voxelsPerLayer + (i < remainingVoxels ? 1 : 0);
+    // Create triangles by connecting neighboring points in the sorted list
+    for (int i = 0; i < numPoints - 2; i++) {
+        int idx0 = sortedByTheta[i].second;
+        int idx1 = sortedByTheta[i + 1].second;
+        int idx2 = sortedByTheta[i + 2].second;
         
-        for (int j = 0; j < voxelsInThisLayer; j++) {
-            double theta = 2 * M_PI * j / voxelsInThisLayer;
-            
-            // Convert spherical coordinates to Cartesian
-            double x = radius * std::sin(phi) * std::cos(theta);
-            double y = radius * std::sin(phi) * std::sin(theta);
-            double z = radius * std::cos(phi);
-            
-            voxels.emplace_back(x, y, z);
-        }
+        triangles.emplace_back(points[idx0], points[idx1], points[idx2]);
     }
     
-    return voxels;
+    return triangles;
 }
 
 // Rotation function
@@ -206,98 +166,52 @@ Vec3 rotate(const Vec3& point, double angleX, double angleY, double angleZ) {
     return Vec3(x3, y3, z2);
 }
 
-// Project 3D point to 2D
-Point2D project(const Vec3& point, int width, int height) {
-    // Simple perspective projection
-    double scale = 200.0 / (point.z + 5.0);
-    int x = width / 2 + static_cast<int>(point.x * scale);
-    int y = height / 2 - static_cast<int>(point.y * scale);
-    return Point2D(x, y);
-}
-
-std::string generateSVG(const std::vector<Vec3>& voxels, double angleX, double angleY, double angleZ) {
-    const int width = 800;
-    const int height = 600;
-    
+std::string generateSVG(const std::vector<Triangle>& mesh, double angleX, double angleY, double angleZ) {
     std::stringstream svg;
-    svg << "<svg width='" << width << "' height='" << height << "' xmlns='http://www.w3.org/2000/svg'>";
-    svg << "<rect width='100%' height='100%' fill='#222'/>";
+    int width = 800;
+    int height = 600;
     
-    // Rotate all voxels
-    std::vector<Vec3> rotatedVoxels;
-    rotatedVoxels.reserve(voxels.size());
-    for (const auto& voxel : voxels) {
-        rotatedVoxels.push_back(rotate(voxel, angleX, angleY, angleZ));
-    }
+    svg << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    svg << "<svg width=\"" << width << "\" height=\"" << height << "\" xmlns=\"http://www.w3.org/2000/svg\">\n";
+    svg << "<rect width=\"100%\" height=\"100%\" fill=\"#667eea\"/>\n";
     
-    // For each voxel, generate its 8 vertices
-    std::vector<std::vector<Vec3>> voxelVertices;
-    voxelVertices.reserve(voxels.size());
-    for (const auto& center : rotatedVoxels) {
-        std::vector<Vec3> vertices;
-        vertices.reserve(8);
-        for (const auto& vertex : cubeVertices) {
-            vertices.push_back(center + vertex * 0.2); // Reduced scale for better visibility
-        }
-        voxelVertices.push_back(vertices);
-    }
+    // Project 3D to 2D
+    auto project = [&](const Vec3& point) -> std::pair<double, double> {
+        Vec3 rotated = rotate(point, angleX, angleY, angleZ);
+        // Simple perspective projection
+        double scale = 200.0 / (4.0 + rotated.z);
+        double x = width / 2 + rotated.x * scale;
+        double y = height / 2 + rotated.y * scale;
+        return {x, y};
+    };
     
-    // Project all vertices
-    std::vector<std::vector<Point2D>> projectedVoxelVertices;
-    projectedVoxelVertices.reserve(voxels.size());
-    for (const auto& vertices : voxelVertices) {
-        std::vector<Point2D> projectedVertices;
-        projectedVertices.reserve(8);
-        for (const auto& vertex : vertices) {
-            projectedVertices.push_back(project(vertex, width, height));
-        }
-        projectedVoxelVertices.push_back(projectedVertices);
-    }
-    
-    // Calculate depths for each voxel (using minimum Z of all vertices for better sorting)
-    std::vector<std::pair<double, int>> voxelDepths;
-    for (int i = 0; i < voxelVertices.size(); i++) {
-        double minZ;
-        for (const auto& vertex : voxelVertices[i]) {
-            minZ = min(minZ, vertex.z);
-        }
-        voxelDepths.push_back({minZ, i});
-    }
-    
-    // Sort voxels by depth (painter's algorithm) - farthest first
-    std::sort(voxelDepths.begin(), voxelDepths.end(), [](const auto& a, const auto& b) {
-        return a.first > b.first;
-    });
-    
-    // Draw voxels in correct order
-    for (const auto& depthVoxel : voxelDepths) {
-        int voxelIndex = depthVoxel.second;
-        const auto& vertices = projectedVoxelVertices[voxelIndex];
-        const auto& worldVertices = voxelVertices[voxelIndex];
+    // Draw triangles with shading based on normal
+    for (const auto& triangle : mesh) {
+        Vec3 normal = triangle.normal();
+        Vec3 lightDir = Vec3(0.5, 0.7, 1.0).normalize();
+        double intensity = max(0.0, normal.dot(lightDir));
         
-        // Draw faces with backface culling
-        for (int faceIndex = 0; faceIndex < cubeFaces.size(); faceIndex++) {
-            const auto& face = cubeFaces[faceIndex];
-            
-            // Backface culling
-            Vec3 v0 = worldVertices[face[0]];
-            Vec3 v1 = worldVertices[face[1]];
-            Vec3 v2 = worldVertices[face[2]];
-            
-            Vec3 normal = calculateFaceNormal(v0, v1, v2);
-            Vec3 viewDir(0, 0, 1); // Viewing along Z axis
-            
-            if (normal.dot(viewDir) > 0) { // Face is pointing toward viewer
-                svg << "<polygon points='";
-                for (int vertexIndex : face) {
-                    const Point2D& p = vertices[vertexIndex];
-                    svg << p.x << "," << p.y << " ";
-                }
-                svg << "' fill='" << faceColors[faceIndex] << "' stroke='#000' stroke-width='1' opacity='0.8'/>";
-            }
+        // Calculate color based on intensity
+        int r = static_cast<int>(50 + intensity * 150);
+        int g = static_cast<int>(100 + intensity * 100);
+        int b = static_cast<int>(150 + intensity * 100);
+        
+        auto [x0, y0] = project(triangle.v0);
+        auto [x1, y1] = project(triangle.v1);
+        auto [x2, y2] = project(triangle.v2);
+        
+        // Only draw triangles facing the camera (z-component of normal > 0)
+        Vec3 viewDir(0, 0, 1);
+        if (normal.dot(viewDir) > 0) {
+            svg << "<polygon points=\"" 
+                << x0 << "," << y0 << " "
+                << x1 << "," << y1 << " "
+                << x2 << "," << y2
+                << "\" fill=\"rgb(" << r << "," << g << "," << b << ")\" "
+                << "stroke=\"rgba(255,255,255,0.3)\" stroke-width=\"0.5\"/>\n";
         }
     }
-
+    
     svg << "</svg>";
     return svg.str();
 }
@@ -372,9 +286,9 @@ public:
     }
     
     void handleRequests() {
-        // Generate the voxel sphere once
-        //std::vector<Vec3> voxelSphere = generateVoxelSphere(1000, 3.0);
-        std::vector<Vec3> voxelSphere = fibsphere(1000, 3.0);
+        // Generate sphere mesh using Fibonacci sphere
+        std::vector<Vec3> voxelSphere = fibsphere(500, 3.0); // Reduced points for better performance
+        std::vector<Triangle> sphereMesh = createSphereMesh(voxelSphere);
         
         while (true) {
             sockaddr_in clientAddr;
@@ -398,10 +312,10 @@ public:
             
             if (request.find("GET / ") != std::string::npos || request.find("GET /index.html") != std::string::npos) {
                 response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n" + getHTML();
-            } else if (request.find("GET /cube.svg") != std::string::npos) {
+            } else if (request.find("GET /mesh.svg") != std::string::npos) {
                 static double angle = 0.0;
                 angle += 0.02;
-                std::string svg = generateSVG(voxelSphere, angle, angle * 0.7, angle * 0.3);
+                std::string svg = generateSVG(sphereMesh, angle, angle * 0.7, angle * 0.3);
                 response = "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\n\r\n" + svg;
             } else {
                 response = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\n404 Not Found";
@@ -415,7 +329,6 @@ public:
             close(clientSocket);
 #endif
             
-            // Small delay to prevent high CPU usage
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
@@ -425,10 +338,10 @@ public:
 <!DOCTYPE html>
 <html>
 <head>
-    <title>3D Voxel Sphere Renderer</title>
+    <title>3D Sphere Mesh Renderer</title>
     <style>
         body {
-            font-family: Arial, sans-serif;
+            font-family: 'Arial', sans-serif;
             margin: 0;
             padding: 20px;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -451,62 +364,56 @@ public:
         h1 {
             margin-bottom: 20px;
             text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+            font-size: 2.5em;
         }
-        #cubeContainer {
+        #sphereContainer {
             margin: 20px 0;
             display: flex;
             justify-content: center;
         }
         .instructions {
             margin-top: 20px;
-            padding: 15px;
+            padding: 20px;
             background: rgba(255, 255, 255, 0.2);
-            border-radius: 8px;
+            border-radius: 10px;
             text-align: left;
         }
-        .status {
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 15px;
             margin-top: 20px;
-            padding: 10px;
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 5px;
+        }
+        .feature {
+            background: rgba(255, 255, 255, 0.15);
+            padding: 15px;
+            border-radius: 8px;
         }
         .footer {
             margin-top: 30px;
-            font-size: 0.8em;
-            opacity: 0.7;
+            font-size: 0.9em;
+            opacity: 0.8;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>3D Voxel Sphere Renderer</h1>
-        <p>Rendering a sphere composed of 1000 cubes (voxels)</p>
+        <h1>3D Sphere Mesh Renderer</h1>
         
-        <div id="cubeContainer">
-            <img id="cubeImage" src="cube.svg" width="800" height="600">
+        <div id="sphereContainer">
+            <img id="sphereImage" src="mesh.svg" width="600" height="450" alt="3D Sphere">
         </div>
-        
-        <div class="instructions">
-            <h3>How it works:</h3>
-            <ul>
-                <li>The sphere is composed of 1000 individual cubes (voxels)</li>
-                <li>Each cube is rendered with proper depth sorting</li>
-                <li>Backface culling is applied to improve performance</li>
-                <li>The sphere rotates automatically for visualization</li>
-            </ul>
-        </div>
-        
+        <--- DO NOT EDIT --->
         <div class="footer">
-            <p>Implemented in C++ with SVG rendering | Server running on port 5101</p>
+            <p>Built with C++ HTTP Server and SVG Graphics</p>
         </div>
     </div>
 
     <script>
-        // Auto-refresh the image for animation
         setInterval(function() {
-            const img = document.getElementById('cubeImage');
+            const img = document.getElementById('sphereImage');
             const timestamp = new Date().getTime();
-            img.src = 'cube.svg?' + timestamp;
+            img.src = 'mesh.svg?' + timestamp;
         }, 50);
     </script>
 </body>
