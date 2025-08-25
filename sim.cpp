@@ -22,6 +22,8 @@
 #endif
 
 #define M_PI 3.14159265358979323846
+#define M_PHI 1.61803398874989484820458683436563811772030917980576286213544862270526046281890
+#define M_TAU 6.2831853071795864769252867665590057683943387987502116419498891846156328125724179972560696506842341359
 
 class Vec3 {
 public:
@@ -133,6 +135,27 @@ const std::vector<std::vector<int>> cubeFaces = {
 const std::vector<std::string> faceColors = {
     "#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF", "#00FFFF"
 };
+
+std::vector<Vec3> fibsphere(int numPoints, float radius) {
+    std::vector<Vec3> points;
+    points.reserve(numPoints);
+        
+    for (int i = 0; i < numPoints; ++i) {
+        double k = i + 0.5;
+        double theta = 2.0 * M_PI * k / M_PHI; // Golden angle
+        
+        // Spherical coordinates
+        double phi_angle = acos(1.0 - 2.0 * (i + 0.5) / numPoints);
+        
+        double x = cos(theta) * sin(phi_angle);
+        double y = sin(theta) * sin(phi_angle);
+        double z = cos(phi_angle);
+        
+        points.emplace_back(x * radius, y * radius, z * radius);
+    }
+    
+    return points;
+}
 
 // Generate a sphere of voxels (cubes)
 std::vector<Vec3> generateVoxelSphere(int numVoxels, double radius) {
@@ -350,7 +373,8 @@ public:
     
     void handleRequests() {
         // Generate the voxel sphere once
-        std::vector<Vec3> voxelSphere = generateVoxelSphere(1000, 3.0);
+        //std::vector<Vec3> voxelSphere = generateVoxelSphere(1000, 3.0);
+        std::vector<Vec3> voxelSphere = fibsphere(1000, 3.0);
         
         while (true) {
             sockaddr_in clientAddr;
