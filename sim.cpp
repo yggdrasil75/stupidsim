@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <functional>
+#include <map>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -31,7 +32,6 @@ public:
     
     Vec3(double x = 0, double y = 0, double z = 0) : x(x), y(y), z(z) {}
     
-    // Inline for maximum performance
     inline double norm() const {
         return std::sqrt(x*x + y*y + z*z);
     }
@@ -81,9 +81,9 @@ public:
     
     struct Hash {
         size_t operator()(const Vec3& v) const {
-            size_t h1 = std::hash<double>()(v.x);
-            size_t h2 = std::hash<double>()(v.y);
-            size_t h3 = std::hash<double>()(v.z);
+            size_t h1 = std::hash<double>()(std::round(v.x * 1000.0));
+            size_t h2 = std::hash<double>()(std::round(v.y * 1000.0));
+            size_t h3 = std::hash<double>()(std::round(v.z * 1000.0));
             return h1 ^ (h2 << 1) ^ (h3 << 2);
         }
     };
@@ -107,13 +107,13 @@ std::vector<Vec3> fibsphere(int numPoints, float radius) {
     points.reserve(numPoints);
         
     for (int i = 0; i < numPoints; ++i) {
-        double k = i + 0.5;
-        double theta = 2.0 * M_PI * k / M_PHI;
-        double phi_angle = acos(1.0 - 2.0 * (i + 0.5) / numPoints);
+        double y = 1.0 - (i / (double)(numPoints - 1)) * 2.0;
+        double radius_at_y = std::sqrt(1.0 - y * y);
         
-        double x = cos(theta) * sin(phi_angle);
-        double y = sin(theta) * sin(phi_angle);
-        double z = cos(phi_angle);
+        double theta = 2.0 * M_PI * i / M_PHI;
+        
+        double x = std::cos(theta) * radius_at_y;
+        double z = std::sin(theta) * radius_at_y;
         
         points.emplace_back(x * radius, y * radius, z * radius);
     }
@@ -121,35 +121,68 @@ std::vector<Vec3> fibsphere(int numPoints, float radius) {
     return points;
 }
 
-// Create a mesh from Fibonacci sphere points using nearest neighbors
-std::vector<Triangle> createSphereMesh(const std::vector<Vec3>& points) {
+// Create proper triangulation for Fibonacci sphere
+std::vector<Triangle> createFibonacciSphereMesh(const std::vector<Vec3>& points) {
     std::vector<Triangle> triangles;
+    int n = points.size();
     
-    // For each point, find its nearest neighbors and create triangles
-    int numPoints = points.size();
-    triangles.reserve(numPoints * 6);
-    
-    // Create a k-d tree like structure by sorting points by their spherical coordinates
-    std::vector<std::pair<double, int>> sortedByTheta;
-    for (int i = 0; i < numPoints; i++) {
-        double theta = atan2(points[i].y, points[i].x);
-        sortedByTheta.emplace_back(theta, i);
+    // Create a map to quickly find points by their spherical coordinates
+    std::map<std::pair<double, double>, int> pointMap;
+    for (int i = 0; i < n; i++) {
+        double phi = std::acos(points[i].y / 3.0); // theta = acos(y/R)
+        double theta = std::atan2(points[i].z, points[i].x);
+        if (theta < 0) theta += 2.0 * M_PI;
+        pointMap[{phi, theta}] = i;
     }
-    std::sort(sortedByTheta.begin(), sortedByTheta.end());
     
-    // Create triangles by connecting neighboring points in the sorted list
-    for (int i = 0; i < numPoints - 2; i++) {
-        int idx0 = sortedByTheta[i].second;
-        int idx1 = sortedByTheta[i + 1].second;
-        int idx2 = sortedByTheta[i + 2].second;
-        
-        triangles.emplace_back(points[idx0], points[idx1], points[idx2]);
+    // Create triangles by connecting neighboring points
+    for (int i = 0; i < n - 1; i++) {
+        // For each point, connect it to its neighbors
+        if (i > 0) {
+            triangles.emplace_back(points[i-1], points[i], points[(i+1) % n]);
+        }
+    }
+    
+    // Add cap triangles
+    for (int i = 1; i < n/2 - 1; i++) {
+        triangles.emplace_back(points[0], points[i], points[i+1]);
+        triangles.emplace_back(points[n-1], points[n-1-i], points[n-2-i]);
     }
     
     return triangles;
 }
 
-// Rotation function
+// Alternative: Use Delaunay triangulation on the sphere (simplified)
+std::vector<Triangle> createSphereMeshDelaunay(const std::vector<Vec3>& points) {
+    std::vector<Triangle> triangles;
+    int n = points.size();
+    
+    // Simple approach: connect each point to its nearest neighbors
+    // This is a simplified version - for production use a proper Delaunay triangulation
+    
+    for (int i = 0; i < n; i++) {
+        // Find nearest neighbors (simplified)
+        std::vector<std::pair<double, int>> distances;
+        for (int j = 0; j < n; j++) {
+            if (i != j) {
+                double dist = (points[i] - points[j]).norm();
+                distances.emplace_back(dist, j);
+            }
+        }
+        
+        // Sort by distance and take 6 nearest neighbors
+        std::sort(distances.begin(), distances.end());
+        int numNeighbors = min(6, (int)distances.size());
+        
+        // Create triangles with nearest neighbors
+        for (int k = 0; k < numNeighbors - 1; k++) {
+            triangles.emplace_back(points[i], points[distances[k].second], points[distances[k+1].second]);
+        }
+    }
+    
+    return triangles;
+}
+
 Vec3 rotate(const Vec3& point, double angleX, double angleY, double angleZ) {
     // Rotate around X axis
     double y1 = point.y * cos(angleX) - point.z * sin(angleX);
@@ -166,57 +199,64 @@ Vec3 rotate(const Vec3& point, double angleX, double angleY, double angleZ) {
     return Vec3(x3, y3, z2);
 }
 
-std::string generateSVG(const std::vector<Triangle>& mesh, double angleX, double angleY, double angleZ) {
+std::string generateSVG(const std::vector<Vec3>& points, const std::vector<Triangle>& mesh, 
+                       double angleX, double angleY, double angleZ) {
     std::stringstream svg;
     int width = 800;
     int height = 600;
     
     svg << "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
     svg << "<svg width=\"" << width << "\" height=\"" << height << "\" xmlns=\"http://www.w3.org/2000/svg\">\n";
-    svg << "<rect width=\"100%\" height=\"100%\" fill=\"#667eea\"/>\n";
+    svg << "<rect width=\"100%\" height=\"100%\" fill=\"#000000\"/>\n";
     
     // Project 3D to 2D
     auto project = [&](const Vec3& point) -> std::pair<double, double> {
         Vec3 rotated = rotate(point, angleX, angleY, angleZ);
-        // Simple perspective projection
-        double scale = 200.0 / (4.0 + rotated.z);
+        // Perspective projection
+        double scale = 300.0 / (5.0 + rotated.z);
         double x = width / 2 + rotated.x * scale;
         double y = height / 2 + rotated.y * scale;
         return {x, y};
     };
     
-    // Draw triangles with shading based on normal
+    // Draw triangles with shading
     for (const auto& triangle : mesh) {
         Vec3 normal = triangle.normal();
         Vec3 lightDir = Vec3(0.5, 0.7, 1.0).normalize();
         double intensity = max(0.0, normal.dot(lightDir));
         
         // Calculate color based on intensity
-        int r = static_cast<int>(50 + intensity * 150);
-        int g = static_cast<int>(100 + intensity * 100);
-        int b = static_cast<int>(150 + intensity * 100);
+        int r = static_cast<int>(50 + intensity * 200);
+        int g = static_cast<int>(100 + intensity * 150);
+        int b = static_cast<int>(200 + intensity * 55);
         
         auto [x0, y0] = project(triangle.v0);
         auto [x1, y1] = project(triangle.v1);
         auto [x2, y2] = project(triangle.v2);
         
-        // Only draw triangles facing the camera (z-component of normal > 0)
+        // Only draw triangles facing the camera
         Vec3 viewDir(0, 0, 1);
-        if (normal.dot(viewDir) > 0) {
+        if (normal.dot(viewDir) > 0.1) {
             svg << "<polygon points=\"" 
                 << x0 << "," << y0 << " "
                 << x1 << "," << y1 << " "
                 << x2 << "," << y2
                 << "\" fill=\"rgb(" << r << "," << g << "," << b << ")\" "
-                << "stroke=\"rgba(255,255,255,0.3)\" stroke-width=\"0.5\"/>\n";
+                << "stroke=\"rgba(0,0,0,0.3)\" stroke-width=\"1\"/>\n";
         }
+    }
+    
+    // Draw points for debugging
+    for (const auto& point : points) {
+        auto [x, y] = project(point);
+        svg << "<circle cx=\"" << x << "\" cy=\"" << y << "\" r=\"2\" fill=\"white\"/>\n";
     }
     
     svg << "</svg>";
     return svg.str();
 }
 
-// HTTP server class
+// HTTP server class (keep your existing server implementation)
 class SimpleHTTPServer {
 private:
     int serverSocket;
@@ -286,9 +326,9 @@ public:
     }
     
     void handleRequests() {
-        // Generate sphere mesh using Fibonacci sphere
-        std::vector<Vec3> voxelSphere = fibsphere(500, 3.0); // Reduced points for better performance
-        std::vector<Triangle> sphereMesh = createSphereMesh(voxelSphere);
+        // Generate proper Fibonacci sphere
+        std::vector<Vec3> spherePoints = fibsphere(200, 3.0); // Reduced for performance
+        std::vector<Triangle> sphereMesh = createSphereMeshDelaunay(spherePoints);
         
         while (true) {
             sockaddr_in clientAddr;
