@@ -14,8 +14,8 @@ LIGHT_COLOR = (255, 255, 200)
 CHARACTER_COLOR = (100, 200, 255)
 TRAIL_COLOR = (255, 150, 50, 100)
 WALL_COLOR = (100, 100, 100)
-TRAIL_DECAY = 2.0  # How quickly trails fade
-TRAIL_STRENGTH = 10  # How much light adds to trails
+TRAIL_DECAY = 0.95  # Percentage of trails that remain each frame
+TRAIL_STRENGTH = 50  # How much light adds to trails
 
 # Material properties
 MATERIALS = {
@@ -78,13 +78,13 @@ class LightSource:
             dy = math.sin(angle)
             self.cast_ray(self.x, self.y, dx, dy, characters, pheromone_map, walls)
     
-    def cast_ray(self, x, y, dx, dy, characters, pheromone_map, walls, intensity=1.0, depth=0, max_depth=10):
-        if depth > max_depth or intensity < 0.1:
+    def cast_ray(self, x, y, dx, dy, characters, pheromone_map, walls, intensity=1.0, depth=0, max_depth=5):
+        if depth > max_depth or intensity < 0.05:
             return
             
         # Move the ray step by step until we hit something
         step_size = 5
-        max_steps = 100
+        max_steps = 200
         hit_something = False
         
         for step in range(max_steps):
@@ -94,6 +94,24 @@ class LightSource:
             
             # Check if out of bounds
             if next_x < 0 or next_x >= WIDTH or next_y < 0 or next_y >= HEIGHT:
+                break
+                
+            # Check if ray hits any character
+            for character in characters:
+                dist = math.sqrt((next_x - character.x)**2 + (next_y - character.y)**2)
+                if dist < character.radius:
+                    # Character is hit by the light - reinforce the path
+                    steps_to_character = step + 1
+                    for i in range(steps_to_character):
+                        px = int(x + dx * i * step_size)
+                        py = int(y + dy * i * step_size)
+                        if 0 <= px < WIDTH and 0 <= py < HEIGHT:
+                            # Add more intensity closer to the character
+                            pheromone_map[px, py] += TRAIL_STRENGTH * intensity * (1 - i/steps_to_character)
+                    hit_something = True
+                    break
+                    
+            if hit_something:
                 break
                 
             # Check if ray hits any wall
@@ -129,7 +147,7 @@ class LightSource:
                         intersection_point = (ix, iy)
                         hit_something = True
             
-            if hit_something:
+            if hit_something and hit_wall:
                 # Add to pheromone map up to the wall
                 steps_to_wall = int(min_dist / step_size)
                 for i in range(steps_to_wall):
@@ -142,7 +160,8 @@ class LightSource:
                 material = hit_wall.properties
                 
                 # Reflection
-                if np.random.random() < material["reflection"]:
+                reflection_chance = material["reflection"]
+                if np.random.random() < reflection_chance and reflection_chance > 0:
                     # Reflect the ray
                     normal = hit_wall.get_normal(intersection_point)
                     dot_product = dx * normal[0] + dy * normal[1]
@@ -152,12 +171,13 @@ class LightSource:
                     # Continue with reflected ray
                     self.cast_ray(intersection_point[0], intersection_point[1], 
                                  rdx, rdy, characters, pheromone_map, walls, 
-                                 intensity * material["reflection"] * (1 - material["absorption"]), depth + 1)
+                                 intensity * reflection_chance * (1 - material["absorption"]), depth + 1)
                 
                 # Refraction (continue through but with some deviation)
-                if material["refraction"] != 1.0:  # Only if the material has refractive properties
-                    refracted_dx = dx * material["refraction"] + np.random.uniform(-0.1, 0.1)
-                    refracted_dy = dy * material["refraction"] + np.random.uniform(-0.1, 0.1)
+                refraction_chance = material["refraction"]
+                if refraction_chance > 0 and np.random.random() < refraction_chance:
+                    refracted_dx = dx * 0.9 + np.random.uniform(-0.1, 0.1)
+                    refracted_dy = dy * 0.9 + np.random.uniform(-0.1, 0.1)
                     
                     # Normalize
                     length = math.sqrt(refracted_dx**2 + refracted_dy**2)
@@ -167,25 +187,8 @@ class LightSource:
                         
                         self.cast_ray(intersection_point[0], intersection_point[1], 
                                      refracted_dx, refracted_dy, characters, pheromone_map, walls, 
-                                     intensity * (1 - material["reflection"]) * (1 - material["absorption"]), depth + 1)
+                                     intensity * refraction_chance * (1 - material["absorption"]), depth + 1)
                 
-                break
-                
-            # Check if ray hits any character
-            for character in characters:
-                dist = math.sqrt((next_x - character.x)**2 + (next_y - character.y)**2)
-                if dist < character.radius:
-                    # Character sees the light - reinforce the path
-                    steps_to_character = step + 1
-                    for i in range(steps_to_character):
-                        px = int(x + dx * i * step_size)
-                        py = int(y + dy * i * step_size)
-                        if 0 <= px < WIDTH and 0 <= py < HEIGHT:
-                            pheromone_map[px, py] += TRAIL_STRENGTH * intensity * (1 - i/steps_to_character)
-                    hit_something = True
-                    break
-                    
-            if hit_something:
                 break
                 
             # Update position
@@ -208,7 +211,7 @@ class Character:
         self.view_direction = np.random.uniform(0, 2 * math.pi)
         self.visible_lights = []
         
-    def update(self, light_sources, pheromone_map):
+    def update(self, light_sources):
         self.visible_lights = []
         
         # Simple vision - check if light is in field of view
@@ -227,14 +230,6 @@ class Character:
             fov_radians = math.radians(self.fov / 2)
             if angle_diff < fov_radians:
                 self.visible_lights.append(light)
-                
-                # Reinforce the path in pheromone map
-                steps = int(distance / 5)
-                for i in range(steps):
-                    px = int(self.x + dx * i/steps)
-                    py = int(self.y + dy * i/steps)
-                    if 0 <= px < WIDTH and 0 <= py < HEIGHT:
-                        pheromone_map[px, py] += TRAIL_STRENGTH * (1 - i/steps)
     
     def draw(self, surface):
         # Draw character
@@ -353,24 +348,24 @@ while running:
                                 break
                     characters.append(Character(x, y, 10))
                 
-                #pheromone_map = np.zeros((WIDTH, HEIGHT))
+                pheromone_map = np.zeros((WIDTH, HEIGHT))
     
     # Clear screen
     screen.fill(BACKGROUND)
     
-    # Decay pheromone trails
-    pheromone_map -= TRAIL_DECAY
+    # Decay pheromone trails (multiplicative decay works better)
+    pheromone_map *= TRAIL_DECAY
     
     # Emit light from sources
     for light in light_sources:
-        light.emit_light(characters, pheromone_map, walls, num_rays=3000)
+        light.emit_light(characters, pheromone_map, walls, num_rays=1000)
     
     # Update characters
     for character in characters:
-        character.update(light_sources, pheromone_map)
+        character.update(light_sources)
         
         # Randomly change direction occasionally
-        if np.random.random() < 0.2:
+        if np.random.random() < 0.05:
             character.view_direction += np.random.uniform(-0.5, 0.5)
     
     # Draw walls
@@ -397,8 +392,8 @@ while running:
     
     # Display info
     font = pygame.font.SysFont(None, 24)
-    #text = font.render("Light Propagation with Walls - Press ESC to exit, R to reset", True, (255, 255, 255))
-    #screen.blit(text, (10, 10))
+    text = font.render("Light Propagation with Walls - Press ESC to exit, R to reset", True, (255, 255, 255))
+    screen.blit(text, (10, 10))
     
     pygame.display.flip()
     clock.tick(FPS)
