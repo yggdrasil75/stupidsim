@@ -20,8 +20,8 @@ TRAIL_STRENGTH = 50  # How much light adds to trails
 # Material properties
 MATERIALS = {
     "glass": {"reflection": 0.1, "refraction": 1.0, "absorption": 0.1, "color": (255, 0, 255, 100)},
-    "stone": {"reflection": 0.0, "refraction": 0.0, "absorption": 1.0, "color": (255, 0, 0)},
-    "metal": {"reflection": 1.0, "refraction": 0.0, "absorption": 0.5, "color": (0, 255, 0)}
+    "stone": {"reflection": 0.01, "refraction": 0.01, "absorption": 1.0, "color": (255, 0, 0)},
+    "metal": {"reflection": 1.0, "refraction": 0.5, "absorption": 0.5, "color": (0, 255, 0)}
 }
 
 # Set up the display
@@ -366,7 +366,7 @@ while running:
         
         # Randomly change direction occasionally
         if np.random.random() < 0.05:
-            character.view_direction += np.random.uniform(-0.5, 0.5)
+            character.view_direction += np.random.normal(0.0, 0.25)
     
     # Draw walls
     for wall in walls:
