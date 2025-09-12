@@ -14,8 +14,15 @@ LIGHT_COLOR = (255, 255, 200)
 CHARACTER_COLOR = (100, 200, 255)
 TRAIL_COLOR = (255, 150, 50, 100)
 WALL_COLOR = (100, 100, 100)
-TRAIL_DECAY = 0.98  # How quickly trails fade
+TRAIL_DECAY = 2.0  # How quickly trails fade
 TRAIL_STRENGTH = 10  # How much light adds to trails
+
+# Material properties
+MATERIALS = {
+    "glass": {"reflection": 0.1, "refraction": 1.0, "absorption": 0.1, "color": (255, 0, 255, 100)},
+    "stone": {"reflection": 0.0, "refraction": 0.0, "absorption": 1.0, "color": (255, 0, 0)},
+    "metal": {"reflection": 1.0, "refraction": 0.0, "absorption": 0.5, "color": (0, 255, 0)}
+}
 
 # Set up the display
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
@@ -23,14 +30,21 @@ pygame.display.set_caption("Light Propagation with Walls and Pheromone Trails")
 clock = pygame.time.Clock()
 
 class Wall:
-    def __init__(self, x1, y1, x2, y2):
+    def __init__(self, x1, y1, x2, y2, material="stone"):
         self.start = (x1, y1)
         self.end = (x2, y2)
-        self.reflection = np.random.uniform(0.3, 0.9)  # Reflection coefficient
-        self.refraction = np.random.uniform(0.7, 1.3)  # Refraction index
+        self.material = material
+        self.properties = MATERIALS[material]
         
     def draw(self, surface):
-        pygame.draw.line(surface, WALL_COLOR, self.start, self.end, 3)
+        color = self.properties["color"]
+        if self.material == "glass":
+            # Draw glass as a semi-transparent line
+            s = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            pygame.draw.line(s, color, self.start, self.end, 3)
+            surface.blit(s, (0, 0))
+        else:
+            pygame.draw.line(surface, color, self.start, self.end, 3)
         
     def get_normal(self, intersection_point):
         # Calculate normal vector to the wall
@@ -124,8 +138,11 @@ class LightSource:
                     if 0 <= px < WIDTH and 0 <= py < HEIGHT:
                         pheromone_map[px, py] += TRAIL_STRENGTH * intensity * (1 - i/steps_to_wall)
                 
-                # Handle reflection and refraction
-                if np.random.random() < hit_wall.reflection:
+                # Handle reflection and refraction based on material properties
+                material = hit_wall.properties
+                
+                # Reflection
+                if np.random.random() < material["reflection"]:
                     # Reflect the ray
                     normal = hit_wall.get_normal(intersection_point)
                     dot_product = dx * normal[0] + dy * normal[1]
@@ -135,21 +152,22 @@ class LightSource:
                     # Continue with reflected ray
                     self.cast_ray(intersection_point[0], intersection_point[1], 
                                  rdx, rdy, characters, pheromone_map, walls, 
-                                 intensity * hit_wall.reflection, depth + 1)
+                                 intensity * material["reflection"] * (1 - material["absorption"]), depth + 1)
                 
-                # Refract the ray (continue through but with some deviation)
-                refracted_dx = dx * hit_wall.refraction + np.random.uniform(-0.2, 0.2)
-                refracted_dy = dy * hit_wall.refraction + np.random.uniform(-0.2, 0.2)
-                
-                # Normalize
-                length = math.sqrt(refracted_dx**2 + refracted_dy**2)
-                if length > 0:
-                    refracted_dx /= length
-                    refracted_dy /= length
+                # Refraction (continue through but with some deviation)
+                if material["refraction"] != 1.0:  # Only if the material has refractive properties
+                    refracted_dx = dx * material["refraction"] + np.random.uniform(-0.1, 0.1)
+                    refracted_dy = dy * material["refraction"] + np.random.uniform(-0.1, 0.1)
                     
-                    self.cast_ray(intersection_point[0], intersection_point[1], 
-                                 refracted_dx, refracted_dy, characters, pheromone_map, walls, 
-                                 intensity * (1 - hit_wall.reflection), depth + 1)
+                    # Normalize
+                    length = math.sqrt(refracted_dx**2 + refracted_dy**2)
+                    if length > 0:
+                        refracted_dx /= length
+                        refracted_dy /= length
+                        
+                        self.cast_ray(intersection_point[0], intersection_point[1], 
+                                     refracted_dx, refracted_dy, characters, pheromone_map, walls, 
+                                     intensity * (1 - material["reflection"]) * (1 - material["absorption"]), depth + 1)
                 
                 break
                 
@@ -244,19 +262,28 @@ sun = LightSource(WIDTH * 0.2, HEIGHT * 0.3, 30, 1.0)
 fire = LightSource(WIDTH * 0.7, HEIGHT * 0.7, 15, 0.7)
 light_sources = [sun, fire]
 
-# Create walls
+# Create walls with a stone bounding box
 walls = []
-for _ in range(15):  # Create 15 random walls
-    x1 = np.random.randint(0, WIDTH)
-    y1 = np.random.randint(0, HEIGHT)
+# Create bounding box (stone walls)
+walls.append(Wall(0, 0, WIDTH, 0, "stone"))  # Top
+walls.append(Wall(WIDTH, 0, WIDTH, HEIGHT, "stone"))  # Right
+walls.append(Wall(WIDTH, HEIGHT, 0, HEIGHT, "stone"))  # Bottom
+walls.append(Wall(0, HEIGHT, 0, 0, "stone"))  # Left
+
+# Add some interior walls with different materials
+for _ in range(10):  # Create 10 random interior walls
+    x1 = np.random.randint(50, WIDTH-50)
+    y1 = np.random.randint(50, HEIGHT-50)
     x2 = x1 + np.random.randint(-100, 100)
     y2 = y1 + np.random.randint(-100, 100)
     
     # Make sure wall is within screen bounds
-    x2 = max(0, min(WIDTH, x2))
-    y2 = max(0, min(HEIGHT, y2))
+    x2 = max(50, min(WIDTH-50, x2))
+    y2 = max(50, min(HEIGHT-50, y2))
     
-    walls.append(Wall(x1, y1, x2, y2))
+    # Randomly choose a material
+    material = np.random.choice(["glass", "stone", "metal"])
+    walls.append(Wall(x1, y1, x2, y2, material))
 
 # Create characters (reduced to 5)
 characters = []
@@ -294,14 +321,22 @@ while running:
             elif event.key == pygame.K_r:
                 # Reset walls and characters
                 walls = []
-                for _ in range(15):
-                    x1 = np.random.randint(0, WIDTH)
-                    y1 = np.random.randint(0, HEIGHT)
+                # Recreate bounding box
+                walls.append(Wall(0, 0, WIDTH, 0, "stone"))
+                walls.append(Wall(WIDTH, 0, WIDTH, HEIGHT, "stone"))
+                walls.append(Wall(WIDTH, HEIGHT, 0, HEIGHT, "stone"))
+                walls.append(Wall(0, HEIGHT, 0, 0, "stone"))
+                
+                # Add interior walls
+                for _ in range(10):
+                    x1 = np.random.randint(50, WIDTH-50)
+                    y1 = np.random.randint(50, HEIGHT-50)
                     x2 = x1 + np.random.randint(-100, 100)
                     y2 = y1 + np.random.randint(-100, 100)
-                    x2 = max(0, min(WIDTH, x2))
-                    y2 = max(0, min(HEIGHT, y2))
-                    walls.append(Wall(x1, y1, x2, y2))
+                    x2 = max(50, min(WIDTH-50, x2))
+                    y2 = max(50, min(HEIGHT-50, y2))
+                    material = np.random.choice(["glass", "stone", "metal"])
+                    walls.append(Wall(x1, y1, x2, y2, material))
                 
                 characters = []
                 for _ in range(5):
@@ -316,19 +351,19 @@ while running:
                             if dist_to_start < 20 or dist_to_end < 20:
                                 valid_position = False
                                 break
-                        characters.append(Character(x, y, 10))
+                    characters.append(Character(x, y, 10))
                 
-                pheromone_map = np.zeros((WIDTH, HEIGHT))
+                #pheromone_map = np.zeros((WIDTH, HEIGHT))
     
     # Clear screen
     screen.fill(BACKGROUND)
     
     # Decay pheromone trails
-    pheromone_map *= TRAIL_DECAY
+    pheromone_map -= TRAIL_DECAY
     
     # Emit light from sources
     for light in light_sources:
-        light.emit_light(characters, pheromone_map, walls, num_rays=300)
+        light.emit_light(characters, pheromone_map, walls, num_rays=3000)
     
     # Update characters
     for character in characters:
