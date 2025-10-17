@@ -46,30 +46,10 @@ def normalize(vec):
         return vec
     return vec / n
 
-# @jit(device=True)
-# def cuda_normalize(vec, out):
-#     sum_sq = 0.0
-#     for i in range(3):
-#         sum_sq += vec[i] * vec[i]
-#     norm = np.sqrt(sum_sq)
-#     if norm > 1e-10:
-#         for i in range(3):
-#             out[i] = vec[i] / norm
-#     else:
-#         for i in range(3):
-#             out[i] = 0.0
-# @jit(device=True)
-# def cuda_cross(a, b, out):
-#     out[0] = a[1] * b[2] - a[2] * b[1]
-#     out[1] = a[2] * b[0] - a[0] * b[2]
-#     out[2] = a[0] * b[1] - a[1] * b[0]
-
-# @jit(device=True)
-# def cuda_dot(a,b):
-#     result = 0.0
-#     for i in range(3):
-#         result += a[i] * b[i]
-#     return result
+@njit
+def dot(v1, v2):
+    """Faster dot product for 3D vectors"""
+    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
 
 @njit
 def triangle_error_quadric(v0: NDArray[np.float32], v1: NDArray[np.float32], v2: NDArray[np.float32]) -> NDArray[np.float32]:
@@ -101,9 +81,7 @@ def make_2D_array(lis):
     return arr, lengths
 
 def time_function(func):
-    """
-    Decorator to time function execution and store statistics, using numpy arrays for efficiency.
-    """
+    #Decorator to time function execution and store statistics
     @wraps(func)
     def wrapper(*args, **kwargs):
         start_time = time.perf_counter()
@@ -165,6 +143,7 @@ def get_timing_stats(mode: Literal['basic', 'enhanced'] = 'basic'):
     
     return stats
 
+
 def print_timing_stats(mode: Literal['basic', 'enhanced'] = 'enhanced'):
     """
     Prints formatted timing statistics with control over verbosity.
@@ -176,33 +155,57 @@ def print_timing_stats(mode: Literal['basic', 'enhanced'] = 'enhanced'):
     if not stats:
         print("No timing statistics available.")
         return
-    
+
+    # Determine dynamic width for function name
+    func_col_width = max(len(name) for name in stats.keys())
+    func_col_width = max(func_col_width, len("Function"))  # ensure at least header width
+
+    # Numeric formatting settings
+    num_width = 12  # ensures consistent alignment (8 digits total + padding)
+    float_fmt = f"{{:<{num_width}.6f}}"
+    int_fmt = f"{{:<{num_width}d}}"
+
     if mode == 'basic':
         print("\nBasic Function Timing Statistics:")
-        print("-" * 60)
-        print(f"{'Function':<25} {'Calls':<8} {'Total (s)':<12} {'Avg (s)':<12}")
-        print("-" * 60)
+        print("-" * (func_col_width + 3 * num_width + 8))
+        header = (f"{'Function':<{func_col_width}} "
+                  f"{'Calls':<{num_width}} {'Total (s)':<{num_width}} {'Avg (s)':<{num_width}}")
+        print(header)
+        print("-" * (func_col_width + 3 * num_width + 8))
         
         for func_name, data in stats.items():
-            print(f"{func_name:<25} {data['call_count']:<8} {data['total_time']:<12.6f} {data['avg_time']:<12.6f}")
+            print(f"{func_name:<{func_col_width}} "
+                  f"{int_fmt.format(data['call_count'])} "
+                  f"{float_fmt.format(data['total_time'])} "
+                  f"{float_fmt.format(data['avg_time'])}")
         
-        print("-" * 60)
-    
+        print("-" * (func_col_width + 3 * num_width + 8))
+
     else:  # enhanced mode
         print("\nEnhanced Function Timing Statistics:")
-        print("-" * 110)
-        header = (f"{'Function':<25} {'Calls':<8} {'Total (s)':<10} {'Avg (s)':<10} "
-                  f"{'Min (s)':<10} {'Median (s)':<10} {'P99 (s)':<10} {'P99.9 (s)':<10} {'Max (s)':<10}")
+        col_labels = ['Function', 'Calls', 'Total (s)', 'Avg (s)', 'Min (s)', 
+                      'Median (s)', 'P99 (s)', 'P99.9 (s)', 'Max (s)']
+        print("-" * (func_col_width + (len(col_labels) - 1) * num_width + 8))
+        header = (f"{'Function':<{func_col_width}} "
+                  f"{'Calls':<{num_width}} {'Total (s)':<{num_width}} {'Avg (s)':<{num_width}} "
+                  f"{'Min (s)':<{num_width}} {'Median (s)':<{num_width}} "
+                  f"{'P99 (s)':<{num_width}} {'P99.9 (s)':<{num_width}} {'Max (s)':<{num_width}}")
         print(header)
-        print("-" * 110)
+        print("-" * (func_col_width + (len(col_labels) - 1) * num_width + 8))
         
         for func_name, data in stats.items():
             p = data.get('percentiles', {})
-            print(f"{func_name:<25} {data['call_count']:<8} {data['total_time']:<10.6f} {data['avg_time']:<10.6f} "
-                  f"{p.get('min', 0):<10.6f} {p.get('median', 0):<10.6f} "
-                  f"{p.get('p99', 0):<10.6f} {p.get('p99.9', 0):<10.6f} {p.get('max', 0):<10.6f}")
+            print(f"{func_name:<{func_col_width}} "
+                  f"{int_fmt.format(data['call_count'])} "
+                  f"{float_fmt.format(data['total_time'])} "
+                  f"{float_fmt.format(data['avg_time'])} "
+                  f"{float_fmt.format(p.get('min', 0))} "
+                  f"{float_fmt.format(p.get('median', 0))} "
+                  f"{float_fmt.format(p.get('p99', 0))} "
+                  f"{float_fmt.format(p.get('p99.9', 0))} "
+                  f"{float_fmt.format(p.get('max', 0))}")
         
-        print("-" * 110)
+        print("-" * (func_col_width + (len(col_labels) - 1) * num_width + 8))
 
 @njit
 def spherical_distance(point1: np.ndarray, point2: np.ndarray, radius: float) -> float:

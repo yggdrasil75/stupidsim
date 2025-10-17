@@ -1,12 +1,10 @@
 import numpy as np
-import numpy.typing as npt
 #import matplotlib.pyplot as plt
 #from mpl_toolkits.mplot3d import Axes3D
 from PIL import Image
 import math
 from util import normalize, time_function, print_timing_stats, norm, dot, cross, cross_2d
 from numba import njit, prange, jit, float32, int32, typeof as numbatypeof, uint8, bool, types
-
 
 epsilon = 0.00000001
 
@@ -31,10 +29,10 @@ def grad(hash: np.int32, x: np.float32, y: np.float32, z: np.float32) -> np.floa
 
 #@time_function
 @njit((float32(int32[:],float32,float32,float32)), cache=True)
-def pnoise3d(p: npt.NDArray[np.int32], x: np.float32, y: np.float32, z: np.float32) -> np.float32:
-    iX = np.int32(np.floor(x)) & 255
-    iY = np.int32(np.floor(y)) & 255
-    iZ = np.int32(np.floor(z)) & 255
+def pnoise3d(p: np.ndarray, x: np.float32, y: np.float32, z: np.float32) -> np.float32:
+    iX = int(np.floor(x)) & 255
+    iY = int(np.floor(y)) & 255
+    iZ = int(np.floor(z)) & 255
     
     x -= np.floor(x)
     y -= np.floor(y)
@@ -51,19 +49,18 @@ def pnoise3d(p: npt.NDArray[np.int32], x: np.float32, y: np.float32, z: np.float
     BA = p[B] + iZ
     BB = p[B + 1] + iZ
     
-    result = lerp(t=w, a=lerp(t=v, a=lerp(t=u, a=grad(hash=p[AA], x=x, y=y, z=z),
-            b=grad(hash=p[BA], x=x-1, y=y, z=z)), b=lerp(t=u, a=grad(hash=p[AB], x=x, y=y-1, z=z),
-            b=grad(hash=p[BB], x=x-1, y=y-1, z=z))), b=lerp(t=v, a=lerp(t=u, a=grad(hash=p[AA+1], x=x, y=y, z=z-1),
-            b=grad(hash=p[BA+1], x=x-1, y=y, z=z-1)), b=lerp(t=u, a=grad(hash=p[AB+1], x=x, y=y-1, z=z-1),
-            b=grad(hash=p[BB+1], x=x-1, y=y-1, z=z-1))))
+    result = lerp(w, lerp(v, lerp(u, grad(p[AA], x, y, z),
+            grad(p[BA], x-1, y, z)), lerp(u, grad(p[AB], x, y-1, z),
+            grad(p[BB], x-1, y-1, z))), lerp(v, lerp(u, grad(p[AA+1], x, y, z-1),
+            grad(p[BA+1], x-1, y, z-1)), lerp(u, grad(p[AB+1], x, y-1, z-1),
+            grad(p[BB+1], x-1, y-1, z-1))))
     return result
 
 class PerlinNoise3D:
     def __init__(self):
-        self.permutation: npt.NDArray[np.int32] = np.arange(256, dtype=np.int32)
+        self.permutation: np.ndarray = np.arange(256, dtype=np.int32)
         np.random.shuffle(self.permutation)
-        self.p: npt.NDArray[np.int32] = np.tile(self.permutation, 2)
-        print(self.p.shape)
+        self.p: np.ndarray = np.tile(self.permutation, 2)
     
     def noise(self, x: np.float32, y: np.float32, z: np.float32) -> np.float32:
         return pnoise3d(self.p, x, y, z)
@@ -72,15 +69,15 @@ class PerlinNoise3D:
 @njit((float32[:,:](int32,float32,int32[:])),cache=True, parallel=True)
 def noisebatch(num_points: np.int32, scale: np.float32, sp: np.ndarray) -> np.ndarray:
     # Preallocate array for maximum possible points
-    points: np.ndarray = np.zeros((num_points, 3), dtype=np.float32)
+    points = np.zeros((num_points, 3), dtype=np.float32)
     
     for i in prange(num_points):
-        x: np.float32 = np.float32(np.random.uniform(-scale, scale))
-        y: np.float32 = np.float32(np.random.uniform(-scale, scale))
-        z: np.float32 = np.float32(np.random.uniform(-scale, scale))
+        x = np.float32(np.random.uniform(-scale, scale))
+        y = np.float32(np.random.uniform(-scale, scale))
+        z = np.float32(np.random.uniform(-scale, scale))
         
         # Use noise to create density variations
-        noise_val: np.float32 = pnoise3d(sp, x * np.float32(0.5), y * np.float32(0.5), z * np.float32(0.5))
+        noise_val = pnoise3d(sp, x * np.float32(0.5), y * np.float32(0.5), z * np.float32(0.5))
         
         if noise_val > 0.1:
             points[i] = [x, y, z]
@@ -89,50 +86,51 @@ def noisebatch(num_points: np.int32, scale: np.float32, sp: np.ndarray) -> np.nd
 
 @time_function
 def generate_point_cloud(num_pointsa: int, scalea: float, seeda: int) -> np.ndarray:
-    num_points: np.int32 = np.int32(num_pointsa)
-    scale: np.float32 = np.float32(scalea)
-    seed: np.int32 = np.int32(seeda)
+    num_points = np.int32(num_pointsa)
+    scale = np.float32(scalea)
+    seed = np.int32(seeda)
 
     np.random.seed(seed)
-    perlin: PerlinNoise3D = PerlinNoise3D()
+    perlin = PerlinNoise3D()
     
-    points: np.ndarray = noisebatch(num_points, scale, perlin.p)
+    points = noisebatch(num_points, scale, perlin.p)
     return points
 
 class VoxelGrid:
     def __init__(self, points: np.ndarray, voxel_size: np.float32):
-        self.points: np.ndarray = points
-        self.voxel_size: np.float32 = voxel_size
+        self.points = points
+        self.voxel_size = voxel_size
         
         # Find bounds
-        self.min_bounds: np.float32 = np.min(points, axis=0)
-        self.max_bounds: np.float32 = np.max(points, axis=0)
+        self.min_bounds = np.min(points, axis=0)
+        self.max_bounds = np.max(points, axis=0)
         
         # Calculate grid dimensions
-        self.dims: np.int32 = np.int32(np.ceil((self.max_bounds - self.min_bounds) / voxel_size).astype(int) + 1)
+        self.dims = np.int32(np.ceil((self.max_bounds - self.min_bounds) / voxel_size).astype(int) + 1)
         
         # Create voxel grid
-        self.grid: dict = {}
+        #self.grid: np.ndarray = np.zeros(self.dims, dtype=np.bool_)
+        self.grid = {}
         for point in points:
-            voxel_idx: tuple = tuple(((point - self.min_bounds) // voxel_size).astype(np.int32))
+            voxel_idx = tuple(((point - self.min_bounds) // voxel_size).astype(int))
             if voxel_idx not in self.grid:
                 self.grid[voxel_idx] = []
             self.grid[voxel_idx].append(point)
-        self.grid_array: npt.NDArray[np.bool_] = np.zeros(self.dims, dtype=np.bool_)
+        self.grid_array = np.zeros(self.dims, dtype=np.bool_)
         for key in self.grid:
             self.grid_array[key[0], key[1], key[2]] = True
 
 class AmanatidesWooRayTracer:
-    def __init__(self, voxel_grid: VoxelGrid, image_width: np.int32 = np.int32(800), image_height: np.int32 = np.int32(600)):
-        self.voxel_grid: VoxelGrid = voxel_grid
-        self.grid_array: npt.NDArray[np.bool_] = voxel_grid.grid_array
-        self.width: np.int32 = image_width
-        self.height: np.int32 = image_height
+    def __init__(self, voxel_grid, image_width=800, image_height=600):
+        self.voxel_grid = voxel_grid
+        self.grid_array = voxel_grid.grid_array
+        self.width = image_width
+        self.height = image_height
         
         # Camera parameters
-        self.camera_pos: npt.NDArray[np.int32] = np.array([0, 0, 15], np.int32)
-        self.look_at: npt.NDArray[np.int32] = np.array([0, 0, 0], np.int32)
-        self.up: npt.NDArray[np.int32] = np.array([0, 1, 0], np.int32)
+        self.camera_pos = np.array([0, 0, 15])  # Camera position
+        self.look_at = np.array([0, 0, 0])      # Look at origin
+        self.up = np.array([0, 1, 0])           # Up vector
         
         # Calculate camera basis
         self.forward = self.look_at - self.camera_pos
@@ -172,12 +170,11 @@ def numbarender(height, width, screen_width, screen_height, forward, right, up, 
 #@time_function
 @njit(cache=True)
 def voxel_traverse(ray_origin, ray_dir, voxel_grid, voxel_grid_voxel_size, voxel_grid_min_bounds, voxel_grid_dims):
-    #current_voxel = np.empty(3, dtype=np.int32)
-    #inv_dir = np.empty(3, dtype=np.float32)
-    #for i in range(3):
-    current_voxel = ((ray_origin - voxel_grid_min_bounds) // voxel_grid_voxel_size).astype(np.int32)
-    #    inv_dir[i] = ray_dir[i] if abs(ray_dir[i]) > epsilon else math.copysign(epsilon, ray_dir[i])
-    inv_dir = np.where(np.abs(ray_dir) > epsilon, ray_dir, np.copysign(epsilon, ray_dir))
+    current_voxel = np.empty(3, dtype=np.int32)
+    inv_dir = np.empty(3, dtype=np.float32)
+    for i in range(3):
+        current_voxel[i] = np.int32((ray_origin[i] - voxel_grid_min_bounds[i]) // voxel_grid_voxel_size)
+        inv_dir[i] = ray_dir[i] if abs(ray_dir[i]) > epsilon else math.copysign(epsilon, ray_dir[i])
     max_t = 50.0
     step = np.sign(ray_dir)
     step_mask = (step > 0)
@@ -193,18 +190,21 @@ def voxel_traverse(ray_origin, ray_dir, voxel_grid, voxel_grid_voxel_size, voxel
     for _ in range(max_steps):
         if not t < max_t:
             break
+        voxel_index = (int(current_voxel[0]), int(current_voxel[1]), int(current_voxel[2]))
         
-        #if (0 <= current_voxel[0] < voxel_grid_dims[0] and 0 <= current_voxel[1] < voxel_grid_dims[1] and 0 <= current_voxel[2] < voxel_grid_dims[2]):
-        if np.all((0 <= current_voxel) & (current_voxel < voxel_grid_dims)):
+        if (0 <= current_voxel[0] < voxel_grid_dims[0] and 
+            0 <= current_voxel[1] < voxel_grid_dims[1] and 
+            0 <= current_voxel[2] < voxel_grid_dims[2]):
             
-            if voxel_grid[current_voxel[0], current_voxel[1], current_voxel[2]]:
+            if voxel_grid[voxel_index[0], voxel_index[1], voxel_index[2]]:
+            #if voxel_grid[current_voxel[0], current_voxel[1], current_voxel[2]]:
                 return True, t
         
         # Find next voxel
         min_axis = 0
         if t_max[1] < t_max[0]:
             min_axis = 1
-        if t_max[2] < t_max[min_axis]:
+        if t_max[2] < t_max[1]:
             min_axis = 2
         current_voxel[min_axis] += step[min_axis]
         t = t_max[min_axis]

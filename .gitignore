@@ -192,3 +192,4 @@ main.bin
 .vscode/settings.json
 system2.cmd
 *.obj
+point_cloud_rendered.png
