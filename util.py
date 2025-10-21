@@ -4,7 +4,7 @@ import random
 import numpy as np
 import time
 from functools import wraps
-from numba import njit, float32, types, int64, int32, cuda, jit
+from numba import njit, float32, types, int64, int32, cuda, jit, prange
 #from numba.cuda import jit
 from numba.extending import overload
 from numpy._typing._array_like import NDArray
@@ -40,11 +40,23 @@ def norm(vec):
     return np.sqrt(sum_sq)
 
 @njit(float32[:](float32[:]), cache=True)
-def normalize(vec):
+def normalize(vec: npt.NDArray) -> npt.NDArray:
     n = norm(vec)
     if n < 1e-10:
         return vec
     return vec / n
+
+@njit(cache=True)
+def vnorm(vectors):
+    """Compute norm for array of vectors [..., 3]"""
+    result = np.empty(vectors.shape[:-1], dtype=vectors.dtype)
+    for i in prange(vectors.shape[0]):
+        for j in range(vectors.shape[1]):
+            x = vectors[i, j, 0]
+            y = vectors[i, j, 1]
+            z = vectors[i, j, 2]
+            result[i, j] = np.sqrt(x*x + y*y + z*z)
+    return result
 
 @njit
 def dot(v1, v2):
