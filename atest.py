@@ -276,6 +276,91 @@ def _render_parallel(image, ray_origin, voxel_grid, vsize, vbound, dims, max_dis
 
 
 
+
+
+# @njit(parallel=True, cache=True)
+# def _render_parallel(image, ray_origin, voxel_grid, vsize, vbound, dims, max_distance,
+#                      screen_height, screen_width, forward, right, up):
+#     height: np.int32 = image.shape[0]
+#     width: np.int32 = image.shape[1]
+#     epsilon = np.float32(0.00000000001)
+#     max_t: np.float32 = np.float32(50.0)
+#     max_steps: np.int32 = np.int32(123)
+
+#     max_distance = np.float32(max_distance)
+#     screen_height = np.float32(screen_height)  
+#     screen_width = np.float32(screen_width)
+    
+#     inv_width: np.float32 = np.float32(1.0) / width
+#     inv_height: np.float32 = np.float32(1.0) / height
+#     screen_width_half: np.float32 = screen_width * np.float32(0.5)
+#     screen_height_half: np.float32 = screen_height * np.float32(0.5)
+
+#     # Create arrays to store hit information
+#     hit_mask = np.zeros((height, width), dtype=bool)
+#     distances = np.zeros((height, width), dtype=np.float32)
+    
+#     for y in prange(height):
+#         sy: np.float32 = np.float32((np.float32(1.0) - np.float32(2.0) * y * inv_height) * screen_height_half)
+#         for x in prange(width):
+#             sx: np.float32 = np.float32((np.float32(2.0) * x * inv_width - np.float32(1.0)) * screen_width_half)
+#             ray_dir = forward + sx * right + sy * up
+#             ray_dir = normalize(ray_dir)
+
+#             current_voxel = ((ray_origin - vbound) // vsize).astype(np.int32)
+#             inv_dir = np.where(np.abs(ray_dir) > epsilon, ray_dir, np.copysign(epsilon, ray_dir))
+#             step = np.sign(ray_dir)
+#             step_mask = np.greater(step, 0)
+#             next_voxel_bound = ((current_voxel + step_mask) * vsize + vbound)
+#             t_max = (next_voxel_bound - ray_origin) * inv_dir
+#             t_delta = vsize / np.abs(inv_dir)
+#             t = np.float32(0.0)
+#             hit = False
+#             distance = np.float32(0.0)
+            
+#             for _ in range(max_steps):
+#                 if not t < max_t:
+#                     break
+#                 if np.all((0 <= current_voxel) & (current_voxel < dims)):
+#                     if voxel_grid[current_voxel[0], current_voxel[1], current_voxel[2]]:
+#                         hit = True
+#                         distance = t
+#                         break
+                
+#                 min_axis = 0
+#                 if t_max[1] < t_max[0]:
+#                     min_axis = 1
+#                 if t_max[2] < t_max[min_axis]:
+#                     min_axis = 2
+#                 current_voxel[min_axis] += step[min_axis]
+#                 t = t_max[min_axis]
+#                 t_max[min_axis] += t_delta[min_axis]
+
+#             # Store hit information for later vectorized processing
+#             hit_mask[y, x] = hit
+#             if hit:
+#                 distances[y, x] = distance
+    
+#     # Vectorized computation for hit pixels
+#     if np.any(hit_mask):
+#         # Get coordinates of hit pixels
+#         #hit_y, hit_x = np.where(hit_mask)
+        
+#         # Vectorized color computation
+#         t_values = distances / max_distance
+#         t_values = np.clip(t_values, 0.0, 1.0)
+        
+#         r_values = (t_values * 255).astype(np.uint8)
+#         b_values = ((1.0 - t_values) * 255).astype(np.uint8)
+        
+#         # Assign colors in vectorized manner
+#         image[..., 0] = r_values
+#         image[..., 1] = 0
+#         image[..., 2] = b_values
+    
+#     return image
+
+
 # Generate point cloud
 print("Generating point cloud...")
 point_cloud = generate_point_cloud(num_pointsa=150000, scalea=5.0, seeda=43)

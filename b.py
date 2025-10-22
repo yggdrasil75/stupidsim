@@ -1,7 +1,5 @@
 import numpy as np
 import numpy.typing as npt
-#import matplotlib.pyplot as plt
-#from mpl_toolkits.mplot3d import Axes3D
 from PIL import Image
 import math
 from util import normalize, time_function, print_timing_stats, norm, dot, cross, cross_2d
@@ -63,32 +61,50 @@ class PerlinNoise3D:
         self.permutation: npt.NDArray[np.int32] = np.arange(256, dtype=np.int32)
         np.random.shuffle(self.permutation)
         self.p: npt.NDArray[np.int32] = np.tile(self.permutation, 2)
-        #print(self.p.shape)
     
     def noise(self, x: np.float32, y: np.float32, z: np.float32) -> np.float32:
         return pnoise3d(self.p, x, y, z)
 
 @time_function
-@njit((float32[:,:](int32,float32,int32[:])),cache=True, parallel=True)
-def noisebatch(num_points: np.int32, scale: np.float32, sp: np.ndarray) -> np.ndarray:
-    # Preallocate array for maximum possible points
+@njit((types.UniTuple(float32[:,:], 2)(int32,float32,int32[:])),cache=True, parallel=True)
+def noisebatch(num_points: np.int32, scale: np.float32, sp: np.ndarray) -> tuple:
+    # Preallocate arrays for points and colors
     points: np.ndarray = np.zeros((num_points, 3), dtype=np.float32)
+    colors: np.ndarray = np.zeros((num_points, 3), dtype=np.float32)
+    point_count = 0
     
     for i in prange(num_points):
         x: np.float32 = np.float32(np.random.uniform(-scale, scale))
         y: np.float32 = np.float32(np.random.uniform(-scale, scale))
         z: np.float32 = np.float32(np.random.uniform(-scale, scale))
         
-        # Use noise to create density variations
-        noise_val: np.float32 = pnoise3d(sp, x * np.float32(0.5), y * np.float32(0.5), z * np.float32(0.5))
+        # Use noise to create density variations and color variations
+        noise_val1: np.float32 = pnoise3d(sp, x * np.float32(0.5), y * np.float32(0.5), z * np.float32(0.5))
+        noise_val2: np.float32 = pnoise3d(sp, x * np.float32(0.3), y * np.float32(0.3), z * np.float32(0.3))
+        noise_val3: np.float32 = pnoise3d(sp, x * np.float32(0.7), y * np.float32(0.7), z * np.float32(0.7))
         
-        if noise_val > 0.1:
-            points[i] = [x, y, z]
+        if noise_val1 > 0.1:
+            # Assign colors based on different noise patterns
+            r = np.float32((noise_val1 + 1.0) * 0.5)  # Red from first noise
+            g = np.float32((noise_val2 + 1.0) * 0.5)  # Green from second noise
+            b = np.float32((noise_val3 + 1.0) * 0.5)  # Blue from third noise
+            
+            # Normalize colors to be more vibrant
+            max_val = max(r, g, b)
+            if max_val > 0:
+                r = r / max_val
+                g = g / max_val
+                b = b / max_val
+            
+            points[point_count] = [x, y, z]
+            colors[point_count] = [r, g, b]
+            point_count += 1
     
-    return points
+    # Trim arrays to actual size
+    return points[:point_count], colors[:point_count]
 
 @time_function
-def generate_point_cloud(num_pointsa: int, scalea: float, seeda: int) -> np.ndarray:
+def generate_point_cloud(num_pointsa: int, scalea: float, seeda: int) -> tuple:
     num_points: np.int32 = np.int32(num_pointsa)
     scale: np.float32 = np.float32(scalea)
     seed: np.int32 = np.int32(seeda)
@@ -96,12 +112,13 @@ def generate_point_cloud(num_pointsa: int, scalea: float, seeda: int) -> np.ndar
     np.random.seed(seed)
     perlin: PerlinNoise3D = PerlinNoise3D()
     
-    points: np.ndarray = noisebatch(num_points, scale, perlin.p)
-    return points
+    points, colors = noisebatch(num_points, scale, perlin.p)
+    return points, colors
 
 class VoxelGrid:
-    def __init__(self, points: np.ndarray, voxel_size: np.float32):
+    def __init__(self, points: np.ndarray, colors: np.ndarray, voxel_size: np.float32):
         self.points: np.ndarray = points
+        self.colors: np.ndarray = colors
         self.voxel_size: np.float32 = voxel_size
         
         # Find bounds
@@ -111,21 +128,35 @@ class VoxelGrid:
         # Calculate grid dimensions
         self.dims: np.int32 = np.int32(np.ceil((self.max_bounds - self.min_bounds) / voxel_size).astype(int) + 1)
         
-        # Create voxel grid
+        # Create voxel grid with colors
         self.grid: dict = {}
-        for point in points:
+        self.color_grid: dict = {}
+        
+        for i, point in enumerate(points):
             voxel_idx: tuple = tuple(((point - self.min_bounds) // voxel_size).astype(np.int32))
             if voxel_idx not in self.grid:
                 self.grid[voxel_idx] = []
+                self.color_grid[voxel_idx] = []
             self.grid[voxel_idx].append(point)
+            self.color_grid[voxel_idx].append(colors[i])
+        
+        # Create grid arrays for fast access
         self.grid_array: npt.NDArray[np.bool_] = np.zeros(self.dims, dtype=np.bool_)
+        self.color_array: npt.NDArray[np.float32] = np.zeros((*self.dims, 3), dtype=np.float32)
+        self.count_array: npt.NDArray[np.int32] = np.zeros(self.dims, dtype=np.int32)
+        
         for key in self.grid:
             self.grid_array[key[0], key[1], key[2]] = True
+            # Average colors for this voxel
+            avg_color = np.mean(self.color_grid[key], axis=0)
+            self.color_array[key[0], key[1], key[2]] = avg_color
+            self.count_array[key[0], key[1], key[2]] = len(self.color_grid[key])
 
 class AmanatidesWooRayTracer:
     def __init__(self, voxel_grid: VoxelGrid, image_width: np.int32 = np.int32(800), image_height: np.int32 = np.int32(600)):
         self.voxel_grid: VoxelGrid = voxel_grid
         self.grid_array: npt.NDArray[np.bool_] = voxel_grid.grid_array
+        self.color_array: npt.NDArray[np.float32] = voxel_grid.color_array
         self.width: np.int32 = image_width
         self.height: np.int32 = image_height
         
@@ -136,7 +167,6 @@ class AmanatidesWooRayTracer:
         
         # Calculate camera basis
         self.forward = (self.look_at - self.camera_pos).astype(np.float32)
-        #self.forward = self.forward / np.linalg.norm(self.forward)
         self.forward = normalize(self.forward)
         self.right = cross(self.forward, self.up)
         self.right = normalize(self.right)
@@ -150,13 +180,14 @@ class AmanatidesWooRayTracer:
         self.screen_height: np.float32  = 2 * np.tan(np.radians(self.fov) / 2)
         self.screen_width: np.float32  = self.screen_height * self.aspect_ratio
         
-    #@time_function
     def render(self):
         return numbarender(self.height, self.width, self.screen_width, self.screen_height,
-                            self.forward, self.right, self.up,self.camera_pos, self.voxel_grid, self.grid_array)
+                            self.forward, self.right, self.up,self.camera_pos, self.voxel_grid, 
+                            self.grid_array, self.color_array)
 
 @time_function
-def numbarender(height, width, screen_width, screen_height, forward, right, up, camera_pos, voxel_grid, voxel_grid_np):
+def numbarender(height, width, screen_width, screen_height, forward, right, up, camera_pos, 
+                voxel_grid, voxel_grid_np, color_array):
     image = np.ones((height, width, 3), dtype=np.uint8) * 255  # White background
     
     max_distance = np.float32(25.0)
@@ -164,55 +195,15 @@ def numbarender(height, width, screen_width, screen_height, forward, right, up, 
     vbound = voxel_grid.min_bounds
     vsize = voxel_grid.voxel_size
     voxel_grid_dims = voxel_grid.dims
-    image = _render_parallel(image,  camera_pos, voxel_grid_np,
+    image = _render_parallel(image, camera_pos, voxel_grid_np, color_array,
                             vsize, vbound, voxel_grid_dims, max_distance,
                             screen_height, screen_width, forward, right, up)
     
     return image
 
-#@time_function
-#@njit(cache=True)
-def voxel_traverse(ray_origin, ray_dir, voxel_grid, voxel_grid_voxel_size, voxel_grid_min_bounds, voxel_grid_dims):
-    epsilon = 0.00000001
-    
-    current_voxel = ((ray_origin - voxel_grid_min_bounds) // voxel_grid_voxel_size).astype(np.int32)
-    inv_dir = np.where(np.abs(ray_dir) > epsilon, ray_dir, np.copysign(epsilon, ray_dir))
-    max_t = np.float32(50.0)
-    step = np.sign(ray_dir)
-    step_mask = (step > 0)
-    
-    next_voxel_boundary = ((current_voxel + step_mask) * voxel_grid_voxel_size + voxel_grid_min_bounds)
-
-    t_max = (next_voxel_boundary - ray_origin) * inv_dir
-    t_delta = voxel_grid_voxel_size / np.abs(inv_dir)
-
-    t = 0.0
-    max_steps = int(max_t / np.min(t_delta)) + 10
-
-    for _ in range(max_steps):
-        if not t < max_t:
-            break
-
-        if np.all((0 <= current_voxel) & (current_voxel < voxel_grid_dims)):
-            if voxel_grid[current_voxel[0], current_voxel[1], current_voxel[2]]:
-                return True, t
-        
-        # Find next voxel
-        min_axis = 0
-        if t_max[1] < t_max[0]:
-            min_axis = 1
-        if t_max[2] < t_max[min_axis]:
-            min_axis = 2
-        current_voxel[min_axis] += step[min_axis]
-        t = t_max[min_axis]
-        t_max[min_axis] += t_delta[min_axis]
-
-    
-    return False, 0.0
-
-#@time_function
+@time_function
 @njit(parallel=True, cache=True)
-def _render_parallel(image, ray_origin, voxel_grid, vsize, vbound, dims, max_distance,
+def _render_parallel(image, ray_origin, voxel_grid, color_array, vsize, vbound, dims, max_distance,
                      screen_height, screen_width, forward, right, up):
     height: np.int32 = image.shape[0]
     width: np.int32 = image.shape[1]
@@ -229,10 +220,6 @@ def _render_parallel(image, ray_origin, voxel_grid, vsize, vbound, dims, max_dis
     screen_width_half: np.float32 = screen_width * np.float32(0.5)
     screen_height_half: np.float32 = screen_height * np.float32(0.5)
 
-    # Create arrays to store hit information
-    hit_mask = np.zeros((height, width), dtype=bool)
-    distances = np.zeros((height, width), dtype=np.float32)
-    
     for y in prange(height):
         sy: np.float32 = np.float32((np.float32(1.0) - np.float32(2.0) * y * inv_height) * screen_height_half)
         for x in prange(width):
@@ -249,7 +236,7 @@ def _render_parallel(image, ray_origin, voxel_grid, vsize, vbound, dims, max_dis
             t_delta = vsize / np.abs(inv_dir)
             t = np.float32(0.0)
             hit = False
-            distance = np.float32(0.0)
+            hit_color = np.array([0.0, 0.0, 0.0], dtype=np.float32)
             
             for _ in range(max_steps):
                 if not t < max_t:
@@ -257,7 +244,8 @@ def _render_parallel(image, ray_origin, voxel_grid, vsize, vbound, dims, max_dis
                 if np.all((0 <= current_voxel) & (current_voxel < dims)):
                     if voxel_grid[current_voxel[0], current_voxel[1], current_voxel[2]]:
                         hit = True
-                        distance = t
+                        # Get the color from the color array
+                        hit_color = color_array[current_voxel[0], current_voxel[1], current_voxel[2]]
                         break
                 
                 min_axis = 0
@@ -269,40 +257,22 @@ def _render_parallel(image, ray_origin, voxel_grid, vsize, vbound, dims, max_dis
                 t = t_max[min_axis]
                 t_max[min_axis] += t_delta[min_axis]
 
-            # Store hit information for later vectorized processing
-            hit_mask[y, x] = hit
             if hit:
-                distances[y, x] = distance
-    
-    # Vectorized computation for hit pixels
-    if np.any(hit_mask):
-        # Get coordinates of hit pixels
-        hit_y, hit_x = np.where(hit_mask)
-        
-        # Vectorized color computation
-        t_values = distances[hit_mask] / max_distance
-        t_values = np.clip(t_values, 0.0, 1.0)
-        
-        r_values = (t_values * 255).astype(np.uint8)
-        b_values = ((1.0 - t_values) * 255).astype(np.uint8)
-        
-        # Assign colors in vectorized manner
-        image[hit_y, hit_x, 0] = r_values
-        image[hit_y, hit_x, 1] = 0
-        image[hit_y, hit_x, 2] = b_values
+                image[y, x, 0] = np.uint8(hit_color[0] * 255)
+                image[y, x, 1] = np.uint8(hit_color[1] * 255)
+                image[y, x, 2] = np.uint8(hit_color[2] * 255)
     
     return image
 
 
+# Generate point cloud with colors
+print("Generating point cloud with colors...")
+point_cloud, point_colors = generate_point_cloud(num_pointsa=150000, scalea=5.0, seeda=43)
 
-# Generate point cloud
-print("Generating point cloud...")
-point_cloud = generate_point_cloud(num_pointsa=150000, scalea=5.0, seeda=43)
-
-# Create voxel grid
-print("Creating voxel grid...")
+# Create voxel grid with colors
+print("Creating voxel grid with colors...")
 voxel_size: np.float32 = np.float32(0.3)
-voxel_grid: VoxelGrid = VoxelGrid(point_cloud, voxel_size=voxel_size)
+voxel_grid: VoxelGrid = VoxelGrid(point_cloud, point_colors, voxel_size=voxel_size)
 
 # Render using Amanatides and Woo algorithm
 print("Rendering with Amanatides-Woo ray tracing...")
