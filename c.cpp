@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <unordered_map>
 #include <functional>
+#include "timing_decorator.hpp"
 
+//classes and structs
 struct Point3D { 
     float x, y, z;
     Point3D() : x(0), y(0), z(0) {}
@@ -73,6 +75,7 @@ public:
         }
     }
     std::vector<std::pair<Point3D, color4D>> getPointsInVoxel(const Point3D& point) const {
+        TIME_FUNCTION;
         Point3D voxel_key = getVoxelKey(point);
         auto it = grid.find(voxel_key);
         if (it != grid.end()) {
@@ -81,6 +84,7 @@ public:
         return {};
     }
     std::vector<Point3D> getVoxelKeys() const {
+        TIME_FUNCTION;
         std::vector<Point3D> keys;
         for (const auto& pair : grid) {
             keys.push_back(pair.first);
@@ -98,6 +102,7 @@ public:
         return total;
     }
     void getVoxelStats(size_t& min_points, size_t& max_points, double& avg_points) const {
+        TIME_FUNCTION;
         if (grid.empty()) {
             min_points = max_points = avg_points = 0;
             return;
@@ -117,6 +122,7 @@ public:
         avg_points = static_cast<double>(total_points) / grid.size();
     }
     std::tuple<std::vector<Point3D>, std::vector<color4D>> getAllPoints() const {
+        TIME_FUNCTION;
         std::vector<Point3D> points;
         std::vector<color4D> colors;
         
@@ -163,6 +169,7 @@ public:
         return false;
     }
     void printStats() const {
+        TIME_FUNCTION;
         size_t min_pts, max_pts;
         double avg_pts;
         getVoxelStats(min_pts, max_pts, avg_pts);
@@ -175,17 +182,39 @@ public:
     }
 };
 
+struct Image {
+    int width;
+    int height;
+    std::vector<uint8_t> data; // RGBA format
+    
+    Image(int w, int h) : width(w), height(h), data(w * h * 4) {}
+    
+    // Helper methods
+    uint8_t* pixel(int x, int y) {
+        return &data[(y * width + x) * 4];
+    }
+    
+    void setPixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
+        uint8_t* p = pixel(x, y);
+        p[0] = r; p[1] = g; p[2] = b; p[3] = a;
+    }
+};
+
+//noise functions
 float fade(const float& a) {
+    TIME_FUNCTION;
     return a * a * a * (10 + a * (-15 + a * 6));
 }
 
 float clamp(float x, float lowerlimit = 0.0f, float upperlimit = 1.0f) {
-  if (x < lowerlimit) return lowerlimit;
-  if (x > upperlimit) return upperlimit;
-  return x;
+    TIME_FUNCTION;
+    if (x < lowerlimit) return lowerlimit;
+    if (x > upperlimit) return upperlimit;
+    return x;
 }
 
 float pascalTri(const float& a, const float& b) {
+    TIME_FUNCTION;
     int result = 1;
     for (int i = 0; i < b; ++i){
         result *= (a - 1) / (i + 1);
@@ -194,6 +223,7 @@ float pascalTri(const float& a, const float& b) {
 }
 
 float genSmooth(int N, float x) {
+    TIME_FUNCTION;
     x = clamp(x, 0, 1);
     float result = 0;
     for (int n = 0; n <= N; ++n){
@@ -203,14 +233,17 @@ float genSmooth(int N, float x) {
 }
 
 float inverse_smoothstep(float x) {
-  return 0.5 - sin(asin(1.0 - 2.0 * x) / 3.0);
+    TIME_FUNCTION;
+    return 0.5 - sin(asin(1.0 - 2.0 * x) / 3.0);
 }
 
 float lerp(const float& t, const float& a, const float& b) {
+    TIME_FUNCTION;
     return a + t * (b - a);
 }
 
 float grad(const int& hash, const float& b, const float& c, const float& d) {
+    TIME_FUNCTION;
     int h = hash & 15;
     float u = (h < 8) ? c : b;
     float v = (h < 4) ? b : ((h == 12 || h == 14) ? c : d);
@@ -218,6 +251,7 @@ float grad(const int& hash, const float& b, const float& c, const float& d) {
 }
 
 float pnoise3d(const int p[512], const float& xf, const float& yf, const float& zf) {
+    TIME_FUNCTION;
     int floorx = std::floor(xf);
     int floory = std::floor(yf);
     int floorz = std::floor(zf);
@@ -261,6 +295,7 @@ float pnoise3d(const int p[512], const float& xf, const float& yf, const float& 
 }
 
 std::tuple<std::vector<Point3D>, std::vector<color4D>> noiseBatch(int num_points, float scale, int sp[]) {
+    TIME_FUNCTION;
     std::vector<Point3D> points;
     std::vector<color4D> colors;
     points.reserve(num_points);
@@ -301,6 +336,7 @@ std::tuple<std::vector<Point3D>, std::vector<color4D>> noiseBatch(int num_points
 }
 
 std::tuple<std::vector<Point3D>, std::vector<color4D>> genPointCloud(int numP, float scale, int seed) {
+    TIME_FUNCTION;
     int permutation[256];
     for (int i = 0; i < 256; ++i) {
         permutation[i] = i;
@@ -315,6 +351,31 @@ std::tuple<std::vector<Point3D>, std::vector<color4D>> genPointCloud(int numP, f
     return noiseBatch(numP, scale, p);
 }
 
+Image render(int height, int width, float forward) {
+    Image img = Image(height, width);
+
+    float max_t = 50.0;
+    int max_steps = 123;
+    float max_dist = 25.0;
+    float screen_height = height;
+    float screen_width = width;
+
+    float inv_w = 1.0 / width;
+    float inv_h = 1.0 / height;
+    float scr_w_half = screen_width * 0.5;
+    float scr_h_half = screen_height * 0.5;
+
+    for (int y = 0; y < height; y++) {
+        float sy = 1.0 - (2.0 * y * inv_h) * scr_h_half;
+        for (int x = 0; x < width; x++) {
+            float sx = ((2.0 * x * inv_w) - 1.0) * scr_h_half;
+            float ray_dir = forward + sx * right + sy * up;
+        
+    }
+
+    return img;
+}
+
 int main() {    
     std::cout << "Generating point cloud" << std::endl;
     auto [points, colors] = genPointCloud(150000, 5.0, 43);
@@ -327,7 +388,10 @@ int main() {
     voxel_grid.addPoints(points, colors);
     
     voxel_grid.printStats();
+    FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
     
     
     return 0;
 }
+
+// compilation instructions: g++ -std=c++17 -O3 -march=native -o pointcloud_renderer c.cpp timing_decorator.cpp && ./pointcloud_renderer
