@@ -193,3 +193,5 @@ main.bin
 system2.cmd
 *.obj
 point_cloud_rendered.png
+pointcloud_renderer
+stb_image_write.h

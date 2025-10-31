@@ -70,7 +70,7 @@ class PerlinNoise3D:
 def noisebatch(num_points: np.int32, scale: np.float32, sp: np.ndarray) -> tuple:
     # Preallocate arrays for points and colors
     points: np.ndarray = np.zeros((num_points, 3), dtype=np.float32)
-    colors: np.ndarray = np.zeros((num_points, 3), dtype=np.float32)
+    colors: np.ndarray = np.zeros((num_points, 4), dtype=np.float32)
     point_count = 0
     
     for i in prange(num_points):
@@ -82,12 +82,14 @@ def noisebatch(num_points: np.int32, scale: np.float32, sp: np.ndarray) -> tuple
         noise_val1: np.float32 = pnoise3d(sp, x * np.float32(0.5), y * np.float32(0.5), z * np.float32(0.5))
         noise_val2: np.float32 = pnoise3d(sp, x * np.float32(0.3), y * np.float32(0.3), z * np.float32(0.3))
         noise_val3: np.float32 = pnoise3d(sp, x * np.float32(0.7), y * np.float32(0.7), z * np.float32(0.7))
+        noise_val4: np.float32 = pnoise3d(sp, x * np.float32(0.7), y * np.float32(0.7), z * np.float32(0.7))
         
         if noise_val1 > 0.1:
             # Assign colors based on different noise patterns
             r = np.float32((noise_val1 + 1.0) * 0.5)  # Red from first noise
             g = np.float32((noise_val2 + 1.0) * 0.5)  # Green from second noise
             b = np.float32((noise_val3 + 1.0) * 0.5)  # Blue from third noise
+            a = np.float32((noise_val4 + 1.0) * 0.5)  # Alpha from fourth noise
             
             # Normalize colors to be more vibrant
             max_val = max(r, g, b)
@@ -95,9 +97,10 @@ def noisebatch(num_points: np.int32, scale: np.float32, sp: np.ndarray) -> tuple
                 r = r / max_val
                 g = g / max_val
                 b = b / max_val
+                a = a / max_val
             
             points[point_count] = [x, y, z]
-            colors[point_count] = [r, g, b]
+            colors[point_count] = [r, g, b, a]
             point_count += 1
     
     # Trim arrays to actual size
@@ -142,7 +145,7 @@ class VoxelGrid:
         
         # Create grid arrays for fast access
         self.grid_array: npt.NDArray[np.bool_] = np.zeros(self.dims, dtype=np.bool_)
-        self.color_array: npt.NDArray[np.float32] = np.zeros((*self.dims, 3), dtype=np.float32)
+        self.color_array: npt.NDArray[np.float32] = np.zeros((*self.dims, 4), dtype=np.float32)  # Now includes alpha
         self.count_array: npt.NDArray[np.int32] = np.zeros(self.dims, dtype=np.int32)
         
         for key in self.grid:
@@ -235,18 +238,31 @@ def _render_parallel(image, ray_origin, voxel_grid, color_array, vsize, vbound, 
             t_max = (next_voxel_bound - ray_origin) * inv_dir
             t_delta = vsize / np.abs(inv_dir)
             t = np.float32(0.0)
-            hit = False
-            hit_color = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            
+            # Alpha compositing variables
+            accumulated_color = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            accumulated_alpha = np.float32(0.0)
             
             for _ in range(max_steps):
                 if not t < max_t:
                     break
+                if accumulated_alpha >= 1.0:  # Fully opaque, stop tracing
+                    break
+                    
                 if np.all((0 <= current_voxel) & (current_voxel < dims)):
                     if voxel_grid[current_voxel[0], current_voxel[1], current_voxel[2]]:
-                        hit = True
-                        # Get the color from the color array
-                        hit_color = color_array[current_voxel[0], current_voxel[1], current_voxel[2]]
-                        break
+                        # Get the color and alpha from the color array
+                        voxel_color = color_array[current_voxel[0], current_voxel[1], current_voxel[2]]
+                        rgba = voxel_color
+                        color_rgb = rgba[:3]
+                        alpha = rgba[3]
+                        
+                        # Apply alpha compositing: front-to-back
+                        if alpha > 0:
+                            # Weight by current transparency
+                            weight = alpha * (1.0 - accumulated_alpha)
+                            accumulated_color += color_rgb * weight
+                            accumulated_alpha += weight
                 
                 min_axis = 0
                 if t_max[1] < t_max[0]:
@@ -257,10 +273,13 @@ def _render_parallel(image, ray_origin, voxel_grid, color_array, vsize, vbound, 
                 t = t_max[min_axis]
                 t_max[min_axis] += t_delta[min_axis]
 
-            if hit:
-                image[y, x, 0] = np.uint8(hit_color[0] * 255)
-                image[y, x, 1] = np.uint8(hit_color[1] * 255)
-                image[y, x, 2] = np.uint8(hit_color[2] * 255)
+            # Set final pixel color
+            if accumulated_alpha > 0:
+                # Blend with background (white)
+                final_color = accumulated_color + (1.0 - accumulated_alpha) * np.array([1.0, 1.0, 1.0])
+                image[y, x, 0] = np.uint8(final_color[0] * 255)
+                image[y, x, 1] = np.uint8(final_color[1] * 255)
+                image[y, x, 2] = np.uint8(final_color[2] * 255)
     
     return image
 
