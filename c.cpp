@@ -24,6 +24,8 @@ public:
     
     Vec3(double x = 0, double y = 0, double z = 0) : x(x), y(y), z(z) {}
     
+    //Vec3(const VoxelIndex& idx) : x(static_cast<double>(idx.x)), y(static_cast<double>(idx.y)), z(static_cast<double>(idx.z)) {}
+    
     inline double norm() const {
         return std::sqrt(x*x + y*y + z*z);
     }
@@ -275,6 +277,14 @@ struct VoxelIndex {
     }
     inline VoxelIndex operator*(float scalar) const {
         return VoxelIndex(std::floor(x * scalar), std::floor(y * scalar), std::floor(z * scalar));
+    }
+
+    operator Vec3() const {
+        return Vec3(static_cast<double>(x), static_cast<double>(y), static_cast<double>(z));
+    }
+
+    Vec3 toVec3() const {
+        return Vec3(static_cast<double>(x), static_cast<double>(y), static_cast<double>(z));
     }
 
     // Hash function
