@@ -6,10 +6,17 @@
 #include <unordered_map>
 #include <functional>
 #include "timing_decorator.hpp"
+#include <cstdint>
+#include <fstream>
+#include <string>
 
 const float EPSILON = 0.00000000001;
 
 //classes and structs
+
+struct Bool3 {
+    bool x, y, z;
+};
 
 class Vec3 {
 public:
@@ -44,6 +51,14 @@ public:
 
     inline Vec3 operator+(const Vec3& other) const {
         return Vec3(x + other.x, y + other.y, z + other.z);
+    }
+
+    Vec3 operator+(const Bool3& other) const {
+        return {
+            x + (other.x ? 1.0f : 0.0f),
+            y + (other.y ? 1.0f : 0.0f),
+            z + (other.z ? 1.0f : 0.0f)
+        };
     }
     
     inline Vec3 operator-(const Vec3& other) const {
@@ -83,6 +98,20 @@ public:
         if (y != other.y) return y < other.y;
         return z < other.z;
     }
+
+    const float& operator[](int index) const {
+        if (index == 0) return x;
+        if (index == 1) return y;
+        if (index == 2) return z;
+        throw std::out_of_range("Index out of range");
+    }
+
+    double& operator[](int index) {
+        if (index == 0) return x;
+        if (index == 1) return y;
+        if (index == 2) return z;
+        throw std::out_of_range("Index out of range");
+    }
     
     struct Hash {
         size_t operator()(const Vec3& v) const {
@@ -93,10 +122,16 @@ public:
         }
     };
 
+    std::string toString() const {
+        return "Vec3(" + std::to_string(x) + ", " + 
+                             std::to_string(y) + ", " + 
+                             std::to_string(z) + ")";
+    }
+
     Vec3& safe_inverse_dir(float epsilon = 1e-6f) {
-        x = (std::abs(x) > epsilon) ? x : std::copysign(epsilon, x);
-        y = (std::abs(y) > epsilon) ? y : std::copysign(epsilon, y);
-        z = (std::abs(z) > epsilon) ? z : std::copysign(epsilon, z);
+        x = (std::abs(x) > epsilon) ? x : std::copysign(epsilon, -x);
+        y = (std::abs(y) > epsilon) ? y : std::copysign(epsilon, -y);
+        z = (std::abs(z) > epsilon) ? z : std::copysign(epsilon, -z);
         return *this;
     }
 
@@ -118,7 +153,7 @@ public:
     double x, y, z, w;
     
     Vec4(double x = 0, double y = 0, double z = 0, double w = 0) : x(x), y(y), z(z), w(w) {}
-    
+
     inline double norm() const {
         return std::sqrt(x*x + y*y + z*z + w*w);
     }
@@ -190,6 +225,82 @@ public:
     };
 };
 
+struct VoxelIndex {
+    int x, y, z;
+
+    // Constructor
+    VoxelIndex(int x = 0, int y = 0, int z = 0) : x(x), y(y), z(z) {}
+
+    // Array-like access
+    int& operator[](size_t index) {
+        switch(index) {
+            case 0: return x;
+            case 1: return y;
+            case 2: return z;
+            default: throw std::out_of_range("Index out of range");
+        }
+    }
+
+    const int& operator[](size_t index) const {
+        switch(index) {
+            case 0: return x;
+            case 1: return y;
+            case 2: return z;
+            default: throw std::out_of_range("Index out of range");
+        }
+    }
+
+    inline VoxelIndex operator+(const Vec3& other) const {
+        return VoxelIndex(std::floor(x + other.x), std::floor(y + other.y), std::floor(z + other.z));
+    }
+
+    inline VoxelIndex operator-(const Vec3& other) const {
+        return VoxelIndex(std::floor(x - other.x), std::floor(y - other.y), std::floor(z - other.z));
+    }
+
+    inline VoxelIndex operator+(float scalar) const {
+        return VoxelIndex(std::floor(x + scalar), std::floor(y + scalar), std::floor(z + scalar));
+    }
+    
+    VoxelIndex operator+(const Bool3& other) const {
+        return {
+            x + (other.x ? 1 : 0),
+            y + (other.y ? 1 : 0),
+            z + (other.z ? 1 : 0)
+        };
+    }
+
+    inline VoxelIndex operator*(const Vec3& other) const {
+        return VoxelIndex(std::floor(x * other.x), std::floor(y * other.y), std::floor(z * other.z));
+    }
+    inline VoxelIndex operator*(float scalar) const {
+        return VoxelIndex(std::floor(x * scalar), std::floor(y * scalar), std::floor(z * scalar));
+    }
+
+    // Hash function
+    size_t hash() const {
+        return std::hash<int>{}(x) ^ 
+               (std::hash<int>{}(y) << 1) ^ 
+               (std::hash<int>{}(z) << 2);
+    }
+
+    // Convert to string
+    std::string toString() const {
+        return "VoxelIndex(" + std::to_string(x) + ", " + 
+                             std::to_string(y) + ", " + 
+                             std::to_string(z) + ")";
+    }
+
+    // Comparison operators for completeness
+    bool operator==(const VoxelIndex& other) const {
+        return x == other.x && y == other.y && z == other.z;
+    }
+
+    bool operator!=(const VoxelIndex& other) const {
+        return !(*this == other);
+    }
+};
+
 namespace std {
     template<>
     struct hash<Vec3> {
@@ -197,70 +308,175 @@ namespace std {
             return hash<float>()(p.x) ^ hash<float>()(p.y) ^ hash<float>()(p.z);
         }
     };
+    template<>
+    struct hash<VoxelIndex> {
+        size_t operator()(const VoxelIndex& idx) const {
+            return idx.hash();
+        }
+    };
 }
-
-struct color4D {
-    float r, g, b, a;
-    color4D() : r(0), g(0), b(0), a(0) {}
-    color4D(float r, float g, float b) : r(r), g(g), b(b), a(1) {}
-    color4D(float r, float g, float b, float a) : r(r), g(g), b(b), a(a) {}
-    color4D& operator=(const float* data) {
-        r = data[0];
-        g = data[1];
-        b = data[2];
-        a = data[3];
-        return *this;
-    }
-};
 
 class VoxelGrid {
 private:
     float voxel_size;
-    std::unordered_map<Vec3, std::vector<std::pair<Vec3, color4D>>> grid;
+    Vec3 min_bounds;
+    Vec3 max_bounds;
+        
+    // Hash function for VoxelIndex
+    struct VoxelIndexHash {
+        std::size_t operator()(const VoxelIndex& idx) const {
+            std::size_t h1 = std::hash<int>{}(idx[0]);
+            std::size_t h2 = std::hash<int>{}(idx[1]);
+            std::size_t h3 = std::hash<int>{}(idx[2]);
+            return h1 ^ (h2 << 1) ^ (h3 << 2);
+        }
+    };
     
-    Vec3 getVoxelKey(const Vec3& point) const {
-        int voxel_x = std::floor(point.x / voxel_size);
-        int voxel_y = std::floor(point.y / voxel_size);
-        int voxel_z = std::floor(point.z / voxel_size);
-        return Vec3(voxel_x * voxel_size, voxel_y * voxel_size, voxel_z * voxel_size);
+    // Main storage using integer indices like Python
+    std::unordered_map<VoxelIndex, std::vector<Vec3>, VoxelIndexHash> grid;
+    std::unordered_map<VoxelIndex, std::vector<Vec4>, VoxelIndexHash> color_grid;
+    
+    // Grid dimensions
+    int dim_x, dim_y, dim_z;
+    
+    // Grid arrays for fast access (like Python)
+    std::vector<bool> grid_array;
+    std::vector<Vec4> color_array;
+    std::vector<int> count_array;
+    
+    bool arrays_initialized = false;
+
+
+    void initializeArrays() {
+        if (arrays_initialized) return;
+        
+        size_t total_size = dim_x * dim_y * dim_z;
+        grid_array.resize(total_size, false);
+        color_array.resize(total_size, Vec4{0, 0, 0, 0});
+        count_array.resize(total_size, 0);
+        
+        arrays_initialized = true;
+    }
+
+    size_t getArrayIndex(const VoxelIndex& index) const {
+        return index[0] + dim_x * (index[1] + dim_y * index[2]);
+    }
+
+    bool isValidIndex(const VoxelIndex& idx) const {
+        return idx[0] >= 0 && idx[0] < dim_x &&
+               idx[1] >= 0 && idx[1] < dim_y &&
+               idx[2] >= 0 && idx[2] < dim_z;
     }
 
 public:
-    VoxelGrid(float size = 0.1f) : voxel_size(size) {}
-    void addPoint(const Vec3& point, const color4D& color) {
-        Vec3 voxel_key = getVoxelKey(point);
-        grid[voxel_key].push_back(std::make_pair(point, color));
-    }
-    void addPoints(const std::vector<Vec3>& points, const std::vector<color4D>& colors) {
+    VoxelGrid(float size = 0.1f) : voxel_size(size), arrays_initialized(false) {}
+    
+    void addPoints(const std::vector<Vec3>& points, const std::vector<Vec4>& colors) {
         if (points.size() != colors.size()) {
             std::cerr << "Error: Points and colors vectors must have the same size" << std::endl;
             return;
         }
         
+        if (points.empty()) return;
+        
+        // Calculate bounds (like Python)
+        min_bounds = points[0];
+        max_bounds = points[0];
+        
+        for (const auto& point : points) {
+            min_bounds.x = std::min(min_bounds.x, point.x);
+            min_bounds.y = std::min(min_bounds.y, point.y);
+            min_bounds.z = std::min(min_bounds.z, point.z);
+            
+            max_bounds.x = std::max(max_bounds.x, point.x);
+            max_bounds.y = std::max(max_bounds.y, point.y);
+            max_bounds.z = std::max(max_bounds.z, point.z);
+        }
+        
+        // Calculate grid dimensions (like Python)
+        Vec3 range = max_bounds - min_bounds;
+        dim_x = static_cast<int>(std::ceil(range.x / voxel_size)) + 1;
+        dim_y = static_cast<int>(std::ceil(range.y / voxel_size)) + 1;
+        dim_z = static_cast<int>(std::ceil(range.z / voxel_size)) + 1;
+        
+        // Add points to voxels (like Python)
         for (size_t i = 0; i < points.size(); ++i) {
-            addPoint(points[i], colors[i]);
+            VoxelIndex voxel_idx = getVoxelIndex(points[i]);
+            grid[voxel_idx].push_back(points[i]);
+            color_grid[voxel_idx].push_back(colors[i]);
+        }
+        
+        // Initialize and populate grid arrays (like Python)
+        initializeArrays();
+        for (const auto& pair : grid) {
+            const VoxelIndex& key = pair.first;
+            if (!isValidIndex(key)) continue;
+            
+            size_t array_idx = getArrayIndex(key);
+            
+            grid_array[array_idx] = true;
+            count_array[array_idx] = pair.second.size();
+            
+            // Average colors for this voxel (like Python)
+            Vec4 avg_color{0, 0, 0, 0};
+            for (const auto& color : color_grid.at(key)) {
+                avg_color.w += color.w;
+                avg_color.x += color.x;
+                avg_color.y += color.y;
+                avg_color.z += color.z;
+            }
+            avg_color.w /= count_array[array_idx];
+            avg_color.x /= count_array[array_idx];
+            avg_color.y /= count_array[array_idx];
+            avg_color.z /= count_array[array_idx];
+            
+            color_array[array_idx] = avg_color;
         }
     }
-    std::vector<std::pair<Vec3, color4D>> getPointsInVoxel(const Vec3& point) const {
-        TIME_FUNCTION;
-        Vec3 voxel_key = getVoxelKey(point);
-        auto it = grid.find(voxel_key);
+    
+    // Get voxel data using integer indices (like Python)
+    std::vector<Vec3> getPointsInVoxel(const VoxelIndex& voxel_idx) const {
+        auto it = grid.find(voxel_idx);
         if (it != grid.end()) {
             return it->second;
         }
         return {};
     }
-    std::vector<Vec3> getVoxelKeys() const {
-        TIME_FUNCTION;
-        std::vector<Vec3> keys;
-        for (const auto& pair : grid) {
-            keys.push_back(pair.first);
+    
+    std::vector<Vec4> getColorsInVoxel(const VoxelIndex& voxel_idx) const {
+        auto it = color_grid.find(voxel_idx);
+        if (it != color_grid.end()) {
+            return it->second;
         }
-        return keys;
+        return {};
     }
-    size_t getNumVoxels() const {
-        return grid.size();
+    
+    // Fast array access (like Python)
+    bool getVoxelOccupied(const VoxelIndex& voxel_idx) const {
+        if (!arrays_initialized || !isValidIndex(voxel_idx)) return false;
+        return grid_array[getArrayIndex(voxel_idx)];
     }
+    
+    Vec4 getVoxelColor(const VoxelIndex& voxel_idx) const {
+        if (!arrays_initialized || !isValidIndex(voxel_idx)) 
+            return Vec4{0, 0, 0, 0};
+        return color_array[getArrayIndex(voxel_idx)];
+    }
+    
+    int getVoxelPointCount(const VoxelIndex& voxel_idx) const {
+        if (!arrays_initialized || !isValidIndex(voxel_idx)) return 0;
+        return count_array[getArrayIndex(voxel_idx)];
+    }
+    
+    std::vector<VoxelIndex> getVoxelIndices() const {
+        std::vector<VoxelIndex> indices;
+        for (const auto& pair : grid) {
+            indices.push_back(pair.first);
+        }
+        return indices;
+    }
+    
+    size_t getNumVoxels() const { return grid.size(); }
     size_t getNumPoints() const {
         size_t total = 0;
         for (const auto& pair : grid) {
@@ -268,84 +484,65 @@ public:
         }
         return total;
     }
-    void getVoxelStats(size_t& min_points, size_t& max_points, double& avg_points) const {
-        TIME_FUNCTION;
-        if (grid.empty()) {
-            min_points = max_points = avg_points = 0;
-            return;
-        }
-        
-        min_points = std::numeric_limits<size_t>::max();
-        max_points = 0;
-        size_t total_points = 0;
-        
-        for (const auto& pair : grid) {
-            size_t count = pair.second.size();
-            min_points = std::min(min_points, count);
-            max_points = std::max(max_points, count);
-            total_points += count;
-        }
-        
-        avg_points = static_cast<double>(total_points) / grid.size();
-    }
-    std::tuple<std::vector<Vec3>, std::vector<color4D>> getAllPoints() const {
-        TIME_FUNCTION;
-        std::vector<Vec3> points;
-        std::vector<color4D> colors;
-        
-        for (const auto& voxel : grid) {
-            for (const auto& point_color : voxel.second) {
-                points.push_back(point_color.first);
-                colors.push_back(point_color.second);
-            }
-        }
-        
-        return std::make_tuple(points, colors);
-    }
     
+    Vec3 getMinBounds() const { return min_bounds; }
+    Vec3 getMaxBounds() const { return max_bounds; }
+    std::array<int, 3> getDimensions() const { return {dim_x, dim_y, dim_z}; }
+    float getVoxelSize() const { return voxel_size; }
+    
+    VoxelIndex getVoxelIndex(const Vec3& point) const {
+        Vec3 normalized = point - min_bounds;
+        return VoxelIndex{
+            static_cast<int>(std::floor(normalized.x / voxel_size)),
+            static_cast<int>(std::floor(normalized.y / voxel_size)),
+            static_cast<int>(std::floor(normalized.z / voxel_size))
+        };
+    }
+
     void clear() {
         grid.clear();
+        color_grid.clear();
+        grid_array.clear();
+        color_array.clear();
+        count_array.clear();
+        arrays_initialized = false;
     }
+    
     void setVoxelSize(float size) {
         voxel_size = size;
         clear();
     }
     
-    float getVoxelSize() const {
-        return voxel_size;
-    }
-    bool hasVoxel(const Vec3& point) const {
-        Vec3 voxel_key = getVoxelKey(point);
-        return grid.find(voxel_key) != grid.end();
-    }
-    bool removePoint(const Vec3& point) {
-        Vec3 voxel_key = getVoxelKey(point);
-        auto it = grid.find(voxel_key);
-        if (it != grid.end()) {
-            auto& points = it->second;
-            for (auto pt_it = points.begin(); pt_it != points.end(); ++pt_it) {
-                if (pt_it->first.x == point.x && pt_it->first.y == point.y && pt_it->first.z == point.z) {
-                    points.erase(pt_it);
-                    if (points.empty()) {
-                        grid.erase(it);
-                    }
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
     void printStats() const {
-        TIME_FUNCTION;
-        size_t min_pts, max_pts;
-        double avg_pts;
-        getVoxelStats(min_pts, max_pts, avg_pts);
+        size_t min_pts = std::numeric_limits<size_t>::max();
+        size_t max_pts = 0;
+        double avg_pts = 0;
+        
+        if (!grid.empty()) {
+            size_t total_points = 0;
+            for (const auto& pair : grid) {
+                size_t count = pair.second.size();
+                min_pts = std::min(min_pts, count);
+                max_pts = std::max(max_pts, count);
+                total_points += count;
+            }
+            avg_pts = static_cast<double>(total_points) / grid.size();
+        }
         
         std::cout << "Voxel Grid Statistics:" << std::endl;
         std::cout << "  Voxel size: " << voxel_size << std::endl;
+        std::cout << "  Grid dimensions: " << dim_x << " x " << dim_y << " x " << dim_z << std::endl;
         std::cout << "  Number of voxels: " << getNumVoxels() << std::endl;
         std::cout << "  Total points: " << getNumPoints() << std::endl;
         std::cout << "  Points per voxel - Min: " << min_pts << ", Max: " << max_pts << ", Avg: " << avg_pts << std::endl;
+    }
+    
+    Vec3 getVoxelCenter(const VoxelIndex& voxel_idx) const {
+        return Vec3(
+            min_bounds.x + (voxel_idx[0] + 0.5f) * voxel_size,
+            min_bounds.y + (voxel_idx[1] + 0.5f) * voxel_size,
+            min_bounds.z + (voxel_idx[2] + 0.5f) * voxel_size
+        );
     }
 };
 
@@ -354,8 +551,16 @@ struct Image {
     int height;
     std::vector<uint8_t> data; // RGBA format
     
-    Image(int w, int h) : width(w), height(h), data(w * h * 4) {}
-    
+    Image(int w, int h) : width(w), height(h), data(w * h * 4) {
+        // Initialize to white background
+        for (int i = 0; i < w * h * 4; i += 4) {
+            data[i] = 255;     // R
+            data[i + 1] = 255; // G  
+            data[i + 2] = 255; // B
+            data[i + 3] = 255; // A
+        }
+    }    
+
     // Helper methods
     uint8_t* pixel(int x, int y) {
         return &data[(y * width + x) * 4];
@@ -365,7 +570,82 @@ struct Image {
         uint8_t* p = pixel(x, y);
         p[0] = r; p[1] = g; p[2] = b; p[3] = a;
     }
+
+    bool saveAsBMP(const std::string& filename) {
+        #pragma pack(push, 1)
+
+        // BMP file header (14 bytes)
+        struct BMPFileHeader {
+            uint16_t file_type{0x4D42}; // "BM"
+            uint32_t file_size{0};
+            uint16_t reserved1{0};
+            uint16_t reserved2{0};
+            uint32_t offset_data{0};
+        } file_header;
+        
+        // BMP info header (40 bytes)
+        struct BMPInfoHeader {
+            uint32_t size{40};
+            int32_t width{0};
+            int32_t height{0};
+            uint16_t planes{1};
+            uint16_t bit_count{32};
+            uint32_t compression{0}; // BI_RGB
+            uint32_t size_image{0};
+            int32_t x_pixels_per_meter{0};
+            int32_t y_pixels_per_meter{0};
+            uint32_t colors_used{0};
+            uint32_t colors_important{0};
+        } info_header;
+        
+        // Calculate sizes
+        uint32_t row_stride = width * 4;
+        uint32_t padding_size = (4 - (row_stride % 4)) % 4;
+        uint32_t data_size = (row_stride + padding_size) * height;
+        
+        file_header.file_size = sizeof(BMPFileHeader) + sizeof(BMPInfoHeader) + data_size;
+        file_header.offset_data = sizeof(BMPFileHeader) + sizeof(BMPInfoHeader);
+        
+        info_header.width = width;
+        info_header.height = -height; // Negative for top-down bitmap (no flipping needed)
+        info_header.size_image = data_size;
+        
+        // Open file
+        std::ofstream file(filename, std::ios::binary);
+        if (!file.is_open()) {
+            return false;
+        }
+        
+        // Write headers
+        file.write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
+        file.write(reinterpret_cast<const char*>(&info_header), sizeof(info_header));
+        
+        // Write pixel data (BMP stores as BGR, we have RGB)
+        std::vector<uint8_t> row_buffer(row_stride + padding_size);
+        
+        for (int y = 0; y < height; ++y) {
+            uint8_t* row_start = &data[y * row_stride];
+            
+            // Convert RGB to BGR and copy to buffer
+            for (int x = 0; x < width; ++x) {
+                uint8_t* src_pixel = row_start + (x * 4);
+                uint8_t* dst_pixel = row_buffer.data() + (x * 4);
+                
+                // Swap R and B channels (RGBA -> BGRA)
+                dst_pixel[0] = src_pixel[2]; // B
+                dst_pixel[1] = src_pixel[1]; // G
+                dst_pixel[2] = src_pixel[0]; // R
+                //dst_pixel[3] = src_pixel[3]; // A
+            }
+            
+            // Write row with padding
+            file.write(reinterpret_cast<const char*>(row_buffer.data()), row_stride + padding_size);
+        }
+        
+        return file.good();
+    }
 };
+
 
 //noise functions
 float fade(const float& a) {
@@ -461,10 +741,10 @@ float pnoise3d(const int p[512], const float& xf, const float& yf, const float& 
     return d;
 }
 
-std::tuple<std::vector<Vec3>, std::vector<color4D>> noiseBatch(int num_points, float scale, int sp[]) {
+std::tuple<std::vector<Vec3>, std::vector<Vec4>> noiseBatch(int num_points, float scale, int sp[]) {
     TIME_FUNCTION;
     std::vector<Vec3> points;
-    std::vector<color4D> colors;
+    std::vector<Vec4> colors;
     points.reserve(num_points);
     colors.reserve(num_points);
 
@@ -502,7 +782,7 @@ std::tuple<std::vector<Vec3>, std::vector<color4D>> noiseBatch(int num_points, f
     return std::make_tuple(points, colors);
 }
 
-std::tuple<std::vector<Vec3>, std::vector<color4D>> genPointCloud(int numP, float scale, int seed) {
+std::tuple<std::vector<Vec3>, std::vector<Vec4>> genPointCloud(int numP, float scale, int seed) {
     TIME_FUNCTION;
     int permutation[256];
     for (int i = 0; i < 256; ++i) {
@@ -520,73 +800,108 @@ std::tuple<std::vector<Vec3>, std::vector<color4D>> genPointCloud(int numP, floa
 
 
 //voxel stuff
+Bool3 greaterThanZero(const Vec3& v) {
+    return {v.x > 0, v.y > 0, v.z > 0};
+}
 
 Image render(int height, int width, Vec3 forward, Vec3 right, Vec3 up, Vec3 rayOrigin, Vec3 vbound,
             float vsize, VoxelGrid grid, int dims) {
-    Image img = Image(height, width);
+    TIME_FUNCTION;
 
-    float max_t = 50.0;
+    Image img = Image(height, width);
+    
+    float max_t = 50.0f;
     int max_steps = 123;
-    float max_dist = 25.0;
+    float max_dist = 25.0f;
     float screen_height = height;
     float screen_width = width;
-
-    float inv_w = 1.0 / width;
-    float inv_h = 1.0 / height;
-    float scr_w_half = screen_width * 0.5;
-    float scr_h_half = screen_height * 0.5;
-
+    
+    float inv_w = 1.0f / width;
+    float inv_h = 1.0f / height;
+    float scr_w_half = screen_width * 0.5f;
+    float scr_h_half = screen_height * 0.5f;
+    
+    std::cout << height << std::endl;
+    std::cout << width << std::endl;
     for (int y = 0; y < height; y++) {
-        float sy = 1.0 - (2.0 * y * inv_h) * scr_h_half;
+        int sy = std::ceil(1.0 - ((2.0 * y) * inv_h) * scr_h_half);
         for (int x = 0; x < width; x++) {
-            float sx = ((2.0 * x * inv_w) - 1.0) * scr_h_half;
-            Vec3 ray_dir = forward + sx * right + sy * up;
-            ray_dir = ray_dir.normalize();
-            Vec3 cv = ((rayOrigin - vbound) / vsize);
+            int sx = std::ceil((((2.0 * x) * inv_w) - 1.0) * scr_w_half);
+            std::cout << "working in: " << x << ", " << y << std::endl;
+            Vec3 ray_dir = (forward + (sx * right) + (sy * up)).normalize();
+            std::cout << "current ray direction: " << ray_dir.toString() << std::endl;
+            Vec3 cv1 = ((rayOrigin - vbound) / vsize);
+            VoxelIndex cv = VoxelIndex(static_cast<int>(cv1.x), static_cast<int>(cv1.y), static_cast<int>(cv1.z));
+            std::cout << "cell at: " << cv.toString() << std::endl;
             Vec3 inv_dir = ray_dir.safe_inverse_dir();
+            std::cout << "inverse of the current ray: " << inv_dir.toString() << std::endl;
             Vec3 step = ray_dir.sign();
-            Vec3 next_voxel_bound = (cv + step) * vsize + vbound;
-            Vec3 t_max = (next_voxel_bound + step) * vsize + vbound;
+            std::cout << "current ray signs: " << step.toString() << std::endl;
+            Bool3 step_mask = greaterThanZero(step);
+            VoxelIndex next_voxel_bound = (cv + step_mask) * vsize + vbound;
+            std::cout << "next cell at: " << next_voxel_bound.toString() << std::endl;
+            Vec3 t_max = (Vec3(next_voxel_bound) - rayOrigin) * inv_dir;
+            std::cout << "t_max at: " << t_max.toString() << std::endl;
             Vec3 t_delta = vsize / inv_dir.abs();
+            std::cout << "t_delta: " << t_delta.toString() << std::endl;
             float t = 0.0f;
 
             Vec4 accumulatedColor = Vec4(0,0,0,0);
-            for (int i; i < max_steps; i++) {
-                if (max_t > t) break;
-                if (accumulatedColor.z >= 1.0) break;
+            //std::cout << x << "," << y << std::endl;
+            for (int iter = 0; iter < max_steps; iter++) {
+                if (max_t < t) {
+                    std::cout << "t failed " << std::endl;
+                    break;
+                }
+                if (accumulatedColor.z >= 1.0) {
+                    std::cout << "z failed " << std::endl;
+                    break;
+                }
+
                 if (cv.x >= 0 && cv.x < dims &&
                     cv.y >= 0 && cv.y < dims && 
                     cv.z >= 0 && cv.z < dims) {
-                    
-                    if (grid[cv.x][cv.y][cv.z]) {
-                        // Get the color and alpha from the color array
-                        Vec4 voxel_color = color_array[cv.x][cv.y][cv.z];
-                        Vec3 color_rgb = Vec3(voxel_color.w, voxel_color.x, voxel_color.y);  // w=r, x=g, y=b
-                        float alpha = voxel_color.z;  // z is alpha
+                    std::cout << "found cell at: " << cv.toString() << std::endl;
+                    if (grid.getVoxelOccupied(cv)) {
+                        std::cout << "found occupied cell at: " << cv.toString() << std::endl;
+                        Vec4 voxel_color = grid.getVoxelColor(cv);
                         
-                        // Apply alpha compositing: front-to-back
-                        if (alpha > 0) {
-                            // Weight by current transparency
-                            // Use accumulated_color.z for accumulated alpha
-                            float weight = alpha * (1.0f - accumulated_color.z);
-                            accumulated_color.x += color_rgb.x * weight;  // green
-                            accumulated_color.y += color_rgb.y * weight;  // blue  
-                            accumulated_color.w += color_rgb.z * weight;  // red (stored in w)
-                            accumulated_color.z += weight;  // accumulate alpha in z component
-                        }
+                        float weight = voxel_color.z * (1.0f - accumulatedColor.z);
+                        accumulatedColor.w += voxel_color.w * weight;
+                        accumulatedColor.x += voxel_color.x * weight;
+                        accumulatedColor.y += voxel_color.y * weight;
+                        accumulatedColor.z += voxel_color.z * weight;
                     }
+
+                    int minAxis = 0;
+                    if (t_max.y < t_max.x) minAxis = 1;
+                    if (t_max.z < t_max[minAxis]) minAxis = 2;
+                    cv[minAxis] += step[minAxis];
+                    t = t_max[minAxis];
+                    t_max[minAxis] += t_delta[minAxis];
                 }
             }
+            if (accumulatedColor.z > 0) {
+                std::cout << "setting a color at " << x << " and " << y << std::endl;
+                float r = accumulatedColor.w + (1.0f - accumulatedColor.z) * 1.0f;
+                float g = accumulatedColor.x + (1.0f - accumulatedColor.z) * 1.0f;
+                float b = accumulatedColor.y + (1.0f - accumulatedColor.z) * 1.0f;
+                
+                img.setPixel(x, y, 
+                    static_cast<uint8_t>(r * 255),
+                    static_cast<uint8_t>(g * 255), 
+                    static_cast<uint8_t>(b * 255),
+                    255);
+            }
+            
         }
-        
     }
-
     return img;
 }
 
-int main() {    
+int main() {
     std::cout << "Generating point cloud" << std::endl;
-    auto [points, colors] = genPointCloud(150000, 5.0, 43);
+    auto [points, colors] = genPointCloud(150000, 10.0, 43);
     std::cout << "Generating done" << std::endl;
     
     
@@ -594,10 +909,25 @@ int main() {
     
     std::cout << "Adding points to voxel grid..." << std::endl;
     voxel_grid.addPoints(points, colors);
-    
     voxel_grid.printStats();
+    
+    // Use the voxel grid's actual bounds
+    Vec3 min_bounds = voxel_grid.getMinBounds();
+    Vec3 max_bounds = voxel_grid.getMaxBounds();
+    Vec3 grid_center = (min_bounds + max_bounds) * 0.5;
+
+    // Proper camera setup
+    Vec3 rayOrigin(0, 0, 15);
+    Vec3 forward = (grid_center - rayOrigin).normalize();
+    Vec3 up(0, 1, 0);
+    Vec3 right = forward.cross(up).normalize();
+    auto dims = voxel_grid.getDimensions();
+    int max_dim = std::max({dims[0], dims[1], dims[2]});
+
+    Image img = render(50, 50, forward, right, up, rayOrigin, min_bounds, 
+                    voxel_grid.getVoxelSize(), voxel_grid, max_dim);
+    img.saveAsBMP("cpp_voxel_render.bmp");
+    
     FunctionTimer::printStats(FunctionTimer::Mode::ENHANCED);
-    
-    
     return 0;
 }

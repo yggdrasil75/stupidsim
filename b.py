@@ -222,33 +222,42 @@ def _render_parallel(image, ray_origin, voxel_grid, color_array, vsize, vbound, 
     inv_height: np.float32 = np.float32(1.0) / height
     screen_width_half: np.float32 = screen_width * np.float32(0.5)
     screen_height_half: np.float32 = screen_height * np.float32(0.5)
-
+    #print(height)
+    #print(width)
     for y in prange(height):
         sy: np.float32 = np.float32((np.float32(1.0) - np.float32(2.0) * y * inv_height) * screen_height_half)
         for x in prange(width):
             sx: np.float32 = np.float32((np.float32(2.0) * x * inv_width - np.float32(1.0)) * screen_width_half)
+            print(f"working in:  {x},{y}")
             ray_dir = forward + sx * right + sy * up
             ray_dir = normalize(ray_dir)
+            print(f"current ray dir: {ray_dir}")
 
             current_voxel = ((ray_origin - vbound) // vsize).astype(np.int32)
+            print(f"cell at: {current_voxel}")
             inv_dir = np.where(np.abs(ray_dir) > epsilon, ray_dir, np.copysign(epsilon, ray_dir))
+            print(f"inverse of the current ray: {inv_dir}")
             step = np.sign(ray_dir)
+            print(f"current ray signs: {step}")
             step_mask = np.greater(step, 0)
             next_voxel_bound = ((current_voxel + step_mask) * vsize + vbound)
+            print(f"next cell at: {next_voxel_bound}")
             t_max = (next_voxel_bound - ray_origin) * inv_dir
+            print(f"t_max at: {t_max}")
             t_delta = vsize / np.abs(inv_dir)
+            print(f"t_delta: {t_delta}")
             t = np.float32(0.0)
             
             # Alpha compositing variables
             accumulated_color = np.array([0.0, 0.0, 0.0], dtype=np.float32)
             accumulated_alpha = np.float32(0.0)
-            
             for _ in range(max_steps):
                 if not t < max_t:
                     break
                 if accumulated_alpha >= 1.0:  # Fully opaque, stop tracing
                     break
-                    
+                
+                #print(f"checking cell at {current_voxel}")
                 if np.all((0 <= current_voxel) & (current_voxel < dims)):
                     if voxel_grid[current_voxel[0], current_voxel[1], current_voxel[2]]:
                         # Get the color and alpha from the color array
@@ -295,7 +304,7 @@ voxel_grid: VoxelGrid = VoxelGrid(point_cloud, point_colors, voxel_size=voxel_si
 
 # Render using Amanatides and Woo algorithm
 print("Rendering with Amanatides-Woo ray tracing...")
-tracer = AmanatidesWooRayTracer(voxel_grid, image_width=1920, image_height=1080)
+tracer = AmanatidesWooRayTracer(voxel_grid, image_width=50, image_height=50)
 rendered_image = tracer.render()
 
 # Save as PNG
