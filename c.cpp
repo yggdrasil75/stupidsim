@@ -327,25 +327,18 @@ namespace std {
 }
 
 class VoxelGrid {
-private:
+public:
+    // New structure - using position-based indexing
+    std::unordered_map<Vec3, size_t> pos_index_map;  // Maps voxel center -> index in positions/colors
+    std::vector<Vec3> positions;                     // Voxel center positions
+    std::vector<Vec4> colors;                        // Average colors per voxel
+    float gridsize;                                  // Voxel size
+    
+    // Old structure - to be removed/replaced
     float voxel_size;
     Vec3 min_bounds;
     Vec3 max_bounds;
         
-    // Hash function for VoxelIndex
-    struct VoxelIndexHash {
-        std::size_t operator()(const VoxelIndex& idx) const {
-            std::size_t h1 = std::hash<int>{}(idx[0]);
-            std::size_t h2 = std::hash<int>{}(idx[1]);
-            std::size_t h3 = std::hash<int>{}(idx[2]);
-            return h1 ^ (h2 << 1) ^ (h3 << 2);
-        }
-    };
-    
-    // Main storage using integer indices like Python
-    std::unordered_map<VoxelIndex, std::vector<Vec3>, VoxelIndexHash> grid;
-    std::unordered_map<VoxelIndex, std::vector<Vec4>, VoxelIndexHash> color_grid;
-    
     // Grid dimensions
     int dim_x, dim_y, dim_z;
     
@@ -356,7 +349,6 @@ private:
     
     bool arrays_initialized = false;
 
-
     void initializeArrays() {
         if (arrays_initialized) return;
         
@@ -364,6 +356,17 @@ private:
         grid_array.resize(total_size, false);
         color_array.resize(total_size, Vec4{0, 0, 0, 0});
         count_array.resize(total_size, 0);
+        
+        // Populate arrays from the new data structure
+        for (const auto& [voxel_pos, index] : pos_index_map) {
+            VoxelIndex voxel_idx = getVoxelIndex(voxel_pos);
+            if (isValidIndex(voxel_idx)) {
+                size_t array_idx = getArrayIndex(voxel_idx);
+                grid_array[array_idx] = true;
+                color_array[array_idx] = colors[index];
+                count_array[array_idx] = 1; // Each entry represents one voxel
+            }
+        }
         
         arrays_initialized = true;
     }
@@ -378,18 +381,17 @@ private:
                idx[2] >= 0 && idx[2] < dim_z;
     }
 
-public:
-    VoxelGrid(float size = 0.1f) : voxel_size(size), arrays_initialized(false) {}
+    VoxelGrid(float size = 0.1f) : gridsize(size), voxel_size(size), arrays_initialized(false) {}
     
-    void addPoints(const std::vector<Vec3>& points, const std::vector<Vec4>& colors) {
-        if (points.size() != colors.size()) {
+    void addPoints(const std::vector<Vec3>& points, const std::vector<Vec4>& input_colors) {
+        if (points.size() != input_colors.size()) {
             std::cerr << "Error: Points and colors vectors must have the same size" << std::endl;
             return;
         }
         
         if (points.empty()) return;
         
-        // Calculate bounds (like Python)
+        // Calculate bounds
         min_bounds = points[0];
         max_bounds = points[0];
         
@@ -403,65 +405,65 @@ public:
             max_bounds.z = std::max(max_bounds.z, point.z);
         }
         
-        // Calculate grid dimensions (like Python)
+        // Calculate grid dimensions
         Vec3 range = max_bounds - min_bounds;
-        dim_x = static_cast<int>(std::ceil(range.x / voxel_size)) + 1;
-        dim_y = static_cast<int>(std::ceil(range.y / voxel_size)) + 1;
-        dim_z = static_cast<int>(std::ceil(range.z / voxel_size)) + 1;
+        dim_x = static_cast<int>(std::ceil(range.x / gridsize)) + 1;
+        dim_y = static_cast<int>(std::ceil(range.y / gridsize)) + 1;
+        dim_z = static_cast<int>(std::ceil(range.z / gridsize)) + 1;
         
-        // Add points to voxels (like Python)
+        // Temporary storage for averaging colors per voxel
+        std::unordered_map<Vec3, std::vector<Vec4>, Vec3::Hash> voxel_color_map;
+        
+        // Group points by voxel and collect colors
         for (size_t i = 0; i < points.size(); ++i) {
-            VoxelIndex voxel_idx = getVoxelIndex(points[i]);
-            grid[voxel_idx].push_back(points[i]);
-            color_grid[voxel_idx].push_back(colors[i]);
+            Vec3 voxel_center = getVoxelCenter(getVoxelIndex(points[i]));
+            voxel_color_map[voxel_center].push_back(input_colors[i]);
         }
         
-        // Initialize and populate grid arrays (like Python)
-        initializeArrays();
-        for (const auto& pair : grid) {
-            const VoxelIndex& key = pair.first;
-            if (!isValidIndex(key)) continue;
-            
-            size_t array_idx = getArrayIndex(key);
-            
-            grid_array[array_idx] = true;
-            count_array[array_idx] = pair.second.size();
-            
-            // Average colors for this voxel (like Python)
+        // Convert to the new structure - store average colors per voxel
+        positions.clear();
+        colors.clear();
+        pos_index_map.clear();
+        
+        for (auto& [voxel_pos, color_list] : voxel_color_map) {
+            // Calculate average color
             Vec4 avg_color{0, 0, 0, 0};
-            for (const auto& color : color_grid.at(key)) {
+            for (const auto& color : color_list) {
                 avg_color.w += color.w;
                 avg_color.x += color.x;
                 avg_color.y += color.y;
                 avg_color.z += color.z;
             }
-            avg_color.w /= count_array[array_idx];
-            avg_color.x /= count_array[array_idx];
-            avg_color.y /= count_array[array_idx];
-            avg_color.z /= count_array[array_idx];
+            avg_color.w /= color_list.size();
+            avg_color.x /= color_list.size();
+            avg_color.y /= color_list.size();
+            avg_color.z /= color_list.size();
             
-            color_array[array_idx] = avg_color;
+            // Store in new structure
+            size_t index = positions.size();
+            positions.push_back(voxel_pos);
+            colors.push_back(avg_color);
+            pos_index_map[voxel_pos] = index;
         }
+        
+        // Initialize arrays for fast access
+        initializeArrays();
     }
     
-    // Get voxel data using integer indices (like Python)
-    std::vector<Vec3> getPointsInVoxel(const VoxelIndex& voxel_idx) const {
-        auto it = grid.find(voxel_idx);
-        if (it != grid.end()) {
-            return it->second;
-        }
-        return {};
+    // Get voxel data using voxel center position
+    bool hasVoxelAt(const Vec3& voxel_center) const {
+        return pos_index_map.find(voxel_center) != pos_index_map.end();
     }
     
-    std::vector<Vec4> getColorsInVoxel(const VoxelIndex& voxel_idx) const {
-        auto it = color_grid.find(voxel_idx);
-        if (it != color_grid.end()) {
-            return it->second;
+    Vec4 getVoxelColor(const Vec3& voxel_center) const {
+        auto it = pos_index_map.find(voxel_center);
+        if (it != pos_index_map.end()) {
+            return colors[it->second];
         }
-        return {};
+        return Vec4{0, 0, 0, 0};
     }
     
-    // Fast array access (like Python)
+    // Fast array access using VoxelIndex (compatibility with existing code)
     bool getVoxelOccupied(const VoxelIndex& voxel_idx) const {
         if (!arrays_initialized || !isValidIndex(voxel_idx)) return false;
         return grid_array[getArrayIndex(voxel_idx)];
@@ -480,38 +482,49 @@ public:
     
     std::vector<VoxelIndex> getVoxelIndices() const {
         std::vector<VoxelIndex> indices;
-        for (const auto& pair : grid) {
-            indices.push_back(pair.first);
+        for (const auto& voxel_pos : positions) {
+            indices.push_back(getVoxelIndex(voxel_pos));
         }
         return indices;
     }
     
-    size_t getNumVoxels() const { return grid.size(); }
+    std::vector<Vec3> getVoxelCenters() const {
+        return positions;
+    }
+    
+    size_t getNumVoxels() const { return positions.size(); }
     size_t getNumPoints() const {
-        size_t total = 0;
-        for (const auto& pair : grid) {
-            total += pair.second.size();
-        }
-        return total;
+        // Since we're storing averaged voxels, each position represents multiple original points
+        // For simplicity, return number of voxels
+        return positions.size();
     }
     
     Vec3 getMinBounds() const { return min_bounds; }
     Vec3 getMaxBounds() const { return max_bounds; }
     std::array<int, 3> getDimensions() const { return {dim_x, dim_y, dim_z}; }
-    float getVoxelSize() const { return voxel_size; }
+    float getVoxelSize() const { return gridsize; }
     
     VoxelIndex getVoxelIndex(const Vec3& point) const {
         Vec3 normalized = point - min_bounds;
         return VoxelIndex{
-            static_cast<int>(std::floor(normalized.x / voxel_size)),
-            static_cast<int>(std::floor(normalized.y / voxel_size)),
-            static_cast<int>(std::floor(normalized.z / voxel_size))
+            static_cast<int>(std::floor(normalized.x / gridsize)),
+            static_cast<int>(std::floor(normalized.y / gridsize)),
+            static_cast<int>(std::floor(normalized.z / gridsize))
         };
     }
 
+    Vec3 getVoxelCenter(const VoxelIndex& voxel_idx) const {
+        return Vec3(
+            min_bounds.x + (voxel_idx[0] + 0.5f) * gridsize,
+            min_bounds.y + (voxel_idx[1] + 0.5f) * gridsize,
+            min_bounds.z + (voxel_idx[2] + 0.5f) * gridsize
+        );
+    }
+
     void clear() {
-        grid.clear();
-        color_grid.clear();
+        pos_index_map.clear();
+        positions.clear();
+        colors.clear();
         grid_array.clear();
         color_array.clear();
         count_array.clear();
@@ -519,40 +532,17 @@ public:
     }
     
     void setVoxelSize(float size) {
+        gridsize = size;
         voxel_size = size;
         clear();
     }
     
     void printStats() const {
-        size_t min_pts = std::numeric_limits<size_t>::max();
-        size_t max_pts = 0;
-        double avg_pts = 0;
-        
-        if (!grid.empty()) {
-            size_t total_points = 0;
-            for (const auto& pair : grid) {
-                size_t count = pair.second.size();
-                min_pts = std::min(min_pts, count);
-                max_pts = std::max(max_pts, count);
-                total_points += count;
-            }
-            avg_pts = static_cast<double>(total_points) / grid.size();
-        }
-        
         std::cout << "Voxel Grid Statistics:" << std::endl;
-        std::cout << "  Voxel size: " << voxel_size << std::endl;
+        std::cout << "  Voxel size: " << gridsize << std::endl;
         std::cout << "  Grid dimensions: " << dim_x << " x " << dim_y << " x " << dim_z << std::endl;
         std::cout << "  Number of voxels: " << getNumVoxels() << std::endl;
-        std::cout << "  Total points: " << getNumPoints() << std::endl;
-        std::cout << "  Points per voxel - Min: " << min_pts << ", Max: " << max_pts << ", Avg: " << avg_pts << std::endl;
-    }
-    
-    Vec3 getVoxelCenter(const VoxelIndex& voxel_idx) const {
-        return Vec3(
-            min_bounds.x + (voxel_idx[0] + 0.5f) * voxel_size,
-            min_bounds.y + (voxel_idx[1] + 0.5f) * voxel_size,
-            min_bounds.z + (voxel_idx[2] + 0.5f) * voxel_size
-        );
+        std::cout << "  Using new position-based storage" << std::endl;
     }
 };
 
@@ -843,7 +833,11 @@ Image render(int height, int width, Vec3 forward, Vec3 right, Vec3 up, Vec3 rayO
             Vec3 cv1 = ((rayOrigin - vbound) / vsize);
             VoxelIndex cv = VoxelIndex(static_cast<int>(cv1.x), static_cast<int>(cv1.y), static_cast<int>(cv1.z));
             std::cout << "cell at: " << cv.toString() << std::endl;
-            Vec3 inv_dir = ray_dir.safe_inverse_dir();
+            Vec3 inv_dir =  Vec3(
+                ray_dir.x != 0 ? 1.0f / ray_dir.x : std::numeric_limits<float>::max(),
+                ray_dir.y != 0 ? 1.0f / ray_dir.y : std::numeric_limits<float>::max(),
+                ray_dir.z != 0 ? 1.0f / ray_dir.z : std::numeric_limits<float>::max()
+            );
             std::cout << "inverse of the current ray: " << inv_dir.toString() << std::endl;
             Vec3 step = ray_dir.sign();
             std::cout << "current ray signs: " << step.toString() << std::endl;
