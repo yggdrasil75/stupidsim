@@ -411,8 +411,39 @@ void populateVoxelGridWithLayeredSphere(VoxelGrid& grid, const std::vector<Vec3>
     grid.assignPlanetaryLayers();
 }
 
+Vec3 rotateX(const Vec3& point, float angle) {
+    float cosA = std::cos(angle);
+    float sinA = std::sin(angle);
+    return Vec3(
+        point.x,
+        point.y * cosA - point.z * sinA,
+        point.y * sinA + point.z * cosA
+    );
+}
+
+Vec3 rotateY(const Vec3& point, float angle) {
+    float cosA = std::cos(angle);
+    float sinA = std::sin(angle);
+    return Vec3(
+        point.x * cosA + point.z * sinA,
+        point.y,
+        -point.x * sinA + point.z * cosA
+    );
+}
+
+Vec3 rotateZ(const Vec3& point, float angle) {
+    float cosA = std::cos(angle);
+    float sinA = std::sin(angle);
+    return Vec3(
+        point.x * cosA - point.y * sinA,
+        point.x * sinA + point.y * cosA,
+        point.z
+    );
+}
+
 void visualizePointCloud(const std::vector<Vec3>& points, const std::vector<Vec4>& colors, 
-                        const std::string& filename, int width = 1000, int height = 1000) {
+                                 const std::string& filename, int width = 1000, int height = 1000,
+                                 float angleX = 0.0f, float angleY = 0.0f, float angleZ = 0.0f) {
     TIME_FUNCTION;
     std::vector<uint8_t> pixels(width * height * 3, 0);
     
@@ -427,21 +458,31 @@ void visualizePointCloud(const std::vector<Vec3>& points, const std::vector<Vec4
     Vec3 minPoint( std::numeric_limits<float>::max(),  std::numeric_limits<float>::max(),  std::numeric_limits<float>::max());
     Vec3 maxPoint(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
     
+    // Apply rotation to all points and find new bounds
+    std::vector<Vec3> rotatedPoints;
+    rotatedPoints.reserve(points.size());
+    
     for (const auto& point : points) {
-        minPoint.x = std::min(minPoint.x, point.x);
-        minPoint.y = std::min(minPoint.y, point.y);
-        minPoint.z = std::min(minPoint.z, point.z);
-        maxPoint.x = std::max(maxPoint.x, point.x);
-        maxPoint.y = std::max(maxPoint.y, point.y);
-        maxPoint.z = std::max(maxPoint.z, point.z);
+        Vec3 rotated = point;
+        rotated = rotateX(rotated, angleX);
+        rotated = rotateY(rotated, angleY);
+        rotated = rotateZ(rotated, angleZ);
+        rotatedPoints.push_back(rotated);
+        
+        minPoint.x = std::min(minPoint.x, rotated.x);
+        minPoint.y = std::min(minPoint.y, rotated.y);
+        minPoint.z = std::min(minPoint.z, rotated.z);
+        maxPoint.x = std::max(maxPoint.x, rotated.x);
+        maxPoint.y = std::max(maxPoint.y, rotated.y);
+        maxPoint.z = std::max(maxPoint.z, rotated.z);
     }
     
     Vec3 cloudSize = maxPoint - minPoint;
     float maxDim = std::max({cloudSize.x, cloudSize.y, cloudSize.z});
     
     // Draw points
-    for (size_t i = 0; i < points.size(); i++) {
-        const auto& point = points[i];
+    for (size_t i = 0; i < rotatedPoints.size(); i++) {
+        const auto& point = rotatedPoints[i];
         const auto& color = colors[i];
         
         // Map 3D point to 2D screen coordinates (orthographic projection)
@@ -500,12 +541,41 @@ int main() {
         worldPositions.push_back(grid.gridToWorld(gridPos));
     }
     
-    // Create a simple visualization using the layer colors
-    visualizePointCloud(grid.getOccupiedPositions(), grid.getColors(), "output/sphere.bmp",  1000, 1000);
+    // Create multiple visualizations from different angles
+    printf("\nGenerating views from different angles...\n");
     
-    printf("=== sphere generated successfully ===\n");
-    printf("Files created:\n");
-    printf("  - sphere.bmp\n");
+    // Front view (0, 0, 0)
+    visualizePointCloud(worldPositions, layerColors, "output/sphere_front.bmp", 1000, 1000, 0.0f, 0.0f, 0.0f);
+    printf("  - sphere_front.bmp (front view)\n");
+    
+    // 45 degree rotation around Y axis
+    visualizePointCloud(worldPositions, layerColors, "output/sphere_45y.bmp", 1000, 1000, 0.0f, M_PI/4, 0.0f);
+    printf("  - sphere_45y.bmp (45° Y rotation)\n");
+    
+    // 90 degree rotation around Y axis (side view)
+    visualizePointCloud(worldPositions, layerColors, "output/sphere_side.bmp", 1000, 1000, 0.0f, M_PI/2, 0.0f);
+    printf("  - sphere_side.bmp (side view)\n");
+    
+    // 45 degree rotation around X axis (top-down perspective)
+    visualizePointCloud(worldPositions, layerColors, "output/sphere_45x.bmp", 1000, 1000, M_PI/4, 0.0f, 0.0f);
+    printf("  - sphere_45x.bmp (45° X rotation)\n");
+    
+    // Combined rotation (30° X, 30° Y)
+    visualizePointCloud(worldPositions, layerColors, "output/sphere_30x_30y.bmp", 1000, 1000, M_PI/6, M_PI/6, 0.0f);
+    printf("  - sphere_30x_30y.bmp (30° X, 30° Y rotation)\n");
+    
+    // Top view (90° X rotation)
+    visualizePointCloud(worldPositions, layerColors, "output/sphere_top.bmp", 1000, 1000, M_PI/2, 0.0f, 0.0f);
+    printf("  - sphere_top.bmp (top view)\n");
+    
+    printf("\n=== Sphere generated successfully ===\n");
+    printf("Files created in output/ directory:\n");
+    printf("  - sphere_front.bmp     (Front view)\n");
+    printf("  - sphere_45y.bmp       (45° Y rotation)\n");
+    printf("  - sphere_side.bmp      (Side view)\n");
+    printf("  - sphere_45x.bmp       (45° X rotation)\n");
+    printf("  - sphere_30x_30y.bmp   (30° X, 30° Y rotation)\n");
+    printf("  - sphere_top.bmp       (Top view)\n");
     
     return 0;
 }
