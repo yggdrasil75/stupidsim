@@ -196,3 +196,4 @@ point_cloud_rendered.png
 pointcloud_renderer
 stb_image_write.h
 cpp_voxel_render.bmp
+output/

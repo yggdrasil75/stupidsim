@@ -1,9 +1,17 @@
-#include <cstdint>
-#include <string>
 #include <vector>
-#include <iostream>
+#include <cmath>
+#include <limits>
+#include <algorithm>
+#include <unordered_map>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
-#include "vec_math.hpp"
+#include <iostream>
+#include <vector>
+#include <random>
+#include <functional>
+#include <tuple>
+
 
 class BMPWriter {
 private:
