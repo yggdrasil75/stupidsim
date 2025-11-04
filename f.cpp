@@ -235,18 +235,29 @@ public:
 };
 
 
-// Generate sphere using Halton sequence
-std::vector<Vec3> generateSphere(int numPoints, float radius = 1.0f) {
+std::vector<Vec3> generateSphere(int numPoints, float radius = 1.0f, float wiggleAmount = 0.1f) {
     
     printf("Generating sphere with %d points using grid method...\n", numPoints);
+    printf("Wiggle amount: %.3f\n", wiggleAmount);
     
     std::vector<Vec3> points;
+    
+    // Random number generator for wiggling
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
     
     // Calculate grid resolution based on desired number of points
     // For a sphere, we need to account that only about 52% of points in a cube will be inside the sphere
     int gridRes = static_cast<int>(std::cbrt(numPoints / 0.52f)) + 1;
     
     printf("Using grid resolution: %d x %d x %d\n", gridRes, gridRes, gridRes);
+    
+    // Calculate voxel size for wiggling (based on average distance between points)
+    float voxelSize = 2.0f / gridRes;
+    float maxWiggle = wiggleAmount * voxelSize;
+    
+    printf("Voxel size: %.4f, Max wiggle: %.4f\n", voxelSize, maxWiggle);
     
     // Generate points in a cube from -1 to 1 in all dimensions
     for (int x = 0; x < gridRes; ++x) {
@@ -261,7 +272,24 @@ std::vector<Vec3> generateSphere(int numPoints, float radius = 1.0f) {
                 
                 // Check if point is inside the unit sphere
                 if (point.lengthSquared() <= 1.0f) {
-                    points.push_back(point * radius); // Scale by radius
+                    // Apply randomized wiggling
+                    Vec3 wiggle(
+                        dist(gen) * maxWiggle,
+                        dist(gen) * maxWiggle,
+                        dist(gen) * maxWiggle
+                    );
+                    
+                    Vec3 wiggledPoint = point + wiggle;
+                    
+                    // Re-normalize to maintain spherical shape while preserving the wiggle
+                    // This ensures the point stays within the sphere while having natural variation
+                    float currentLength = wiggledPoint.length();
+                    if (currentLength > 1.0f) {
+                        // Scale back to unit sphere surface, but preserve the wiggle direction
+                        wiggledPoint = wiggledPoint * (1.0f / currentLength);
+                    }
+                    
+                    points.push_back(wiggledPoint * radius); // Scale by radius
                 }
             }
         }
@@ -273,16 +301,93 @@ std::vector<Vec3> generateSphere(int numPoints, float radius = 1.0f) {
     if (points.size() > static_cast<size_t>(numPoints)) {
         printf("Sampling down from %zu to %d points...\n", points.size(), numPoints);
         
-        // Create random number generator
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        
         // Shuffle and resize
         std::shuffle(points.begin(), points.end(), gen);
         points.resize(numPoints);
     }
     // If we have too few points, we'll use what we have
     else if (points.size() < static_cast<size_t>(numPoints)) {
+        printf("Warning: Only generated %zu points (requested %d)\n", points.size(), numPoints);
+    }
+    
+    return points;
+}
+
+// Alternative sphere generation with perlin-like noise for more natural wiggling
+std::vector<Vec3> generateSphereWithNaturalWiggle(int numPoints, float radius = 1.0f, float noiseStrength = 0.15f) {
+    
+    printf("Generating sphere with natural wiggling using %d points...\n", numPoints);
+    printf("Noise strength: %.3f\n", noiseStrength);
+    
+    std::vector<Vec3> points;
+    
+    // Random number generators
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    
+    // Calculate grid resolution
+    int gridRes = static_cast<int>(std::cbrt(numPoints / 0.52f)) + 1;
+    printf("Using grid resolution: %d x %d x %d\n", gridRes, gridRes, gridRes);
+    
+    float voxelSize = 2.0f / gridRes;
+    float maxDisplacement = noiseStrength * voxelSize;
+    
+    // Pre-compute some random offsets for pseudo-perlin noise
+    std::vector<float> randomOffsets(gridRes * gridRes * gridRes);
+    for (size_t i = 0; i < randomOffsets.size(); ++i) {
+        randomOffsets[i] = dist(gen);
+    }
+    
+    auto getNoise = [&](int x, int y, int z) -> float {
+        int idx = (x * gridRes * gridRes) + (y * gridRes) + z;
+        return randomOffsets[idx % randomOffsets.size()];
+    };
+    
+    for (int x = 0; x < gridRes; ++x) {
+        for (int y = 0; y < gridRes; ++y) {
+            for (int z = 0; z < gridRes; ++z) {
+                Vec3 point(
+                    (2.0f * x / (gridRes - 1)) - 1.0f,
+                    (2.0f * y / (gridRes - 1)) - 1.0f,
+                    (2.0f * z / (gridRes - 1)) - 1.0f
+                );
+                
+                if (point.lengthSquared() <= 1.0f) {
+                    // Use smoother noise for more natural displacement
+                    float noiseX = getNoise(x, y, z);
+                    float noiseY = getNoise(y, z, x);
+                    float noiseZ = getNoise(z, x, y);
+                    
+                    // Apply displacement that preserves the overall spherical structure
+                    Vec3 displacement(
+                        noiseX * maxDisplacement,
+                        noiseY * maxDisplacement,
+                        noiseZ * maxDisplacement
+                    );
+                    
+                    Vec3 displacedPoint = point + displacement;
+                    
+                    // Ensure we don't push points too far from sphere surface
+                    float currentLength = displacedPoint.length();
+                    if (currentLength > 1.0f) {
+                        displacedPoint = displacedPoint * (0.95f + 0.05f * dist(gen)); // Small random scaling
+                    }
+                    
+                    points.push_back(displacedPoint * radius);
+                }
+            }
+        }
+    }
+    
+    printf("Generated %zu points with natural wiggling\n", points.size());
+    
+    // Sample down if needed
+    if (points.size() > static_cast<size_t>(numPoints)) {
+        printf("Sampling down from %zu to %d points...\n", points.size(), numPoints);
+        std::shuffle(points.begin(), points.end(), gen);
+        points.resize(numPoints);
+    } else if (points.size() < static_cast<size_t>(numPoints)) {
         printf("Warning: Only generated %zu points (requested %d)\n", points.size(), numPoints);
     }
     
@@ -305,65 +410,6 @@ void populateVoxelGridWithLayeredSphere(VoxelGrid& grid, const std::vector<Vec3>
     // Now assign the planetary layers
     grid.assignPlanetaryLayers();
 }
-
-// void visualizeSphere(const std::vector<Vec3>& points, const std::string& filename, 
-//                     const Vec4& color = Vec4(0, 0, 1, 1),
-//                     int width = 800, int height = 600) {
-    
-//     // Create a 2D vector for the image
-//     std::vector<std::vector<Vec3>> image(height, std::vector<Vec3>(width, Vec3(0.2f, 0.2f, 0.2f))); // Dark gray background
-    
-//     if (points.empty()) {
-//         BMPWriter::saveBMP(filename, image);
-//         return;
-//     }
-    
-//     // Find bounds of the projected points
-//     float minX = points[0].x, maxX = points[0].x;
-//     float minY = points[0].y, maxY = points[0].y;
-    
-//     for (const auto& point : points) {
-//         minX = std::min(minX, point.x);
-//         maxX = std::max(maxX, point.x);
-//         minY = std::min(minY, point.y);
-//         maxY = std::max(maxY, point.y);
-//     }
-    
-//     // Calculate scale and offset to fit points in image
-//     float scaleX = (width - 40) / (maxX - minX);
-//     float scaleY = (height - 40) / (maxY - minY);
-//     float scale = std::min(scaleX, scaleY);
-    
-//     float offsetX = 20 - minX * scale;
-//     float offsetY = 20 - minY * scale;
-    
-//     // Convert Vec4 color to Vec3 (RGB)
-//     Vec3 rgbColor(color.r, color.g, color.b);
-    
-//     // Draw points
-//     for (const auto& point : points) {
-//         int screenX = static_cast<int>(point.x * scale + offsetX);
-//         int screenY = static_cast<int>(point.y * scale + offsetY);
-        
-//         if (screenX >= 0 && screenX < width && screenY >= 0 && screenY < height) {
-//             // Draw a 3x3 square for each point
-//             for (int dy = -1; dy <= 1; dy++) {
-//                 for (int dx = -1; dx <= 1; dx++) {
-//                     int px = screenX + dx;
-//                     int py = screenY + dy;
-//                     if (px >= 0 && px < width && py >= 0 && py < height) {
-//                         image[py][px] = rgbColor;
-//                     }
-//                 }
-//             }
-//         }
-//     }
-    
-//     // Save using the independent BMPWriter
-//     BMPWriter::saveBMP(filename, image);
-//     printf("Saved sphere visualization to '%s'\n", filename.c_str());
-// }
-
 
 void visualizePointCloud(const std::vector<Vec3>& points, const std::vector<Vec4>& colors, 
                         const std::string& filename, int width = 1000, int height = 1000) {
@@ -428,7 +474,7 @@ void visualizePointCloud(const std::vector<Vec3>& points, const std::vector<Vec4
 int main() {
     printf("=== Layered Sphere Generation and Visualization ===\n\n");
     
-    const int numPoints = 10000000;
+    const int numPoints = 100000000;
     const float radius = 2.0f;
     
     printf("Generating layered spheres with %d points each, radius %.1f\n\n", numPoints, radius);
@@ -436,10 +482,13 @@ int main() {
     // Create voxel grid
     VoxelGrid grid(Vec3(10, 10, 10), Vec3(0.1f, 0.1f, 0.1f));
     
-    // Generate and visualize Fibonacci sphere with layers
-    printf("1. Generating sphere...\n");
-    auto fibSphere = generateSphere(numPoints, radius);
-    populateVoxelGridWithLayeredSphere(grid, fibSphere);
+    // Generate sphere with different wiggle options:
+    
+    // Option 1: Simple random wiggling (small amount - 10% of voxel size)
+    printf("1. Generating sphere with simple wiggling...\n");
+    auto sphere1 = generateSphereWithNaturalWiggle(numPoints, radius, 0.1f);
+    
+    populateVoxelGridWithLayeredSphere(grid, sphere1);
     
     // Extract positions and colors for visualization
     std::vector<Vec3> occupiedPositions = grid.getOccupiedPositions();
@@ -452,7 +501,7 @@ int main() {
     }
     
     // Create a simple visualization using the layer colors
-    visualizePointCloud(grid.getOccupiedPositions(), grid.getColors(), "output/sphere.bmp",  800, 600);
+    visualizePointCloud(grid.getOccupiedPositions(), grid.getColors(), "output/sphere.bmp",  1000, 1000);
     
     printf("=== sphere generated successfully ===\n");
     printf("Files created:\n");
