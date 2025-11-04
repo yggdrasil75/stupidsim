@@ -78,6 +78,10 @@ public:
     bool operator==(const Vec3& other) const {
         return x == other.x && y == other.y && z == other.z;
     }
+    
+    float lengthSquared() const {
+        return x*x + y*y + z*z;  // Fast - no sqrt
+    }
 };
 
 // Hash function for Vec3 to use in unordered_map
