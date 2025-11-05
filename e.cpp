@@ -589,7 +589,8 @@ std::tuple<std::vector<Vec3>, std::vector<Vec4>> noiseBatch(int num_points, floa
     return std::make_tuple(points, colors);
 }
 
-std::tuple<std::vector<Vec3>, std::vector<Vec4>> genPointCloud(int numP, float scale, int seed) {
+// Generate points in a more spherical distribution
+std::tuple<std::vector<Vec3>, std::vector<Vec4>> genPointCloud(int num_points, float radius, int seed) {
     TIME_FUNCTION;
     int permutation[256];
     for (int i = 0; i < 256; ++i) {
@@ -602,7 +603,45 @@ std::tuple<std::vector<Vec3>, std::vector<Vec4>> genPointCloud(int numP, float s
         p[i] = permutation[i];
         p[i + 256] = permutation[i];
     }
-    return noiseBatch(numP, scale, p);
+    
+    std::vector<Vec3> points;
+    std::vector<Vec4> colors;
+    points.reserve(num_points);
+    colors.reserve(num_points);
+
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    std::uniform_real_distribution<float> radius_dist(0.0f, radius);
+    
+    for (int i = 0; i < num_points; ++i) {
+        // Generate random direction
+        Vec3 direction;
+        do {
+            direction = Vec3(dist(gen), dist(gen), dist(gen));
+        } while (direction.lengthSquared() == 0);
+        direction = direction.normalized();
+        
+        // Generate random radius with some noise
+        float r = radius_dist(gen);
+        
+        Vec3 point = direction * r;
+        
+        // Use noise based on spherical coordinates for more natural distribution
+        float noise = pnoise3d(p, point.x * 0.5f, point.y * 0.5f, point.z * 0.5f);
+        
+        if (noise > 0.1f) {
+            // Color based on position and noise
+            float rt = (point.x / radius + 1.0f) * 0.5f;
+            float gt = (point.y / radius + 1.0f) * 0.5f;
+            float bt = (point.z / radius + 1.0f) * 0.5f;
+            float at = (noise + 1.0f) * 0.5f;
+
+            points.push_back(point);
+            colors.push_back({rt, gt, bt, at});
+        }
+    }
+    return std::make_tuple(points, colors);
 }
 
 // Function to populate voxel grid with point cloud data
@@ -680,39 +719,128 @@ void visualizePointCloud(const std::vector<Vec3>& points, const std::vector<Vec4
     BMPWriter::saveBMP(filename, pixels, width, height);
 }
 
+// Replace your main function with this improved version:
 int main() {
     printf("=== Point Cloud Generation and Visualization ===\n\n");
     
     // Generate point cloud using noise function
     printf("Generating point cloud...\n");
-    auto [points, colors] = genPointCloud(500000, 5.0f, 42);
+    float cloudScale = 5.0f;
+    auto [points, colors] = genPointCloud(500000, cloudScale, 42);
     printf("Generated %zu points\n\n", points.size());
     
-    // Create a voxel grid large enough to contain the point cloud
-    Vec3 gridSize(25, 25, 25); // Adjusted to fit the scaled points
-    Vec3 voxelSize(1, 1, 1);
+    // Calculate actual bounds of the point cloud
+    Vec3 minPoint(std::numeric_limits<float>::max());
+    Vec3 maxPoint(-std::numeric_limits<float>::max());
+    
+    for (const auto& point : points) {
+        minPoint.x = std::min(minPoint.x, point.x);
+        minPoint.y = std::min(minPoint.y, point.y);
+        minPoint.z = std::min(minPoint.z, point.z);
+        maxPoint.x = std::max(maxPoint.x, point.x);
+        maxPoint.y = std::max(maxPoint.y, point.y);
+        maxPoint.z = std::max(maxPoint.z, point.z);
+    }
+    
+    Vec3 cloudCenter = (minPoint + maxPoint) * 0.5f;
+    Vec3 cloudSize = maxPoint - minPoint;
+    
+    printf("Point cloud bounds:\n");
+    printf("  Min: (%.2f, %.2f, %.2f)\n", minPoint.x, minPoint.y, minPoint.z);
+    printf("  Max: (%.2f, %.2f, %.2f)\n", maxPoint.x, maxPoint.y, maxPoint.z);
+    printf("  Center: (%.2f, %.2f, %.2f)\n", cloudCenter.x, cloudCenter.y, cloudCenter.z);
+    printf("  Size: (%.2f, %.2f, %.2f)\n", cloudSize.x, cloudSize.y, cloudSize.z);
+    
+    // Create a voxel grid that properly contains the point cloud
+    // Add some padding around the cloud
+    float padding = 2.0f;
+    Vec3 gridWorldSize = cloudSize + Vec3(padding * 2);
+    Vec3 gridWorldMin = cloudCenter - gridWorldSize * 0.5f;
+    
+    // Use smaller voxels for better resolution
+    Vec3 voxelSize(0.1f, 0.1f, 0.1f);
+    Vec3 gridSize = (gridWorldSize / voxelSize).ceil();
+    
+    printf("\nVoxel grid configuration:\n");
+    printf("  World size: (%.2f, %.2f, %.2f)\n", gridWorldSize.x, gridWorldSize.y, gridWorldSize.z);
+    printf("  Grid dimensions: (%d, %d, %d)\n", (int)gridSize.x, (int)gridSize.y, (int)gridSize.z);
+    printf("  Voxel size: (%.2f, %.2f, %.2f)\n", voxelSize.x, voxelSize.y, voxelSize.z);
+    
     VoxelGrid grid(gridSize, voxelSize);
     
-    // Populate voxel grid with point cloud
-    populateVoxelGridWithPointCloud(grid, points, colors);
+    // Center the point cloud in the voxel grid
+    printf("\nPopulating voxel grid...\n");
+    size_t voxelsAdded = 0;
+    for (size_t i = 0; i < points.size(); i++) {
+        // Use the original point positions - the grid will handle world-to-grid conversion
+        grid.addVoxel(points[i], colors[i]);
+        voxelsAdded++;
+    }
     
-    // Visualize the point cloud
+    printf("Voxel grid populated with %zu voxels (out of %zu points)\n", 
+           grid.getOccupiedPositions().size(), points.size());
+    
+    // Test if the cloud is properly centered by checking voxel distribution
+    auto& occupied = grid.getOccupiedPositions();
+    Vec3 gridMin(std::numeric_limits<float>::max());
+    Vec3 gridMax(-std::numeric_limits<float>::max());
+    
+    for (const auto& pos : occupied) {
+        gridMin.x = std::min(gridMin.x, pos.x);
+        gridMin.y = std::min(gridMin.y, pos.y);
+        gridMin.z = std::min(gridMin.z, pos.z);
+        gridMax.x = std::max(gridMax.x, pos.x);
+        gridMax.y = std::max(gridMax.y, pos.y);
+        gridMax.z = std::max(gridMax.z, pos.z);
+    }
+    
+    printf("\nVoxel distribution in grid:\n");
+    printf("  Grid min: (%.2f, %.2f, %.2f)\n", gridMin.x, gridMin.y, gridMin.z);
+    printf("  Grid max: (%.2f, %.2f, %.2f)\n", gridMax.x, gridMax.y, gridMax.z);
+    printf("  Grid center: (%.2f, %.2f, %.2f)\n", 
+           (gridMin.x + gridMax.x) * 0.5f, 
+           (gridMin.y + gridMax.y) * 0.5f, 
+           (gridMin.z + gridMax.z) * 0.5f);
+    
+    // Visualizations
     printf("\nCreating visualizations...\n");
     visualizePointCloud(points, colors, "point_cloud_visualization.bmp");
     printf("Saved point cloud visualization to 'point_cloud_visualization.bmp'\n");
     
-    // Save multiple slices of the voxel grid
-    for (int z = 0; z < 5; z++) {
-        std::string filename = "voxel_slice_z" + std::to_string(z) + ".bmp";
-        if (BMPWriter::saveVoxelGridSlice(filename, grid, z)) {
+    // Save slices at different heights through the cloud
+    int centerZ = static_cast<int>(gridSize.z * 0.5f);
+    for (int offset = -2; offset <= 2; offset++) {
+        int sliceZ = centerZ + offset;
+        std::string filename = "voxel_slice_z" + std::to_string(offset) + ".bmp";
+        if (BMPWriter::saveVoxelGridSlice(filename, grid, sliceZ)) {
             printf("Saved voxel grid slice to '%s'\n", filename.c_str());
         }
     }
     
-    // Test ray tracing through the point cloud
+    // Test ray tracing through the center of the cloud
     printf("\n=== Ray Tracing Test ===\n");
-    AmanatidesWooAlgorithm::Ray ray(Vec3(-5, -5, -5), Vec3(1, 1, 1).normalized(), 50.0f);
     
+    // Create rays that go through the center of the cloud from different directions
+    std::vector<AmanatidesWooAlgorithm::Ray> testRays = {
+        AmanatidesWooAlgorithm::Ray(cloudCenter - Vec3(10, 0, 0), Vec3(1, 0, 0), 20.0f),  // X direction
+        AmanatidesWooAlgorithm::Ray(cloudCenter - Vec3(0, 10, 0), Vec3(0, 1, 0), 20.0f),  // Y direction  
+        AmanatidesWooAlgorithm::Ray(cloudCenter - Vec3(0, 0, 10), Vec3(0, 0, 1), 20.0f),  // Z direction
+        AmanatidesWooAlgorithm::Ray(cloudCenter - Vec3(8, 8, 0), Vec3(1, 1, 0).normalized(), 20.0f)  // Diagonal
+    };
+    
+    for (size_t i = 0; i < testRays.size(); i++) {
+        std::vector<Vec3> hitVoxels;
+        std::vector<float> hitDistances;
+        
+        bool hit = AmanatidesWooAlgorithm::traverse(testRays[i], grid, hitVoxels, hitDistances);
+        
+        printf("Ray %zu: %s (%zu hits)\n", i, hit ? "HIT" : "MISS", hitVoxels.size());
+        
+        // Save visualization for this ray
+        std::string rayFilename = "ray_trace_" + std::to_string(i) + ".bmp";
+        BMPWriter::saveRayTraceResults(rayFilename, grid, hitVoxels, testRays[i]);
+        printf("  Saved ray trace to '%s'\n", rayFilename.c_str());
+    }
     
     printf("\n=== Statistics ===\n");
     printf("Total points generated: %zu\n", points.size());
